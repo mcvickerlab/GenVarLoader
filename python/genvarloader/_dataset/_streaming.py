@@ -1044,25 +1044,35 @@ class _Svar2Backend:
             "dense_indel": np.asarray(dense_indel, np.int64).reshape(n_reg, 2),
         }
 
-    def generate_batch(
+    def _gather_rows(
         self,
         r_idx: NDArray[np.intp],
         s_idx: NDArray[np.intp],
         window: dict[str, object],
         lo: int,
         hi: int,
-    ) -> Ragged:
-        """Reconstruct C-order (region, sample) rows [lo, hi) of the window. Output is
-        (hi-lo)-bounded (issue #284). Builds the same 7-arg tuple as
-        `_svar2_haps.py:_gather_inputs`, then calls the SVAR2 read-bound FFI.
+    ) -> tuple[
+        NDArray[np.uint32],
+        NDArray[np.int64],
+        NDArray[np.int64],
+        NDArray[np.int64],
+        NDArray[np.int64],
+        NDArray[np.int64],
+        NDArray[np.int32],
+        NDArray[np.int32],
+        NDArray[np.uint8],
+        NDArray[np.int64],
+    ]:
+        """Gather the per-row FFI inputs (C-order (region, sample)) for rows [lo, hi)
+        of the window, mirroring `_svar2_haps.py:_gather_inputs`. Pure extraction of
+        the per-row gather formerly inlined in `generate_batch` -- shared by both the
+        per-batch FFI path (`_reconstruct_batch_reference`) and the super-batch fill
+        (`_fill_super_batch`).
         """
-        from ..genvarloader import reconstruct_haplotypes_from_svar2_readbound
-
         r_idx = np.asarray(r_idx, np.intp)
         n_s = len(np.asarray(s_idx))
         P = self.ploidy
         contig_idx = cast(int, window["contig_idx"])
-        contig = self._contigs[contig_idx]
         ref_, ref_offsets = self._ref._contig_slice(contig_idx)
 
         rows = np.arange(lo, hi)
@@ -1092,6 +1102,107 @@ class _Svar2Backend:
         )
         m = hi - lo
         shifts = np.zeros((m, P), np.int32)  # jitter out of scope (jitter=0)
+        return (
+            region_starts,
+            orig_samples,
+            vk_snp,
+            vk_indel,
+            dense_snp,
+            dense_indel,
+            region_bounds,
+            shifts,
+            ref_,
+            ref_offsets,
+        )
+
+    def _fill_super_batch(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        window: dict[str, object],
+        sb_lo: int,
+        sb_hi: int,
+        buf: object,
+        parallel: bool,
+    ) -> None:
+        """Reconstruct C-order rows [sb_lo, sb_hi) of the window into the recycled
+        `Svar2ReconBuf` (fills, doesn't return): the multi-core super-batch path,
+        drained afterwards via `_drain`."""
+        from ..genvarloader import svar2_reconstruct_super_batch
+
+        (
+            region_starts,
+            orig_samples,
+            vk_snp,
+            vk_indel,
+            dense_snp,
+            dense_indel,
+            region_bounds,
+            shifts,
+            ref_,
+            ref_offsets,
+        ) = self._gather_rows(r_idx, s_idx, window, sb_lo, sb_hi)
+        contig_idx = cast(int, window["contig_idx"])
+        contig = self._contigs[contig_idx]
+        svar2_reconstruct_super_batch(
+            self._store,
+            contig,
+            region_starts,
+            orig_samples,
+            vk_snp,
+            vk_indel,
+            dense_snp,
+            dense_indel,
+            region_bounds,
+            shifts,
+            ref_,
+            ref_offsets,
+            np.uint8(self._ref.pad_char),
+            bool(parallel),
+            buf,
+        )
+
+    def _drain(self, buf: object, lo: int, hi: int) -> Ragged:
+        """Copy out rows [lo, hi) of the current `Svar2ReconBuf` fill as a `Ragged`."""
+        data, offsets = buf.batch(int(lo), int(hi))  # pyright: ignore[reportAttributeAccessIssue]
+        m = hi - lo
+        return Ragged.from_offsets(
+            np.asarray(data).view("S1"),
+            (m, self.ploidy, None),
+            np.asarray(offsets, np.int64),
+        )
+
+    def _reconstruct_batch_reference(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        window: dict[str, object],
+        lo: int,
+        hi: int,
+    ) -> Ragged:
+        """TEMPORARY parity reference (Phase-2 PR 2): the *old* `generate_batch` body,
+        kept unchanged so the super-batch fill+drain path can be checked byte-identical
+        against it. Task 3 removes this once the sync/async drive is switched over to
+        `_fill_super_batch`/`_drain`.
+        """
+        from ..genvarloader import reconstruct_haplotypes_from_svar2_readbound
+
+        P = self.ploidy
+        (
+            region_starts,
+            orig_samples,
+            vk_snp,
+            vk_indel,
+            dense_snp,
+            dense_indel,
+            region_bounds,
+            shifts,
+            ref_,
+            ref_offsets,
+        ) = self._gather_rows(r_idx, s_idx, window, lo, hi)
+        contig_idx = cast(int, window["contig_idx"])
+        contig = self._contigs[contig_idx]
+        m = hi - lo
 
         data, offsets = reconstruct_haplotypes_from_svar2_readbound(
             self._store,
@@ -1118,3 +1229,17 @@ class _Svar2Backend:
         return Ragged.from_offsets(
             np.asarray(data).view("S1"), (m, P, None), np.asarray(offsets, np.int64)
         )
+
+    def generate_batch(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        window: dict[str, object],
+        lo: int,
+        hi: int,
+    ) -> Ragged:
+        """Reconstruct C-order (region, sample) rows [lo, hi) of the window. Output is
+        (hi-lo)-bounded (issue #284). Builds the same 7-arg tuple as
+        `_svar2_haps.py:_gather_inputs`, then calls the SVAR2 read-bound FFI.
+        """
+        return self._reconstruct_batch_reference(r_idx, s_idx, window, lo, hi)

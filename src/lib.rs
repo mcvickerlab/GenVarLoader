@@ -23,6 +23,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bigwig_write_track, m)?)?;
     m.add_class::<tables::RustTable>()?;
     m.add_class::<svar2::store::Svar2Store>()?;
+    m.add_class::<svar2::store::Svar2ReconBuf>()?;
     m.add_class::<svar1::store::Svar1Store>()?;
     m.add_class::<ffi::stream_engine::Svar1StreamEngine>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
@@ -52,6 +53,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::svar1_read_window, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar1_generate_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar2_read_window, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::svar2_reconstruct_super_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar1_prefetch_runs, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar1_csr_entries_touched, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
