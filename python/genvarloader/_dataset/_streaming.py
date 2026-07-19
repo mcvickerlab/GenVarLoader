@@ -949,11 +949,12 @@ class _Svar1Backend:
 
 class _Svar2Backend:
     """StreamingDataset backend for .svar2 stores. Mirrors _Svar1Backend, but per-
-    window variant ranges are computed LIVE via SparseVar2._find_ranges (the same
-    Rust-backed query gvl.write uses at write time, `_write.py:_write_from_svar2`)
-    instead of slicing an on-disk `_Svar2Cache`; the ranges feed the existing SVAR2
-    read-bound FFI (`reconstruct_haplotypes_from_svar2_readbound`). Phase 1:
-    synchronous only ("sync" `_iter_batches` strategy -- no engine, no readahead).
+    window variant ranges are computed LIVE via the GIL-free Rust `svar2_read_window`
+    (genoray_core::query::find_ranges, the same query gvl.write uses at write time,
+    `_write.py:_write_from_svar2`) instead of slicing an on-disk `_Svar2Cache`; the
+    ranges feed the existing SVAR2 read-bound FFI
+    (`reconstruct_haplotypes_from_svar2_readbound`). Phase 1: synchronous only
+    ("sync" `_iter_batches` strategy -- no engine, no readahead).
     """
 
     _default_strategy = "sync"
@@ -976,6 +977,13 @@ class _Svar2Backend:
         # name in sorted order" -- not the store's native (VCF column) order.
         native = list(self._sv.available_samples)
         self._sample_names = sorted(native)
+        # Public sorted-name position -> physical store (VCF) column. genoray's Rust
+        # find_ranges takes physical usize indices (the Python _find_ranges resolved
+        # names internally); we translate here so the Rust read_window gets columns.
+        _col_of = {name: i for i, name in enumerate(native)}
+        self._phys_sample_idx = np.array(
+            [_col_of[n] for n in self._sample_names], dtype=np.int64
+        )
         self.n_samples = len(self._sample_names)
         self.ploidy = int(self._sv.ploidy)
         # Resident window buffer holds vk_snp_range + vk_indel_range (i64 pairs) per
@@ -1008,42 +1016,32 @@ class _Svar2Backend:
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
     ) -> dict[str, object]:
-        """Compute the window's live ranges via a single (region x sample) cartesian
-        `SparseVar2._find_ranges` call, reshaped exactly as `_write.py:1214-1220`
-        does at write time (`vk_*_range` row-major -> `(n_reg, n_s, P, 2)`;
-        `dense_*_range` -> `(n_reg, 2)`).
-
-        `_find_ranges`'s `samples=` selects (and reorders) by SAMPLE NAME, not by
-        physical/original column index (see `genoray/_svar2_batch.py:_sample_idxs`
-        and `_write.py:1214`'s own `samples=samples` call, which passes names too)
-        -- so this passes `self._sample_names[i]` for each `i` in `s_idx`, not the
-        physical index directly.
+        """Compute the window's live ranges via the GIL-free Rust `svar2_read_window`
+        (genoray_core::query::find_ranges), replacing the Python SparseVar2._find_ranges
+        call + numpy glue. `s_idx` (public sorted-name order) is translated to physical
+        store columns via `_phys_sample_idx` before crossing into Rust.
         """
+        from ..genvarloader import svar2_read_window
+
         r_idx = np.asarray(r_idx, np.intp)
         s_idx = np.asarray(s_idx, np.intp)
         contig_idx, contig = self._contig_of(r_idx)
         rb = self._regions[r_idx, 1:3]  # (n_reg, 2) int
-        starts = np.ascontiguousarray(rb[:, 0])
-        ends = np.ascontiguousarray(rb[:, 1])
-        names = [self._sample_names[i] for i in s_idx]
-        d = self._sv._find_ranges(contig, starts, ends, samples=names)
+        starts = np.ascontiguousarray(rb[:, 0], np.uint32)
+        ends = np.ascontiguousarray(rb[:, 1], np.uint32)
+        phys = np.ascontiguousarray(self._phys_sample_idx[s_idx], np.int64)
         n_reg, n_s, P = len(r_idx), len(s_idx), self.ploidy
+        vk_snp, vk_indel, dense_snp, dense_indel, sample_cols = svar2_read_window(
+            self._store, contig, starts, ends, phys
+        )
         return {
             "contig_idx": contig_idx,
             "region_bounds": np.ascontiguousarray(rb, np.int32),  # (n_reg, 2)
-            # Physical store column per selected sample, in `s_idx` order -- the
-            # bundle's own `sample_cols` (not a separately-derived index map), so
-            # this is authoritative for whatever column `_find_ranges` actually
-            # queried.
-            "orig_samples": np.ascontiguousarray(d["sample_cols"], np.int64),  # (n_s,)
-            "vk_snp": np.asarray(d["vk_snp_range"], np.int64).reshape(n_reg, n_s, P, 2),
-            "vk_indel": np.asarray(d["vk_indel_range"], np.int64).reshape(
-                n_reg, n_s, P, 2
-            ),
-            "dense_snp": np.asarray(d["dense_snp_range"], np.int64).reshape(n_reg, 2),
-            "dense_indel": np.asarray(d["dense_indel_range"], np.int64).reshape(
-                n_reg, 2
-            ),
+            "orig_samples": np.asarray(sample_cols, np.int64),  # (n_s,)
+            "vk_snp": np.asarray(vk_snp, np.int64).reshape(n_reg, n_s, P, 2),
+            "vk_indel": np.asarray(vk_indel, np.int64).reshape(n_reg, n_s, P, 2),
+            "dense_snp": np.asarray(dense_snp, np.int64).reshape(n_reg, 2),
+            "dense_indel": np.asarray(dense_indel, np.int64).reshape(n_reg, 2),
         }
 
     def generate_batch(
@@ -1110,7 +1108,11 @@ class _Svar2Backend:
             ref_offsets,
             np.uint8(self._ref.pad_char),
             np.int64(-1),  # ragged output (no fixed output_length)
-            True,  # parallel
+            False,  # parallel: streaming per-batch reconstruct is tiny (~batch_size*ploidy
+            #        haplotypes); the 96-thread rayon fork/join costs more than it saves
+            #        here (measured 1.2-1.8x faster serial). The written-Dataset path
+            #        (_svar2_haps.py) instead gates on should_parallelize(), which
+            #        parallelizes for its typically-large getitem chunks.
             False,  # filter_exonic (splicing out of scope)
         )
         return Ragged.from_offsets(
