@@ -10,6 +10,7 @@ use std::ops::Range;
 use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, VariantBufs};
 
 pub(crate) mod stream_engine;
+pub(crate) mod svar2_stream_engine;
 
 use crate::genotypes;
 use crate::intervals;
@@ -1574,6 +1575,92 @@ pub fn svar2_reconstruct_super_batch<'py>(
     });
     buf.set(data, offsets, n_q);
     Ok(())
+}
+
+/// Thin GIL-holding wrapper around the GIL-free [`crate::svar2::window`] core
+/// (`Svar2WindowRanges::compute` -> [`crate::svar2::window::fill_super_batch_rs`]):
+/// runs the whole find_ranges -> gather -> reconstruct chain for window rows
+/// `[sb_lo, sb_hi)` in one call, returning a freshly allocated `(data, offsets)`
+/// pair instead of filling a recycled [`crate::svar2::store::Svar2ReconBuf`].
+///
+/// This exists to prove byte-identity against the existing "sync" fill+drain path
+/// (`svar2_read_window` + `svar2_reconstruct_super_batch`) before the streaming
+/// engine's producer thread is built (PR-3 Task 2) -- the producer thread has no
+/// GIL to hold, so it calls `fill_super_batch_rs` directly; this pyfunction is the
+/// parity harness, not the production call site.
+///
+/// `region_bounds` is the window's per-region `(start, end)` i32 pairs `(n_reg, 2)`.
+/// `ref_offsets` is accepted for signature symmetry with the sync path but unused --
+/// the ref slice the caller passes is always a single contiguous contig
+/// (`ref_offsets = [0, len]`), same convention `reconstruct_haplotypes_from_svar2_readbound`
+/// documents for `ref_`.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+pub fn svar2_fill_super_batch<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    starts: PyReadonlyArray1<u32>,
+    ends: PyReadonlyArray1<u32>,
+    sample_idx: PyReadonlyArray1<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    sb_lo: usize,
+    sb_hi: usize,
+    parallel: bool,
+) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
+    let starts_v: Vec<u32> = starts.as_slice()?.to_vec();
+    let ends_v: Vec<u32> = ends.as_slice()?.to_vec();
+    let regions_v: Vec<(u32, u32)> = starts_v
+        .iter()
+        .zip(&ends_v)
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    let samples_v: Vec<usize> = sample_idx
+        .as_slice()?
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let rbnd = region_bounds.as_array();
+    let region_bnd_v: Vec<(i32, i32)> = (0..rbnd.nrows())
+        .map(|i| (rbnd[[i, 0]], rbnd[[i, 1]]))
+        .collect();
+    // See `reconstruct_haplotypes_from_svar2_readbound` for why `ref_` (but not
+    // `ref_offsets`) needs to be contiguous; `as_slice()` already enforces it.
+    let ref_v: Vec<u8> = ref_.as_slice()?.to_vec();
+    let _ = ref_offsets; // ref slice is a single contiguous contig; offsets are [0, len]
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+    let ploidy = reader.ploidy();
+
+    let (data, offsets) = py.detach(move || -> (Vec<u8>, Vec<i64>) {
+        let ranges = crate::svar2::window::Svar2WindowRanges::compute(
+            reader,
+            &regions_v,
+            &samples_v,
+            ploidy,
+        );
+        let mut out_data = Vec::new();
+        let mut out_offsets = Vec::new();
+        crate::svar2::window::fill_super_batch_rs(
+            reader,
+            &ranges,
+            &region_bnd_v,
+            &ref_v,
+            pad_char,
+            sb_lo,
+            sb_hi,
+            parallel,
+            &mut out_data,
+            &mut out_offsets,
+        );
+        (out_data, out_offsets)
+    });
+    Ok((data.into_pyarray(py), offsets.into_pyarray(py)))
 }
 
 /// Scatter-write variant of [`reconstruct_haplotypes_from_svar2_readbound`]: writes

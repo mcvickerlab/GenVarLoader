@@ -15,6 +15,31 @@ pub struct Svar2Store {
 }
 
 impl Svar2Store {
+    /// Opens one query-only `ContigReader` per contig under `store_path`. Rust-side
+    /// constructor (the `#[pymethods]` `new` below delegates here) so callers that build
+    /// their OWN store instance without going through Python's `__new__` -- the streaming
+    /// engine (`Svar2StreamEngine::ensure_started`'s producer opens its own `Arc<Svar2Store>`,
+    /// same convention as `Svar1Store::open_meta`) and Rust unit tests -- have a `pub`
+    /// entry point.
+    pub fn open(
+        store_path: &str,
+        contigs: Vec<String>,
+        n_samples: usize,
+        ploidy: usize,
+    ) -> PyResult<Self> {
+        let mut readers = HashMap::with_capacity(contigs.len());
+        for c in contigs {
+            let r = ContigReader::open(store_path, &c, n_samples, ploidy)
+                .map_err(|e| PyIOError::new_err(format!("open contig {c}: {e}")))?;
+            readers.insert(c, r);
+        }
+        let store_path = store_path.to_string();
+        Ok(Self {
+            readers,
+            store_path,
+        })
+    }
+
     /// Returns the cached `ContigReader` for `contig`, if one was opened.
     pub fn reader(&self, contig: &str) -> Option<&ContigReader> {
         self.readers.get(contig)
@@ -35,17 +60,7 @@ impl Svar2Store {
         n_samples: usize,
         ploidy: usize,
     ) -> PyResult<Self> {
-        let mut readers = HashMap::with_capacity(contigs.len());
-        for c in contigs {
-            let r = ContigReader::open(store_path, &c, n_samples, ploidy)
-                .map_err(|e| PyIOError::new_err(format!("open contig {c}: {e}")))?;
-            readers.insert(c, r);
-        }
-        let store_path = store_path.to_string();
-        Ok(Self {
-            readers,
-            store_path,
-        })
+        Self::open(store_path, contigs, n_samples, ploidy)
     }
 
     /// Returns the sorted list of contigs with an opened reader.

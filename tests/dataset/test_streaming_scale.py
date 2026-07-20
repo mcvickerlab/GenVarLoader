@@ -496,6 +496,123 @@ def test_svar2_super_batch_buffer_is_flat_in_cohort_size(tmp_path):
     )
 
 
+def test_svar2_engine_output_is_flat_in_cohort_size(tmp_path):
+    """PR-3 Task 4: the SVAR2 #284 cohort-independence gate driven end-to-end through
+    the `"svar2_engine"` pipeline-engine strategy, not the "sync" super-batch path the
+    two tests above exercise. Same invariant, same builder pattern (clone of
+    `test_svar2_super_batch_buffer_is_flat_in_cohort_size`'s fixture-building above):
+    at a fixed `batch_size`, the PEAK per-batch drained output byte count is IDENTICAL
+    between a 50- and a 400-sample cohort, while the plan still covers every sample
+    (`base.n_samples == n_samples`). A whole-window/whole-cohort regression under the
+    engine (e.g. the producer materializing per-cohort-scale metadata, or draining
+    more than `batch_size` rows per yielded batch) would scale a single batch's output
+    with the cohort size, even though every batch still carries only `batch_size` rows.
+
+    NOTE 1: the PR-3 task brief names a `svar2_scale_fixture_factory` fixture that does
+    not exist in this test module -- the real SVAR2 scale tests above build their own
+    stores inline via `tmp_path`. This test mirrors THEIR builder instead.
+
+    NOTE 2: the brief's own example code SUMS `data.data.nbytes` across every batch
+    `to_iter` yields for the whole sweep. That sum is NOT cohort-independent by
+    construction -- a 400-sample cohort has 8x as many (region, sample) cells as a
+    50-sample one (same 4-region bed), so it always yields 8x as many batches and the
+    running total scales with the cohort regardless of whether the engine is correct.
+    Measured once as written it failed with exactly that 8x ratio (50->40000B,
+    400->320000B), confirming the test as specified could never pass and was not
+    exercising #284 at all. #284 is about PEAK per-batch/per-super-batch allocation,
+    not total bytes moved over a full epoch, so this test takes the MAX single-batch
+    byte count across the sweep instead of the sum -- consistent with the two
+    sync-path scale tests above, which also measure one representative call's output,
+    never an accumulated total.
+    """
+    import subprocess
+
+    import numpy as np
+    import polars as pl
+    from genoray import SparseVar2
+
+    def build(n_samples: int):
+        d = tmp_path / f"eng_n{n_samples}"
+        d.mkdir()
+        ref = d / "ref.fa"
+        rng = np.random.default_rng(1)
+        seq = "".join(rng.choice(list("ACGT"), 4000))
+        ref.write_text(f">chr1\n{seq}\n")
+        subprocess.run(["samtools", "faidx", str(ref)], check=True)
+        vcf = d / "in.vcf"
+        lines = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=4000>",
+            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+            + "\t".join(f"S{i}" for i in range(n_samples)),
+        ]
+        pos = np.sort(rng.choice(np.arange(2, 3998), 200, replace=False))
+        for p in pos:
+            # SNP-only: haplotype length == region length regardless of genotype, so
+            # drained output bytes are deterministic across cohorts of different size.
+            gts = "\t".join(
+                f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(n_samples)
+            )
+            lines.append(f"chr1\t{p}\t.\tA\tG\t.\t.\t.\tGT\t{gts}")
+        vcf.write_text("\n".join(lines) + "\n")
+        bcf = d / "in.bcf"
+        subprocess.run(
+            ["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True
+        )
+        subprocess.run(["bcftools", "index", str(bcf)], check=True)
+        svar2 = d / "store.svar2"
+        SparseVar2.from_vcf(
+            svar2, bcf, no_reference=True, skip_out_of_scope=True, overwrite=True
+        )
+        return svar2, ref
+
+    def _with_strategy(sds, strategy):
+        """Test-only seam (PR-3 Task 3, duplicated here per the prior reviewer's
+        note that a third copy in a third test module is acceptable): force a
+        `_prefetch_strategy` on a clone of an already-constructed StreamingDataset."""
+        import copy
+
+        clone = copy.copy(sds)
+        object.__setattr__(clone, "_prefetch_strategy", strategy)
+        return clone
+
+    def one(n_samples: int) -> tuple[int, int]:
+        svar2, ref = build(n_samples)
+        bed = pl.DataFrame(
+            {
+                "chrom": ["chr1"] * 4,
+                "chromStart": [0, 100, 200, 300],
+                "chromEnd": [100, 200, 300, 400],
+            }
+        )
+        base = gvl.StreamingDataset(
+            bed, reference=ref, variants=svar2, max_mem="64MB"
+        ).with_seqs("haplotypes")
+        sds = _with_strategy(base, "svar2_engine")
+        max_bytes = 0
+        for data, _r, _s in sds.to_iter(batch_size=4, return_indices=True):
+            max_bytes = max(max_bytes, int(np.asarray(data.data).nbytes))
+        return max_bytes, base.n_samples
+
+    small, n_small = one(50)
+    large, n_large = one(400)
+    print(
+        f"[svar2 engine output-gate] n=50 peak_bytes={small} n=400 peak_bytes={large}"
+    )
+
+    assert n_small == 50 and n_large == 400, (
+        "plan did not cover the whole cohort at one or both sizes -- test no longer "
+        "proves what it claims"
+    )
+    assert small > 0, "counter is not wired (engine drained no output)"
+    assert small == large, (
+        f"engine peak per-batch output scaled with cohort size (50->{small}B, "
+        f"400->{large}B) -- cohort-scale residency has returned under the "
+        "svar2_engine strategy (#284)"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
