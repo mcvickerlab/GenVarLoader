@@ -13,6 +13,7 @@ from genoray._contigs import ContigNormalizer
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from .._torch import requires_torch
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import bed_to_regions
@@ -125,6 +126,17 @@ class StreamingDataset:
     # (`benchmarking/streaming/cold_cache_overlap.py`); it will be removed once a winner
     # is chosen (see docs/roadmaps/streaming-dataset.md).
     _prefetch_strategy: str = "engine"
+    # --- Wave A (#277) output-mode config; defaults preserve pre-Wave-A behavior ---
+    # Sequence output kind: RaggedSeqs (haplotypes) | RaggedAnnotatedHaps (annotated).
+    _seq_kind: type = RaggedSeqs
+    # Output length: "ragged" (per-hap actual length) or a fixed int >= 1.
+    _output_length: "int | str" = "ragged"
+    # Read-time jitter (0 = deterministic, byte-parity gate).
+    _jitter: int = 0
+    # rng seed/Generator for jitter + fixed-length shifts (matches Dataset.with_settings).
+    _rng: "int | np.random.Generator | None" = None
+    # Deterministic: disables random within-window shifts for fixed-length output.
+    _deterministic: bool = True
 
     def __init__(
         self,
@@ -247,6 +259,21 @@ class StreamingDataset:
         # See the field's comment: internal/experimental, flipped only by the
         # cold-cache A-vs-C harness via `object.__setattr__`.
         object.__setattr__(self, "_prefetch_strategy", "engine")
+        # Wave A (#277) output-mode fields: `slots=True` + a custom `__init__` means
+        # the dataclass-generated defaults are never auto-applied (there's no class
+        # attribute to fall back on at runtime), so every construction path -- public
+        # and injected -- must set them explicitly here. Task 1 defaults exactly
+        # preserve pre-Wave-A output; `jitter` is still gated by the guard above.
+        for _name in (
+            "_seq_kind",
+            "_output_length",
+            "_jitter",
+            "_rng",
+            "_deterministic",
+        ):
+            object.__setattr__(
+                self, _name, type(self).__dataclass_fields__[_name].default
+            )
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -490,17 +517,64 @@ class StreamingDataset:
             for lo in range(0, n_rows, batch_size):
                 yield min(lo + batch_size, n_rows) - lo
 
-    def with_seqs(self, kind: Literal["haplotypes"]) -> "StreamingDataset":
-        """Select the sequence output kind. Only ``"haplotypes"`` is supported
-        in this plan; reference, annotated, and variants output are later
-        plans."""
-        if kind != "haplotypes":
+    def with_seqs(self, kind: Literal["haplotypes", "annotated"]) -> "StreamingDataset":
+        """Select the sequence output kind. ``"haplotypes"`` (default) or
+        ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
+        variant indices and reference coordinates). ``"variants"`` /
+        ``"variant-windows"`` / ``"reference"`` are Wave B / later plans."""
+        kind_map = {"haplotypes": RaggedSeqs, "annotated": RaggedAnnotatedHaps}
+        if kind not in kind_map:
             raise NotImplementedError(
-                f"StreamingDataset.with_seqs({kind!r}) is not implemented yet; "
-                'only "haplotypes" is supported in this plan. Reference, '
-                "annotated, and variants output are later plans."
+                f"StreamingDataset.with_seqs({kind!r}) is not implemented; "
+                'only "haplotypes" and "annotated" are supported in Wave A. '
+                '"variants"/"variant-windows" are Wave B (#304); "reference" is later.'
             )
-        return copy.copy(self)
+        out = copy.copy(self)
+        object.__setattr__(out, "_seq_kind", kind_map[kind])
+        return out
+
+    def with_len(self, length: "int | Literal['ragged']") -> "StreamingDataset":
+        """Set haplotype/annotated output length. ``"ragged"`` (default) yields
+        per-hap actual length; a fixed ``int >= 1`` yields exactly that many bases
+        per hap. Unlike :meth:`Dataset.with_len`, ``"variable"`` is not accepted:
+        :meth:`to_iter` always yields ``Ragged`` (there is no ArrayDataset analog),
+        so pad the ragged output yourself for a dense array."""
+        if length == "variable":
+            raise NotImplementedError(
+                'StreamingDataset.with_len("variable") is not supported; to_iter '
+                'always yields Ragged. Use with_len(int) or with_len("ragged").'
+            )
+        if length != "ragged":
+            if not isinstance(length, (int, np.integer)) or int(length) < 1:
+                raise ValueError(
+                    f"with_len(length) must be a positive int or 'ragged', got {length!r}."
+                )
+            length = int(length)
+        out = copy.copy(self)
+        object.__setattr__(out, "_output_length", length)
+        return out
+
+    def with_settings(
+        self,
+        *,
+        jitter: "int | None" = None,
+        rng: "int | np.random.Generator | None" = None,
+        deterministic: "bool | None" = None,
+    ) -> "StreamingDataset":
+        """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
+        relevant subset of :meth:`Dataset.with_settings` (same parameter names).
+        ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
+        with a written ``Dataset`` (see :meth:`to_iter`)."""
+        out = copy.copy(self)
+        if jitter is not None:
+            if jitter < 0:
+                raise ValueError(f"jitter must be non-negative, got {jitter}.")
+            object.__setattr__(out, "_jitter", int(jitter))
+        if rng is not None:
+            object.__setattr__(out, "_rng", rng)
+        if deterministic is not None:
+            object.__setattr__(out, "_deterministic", bool(deterministic))
+        return out
 
     def __getitem__(self, idx) -> None:
         raise TypeError(
