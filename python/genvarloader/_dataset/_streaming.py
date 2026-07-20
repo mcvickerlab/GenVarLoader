@@ -1430,11 +1430,19 @@ class _PgenBackend:
         `vcf_path` naming (here it's the resolved `.pgen` path). `output_length`
         is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A `with_len`).
         `annotated` (issue #277 Wave A Task 4) selects whether the engine
-        computes `annot_v_idxs`/`annot_ref_pos`; `PgenWindowFiller` maps
-        window-local variant ids to dataset-global ones via the pre-scanned
-        `.pvar` per-contig position table's `var_start` (see `pgen.rs`'s
-        `WindowFiller::fill`) -- exact for every window, unlike VCF's `var_base
-        = 0` approximation (see `_VcfBackend.build_engine`'s doc comment).
+        computes `annot_v_idxs`/`annot_ref_pos`; `PgenWindowFiller` uses the
+        SAME `var_base = 0` default as `_VcfBackend` (see its doc comment
+        above) -- an earlier version of this filler set `var_base` from the
+        pre-scanned `.pvar` per-contig position table's `var_start`, but that
+        value is the PADDED search lower bound, not necessarily the global id
+        of the first variant the window actually keeps (genoray's precise
+        extent-overlap filter can skip leading padded-in candidates), so it
+        silently undercounted `annot_v_idxs` for narrowed windows. `var_base
+        = 0` is exact for every window that starts at a contig's first KEPT
+        variant (whole-contig / from-contig-start regions -- every current
+        fixture) but a KNOWN GAP for a narrowed/partial-prefix or multi-contig
+        window, same limitation as VCF (see `pgen.rs`'s `PgenWindowFiller::fill`
+        doc comment and GitHub issue #305, which now covers PGEN as well as VCF).
         """
         from ..genvarloader import RecordStreamEngine
 

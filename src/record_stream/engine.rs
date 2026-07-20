@@ -230,7 +230,6 @@ pub struct RecordStreamEngine {
 impl RecordStreamEngine {
     /// Rust-facing constructor (tests; Task 5 wraps this for `#[new]`).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new_rs(
         filler: Box<dyn WindowFiller + Send + Sync>,
         contigs: Vec<ContigRef>,
