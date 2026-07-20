@@ -1144,8 +1144,8 @@ pub(crate) fn generate_batch_core(
 /// pass `None`). Remapping through a `-1` entry would silently turn a real annotated
 /// variant into the no-variant sentinel, which is a worse regression than leaving the
 /// window-local id as a best-effort passthrough (byte-identical to the pre-gather
-/// `var_base=0` no-op for VCF's currently-tested whole-contig fixtures) — so an
-/// unknown global id is skipped, not gathered.
+/// scalar-offset no-op, the retired `var_base=0`, for VCF's currently-tested
+/// whole-contig fixtures) — so an unknown global id is skipped, not gathered.
 pub(crate) fn remap_annot_local_to_global(
     annot_v: &mut ndarray::Array1<i32>,
     global_v_idxs: ndarray::ArrayView1<i32>,
@@ -3140,6 +3140,16 @@ mod tests {
         let gmap = ndarray::Array1::from(vec![0i32, 2]);
         crate::ffi::remap_annot_local_to_global(&mut annot, gmap.view());
         assert_eq!(annot.to_vec(), vec![0, 2, -1, 0]);
+    }
+
+    #[test]
+    fn remap_annot_local_to_global_leaves_local_when_global_unknown() {
+        // global map all -1 (VCF's genoray default until Phase 3): every real
+        // local annot id must be LEFT AS-IS (not corrupted to -1), sentinel preserved.
+        let mut annot = ndarray::Array1::from(vec![0i32, 1, -1]);
+        let gmap = ndarray::Array1::from(vec![-1i32, -1]);
+        crate::ffi::remap_annot_local_to_global(&mut annot, gmap.view());
+        assert_eq!(annot.to_vec(), vec![0, 1, -1]);
     }
 
     // ── guard tests — check_disjoint_bounds_within (Finding 1, PR #273 review) ──

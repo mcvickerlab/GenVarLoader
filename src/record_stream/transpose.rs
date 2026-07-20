@@ -34,19 +34,13 @@ pub struct DecodedWindow {
     pub alt_offsets: Vec<i64>,
     pub geno_v_idxs: Vec<i32>,
     pub geno_offsets: Vec<i64>,
-    /// Dataset-GLOBAL variant index of this window's local column 0 — i.e. the value
-    /// to add to a window-local `geno_v_idxs` entry to recover its global id (issue
-    /// #277 Wave A Task 4, annotated output). `fill_decoded_window` never sets this
-    /// (it only fills the static/CSR tables); each `WindowFiller::fill` MUST set it
-    /// explicitly every call (this struct's slot is RECYCLED between windows by the
-    /// producer/consumer engine, not re-`Default`-ed, so a filler that forgets would
-    /// leak the previous window's stale value). See `pgen.rs`'s and `vcf.rs`'s
-    /// `WindowFiller::fill` for the two current settings.
-    pub var_base: i64,
     /// Per-variant dataset-global id, parallel to `v_starts` (i.e. `global_v_idxs[i]`
     /// is the global id of the variant at window-local column `i`). Copied verbatim
-    /// from `chunk.global_idx` by `fill_decoded_window`; consumed by a later task
-    /// (issue #305) to remap annotation ids. Not yet read by any consumer.
+    /// from `chunk.global_idx` by `fill_decoded_window` (every call, including the
+    /// empty-window path, so this recycled slot never leaks a stale value). Consumed
+    /// by `generate_batch_core` (via `RecordBackend::generate`), which gathers each
+    /// window-local annotation id through this array to its dataset-global id — see
+    /// [`crate::ffi::remap_annot_local_to_global`].
     pub global_v_idxs: Vec<i32>,
 }
 

@@ -1,11 +1,13 @@
 """Task 4 (issue #277, Wave A): annotated output (``AnnotatedHaps``) must be
 byte-identical to the written oracle for all three streaming backends
 (SVAR1, VCF, PGEN) at jitter=0, including the emitted ``var_idxs`` -- which
-must be dataset-GLOBAL variant ids (see the streaming engines' ``var_base``
-plumbing: SVAR1 for free, PGEN via the ``.pvar`` per-contig pre-scan, VCF via
-``var_base=0`` -- exact for these single-contig/whole-contig fixtures, see
-``_VcfBackend.build_engine``'s doc comment and GitHub issue #305 for the
-documented multi-contig gap).
+must be dataset-GLOBAL variant ids (see the streaming engines' per-variant
+global-id gather: genoray's ``DenseChunk.global_idx`` is copied verbatim into
+``DecodedWindow.global_v_idxs`` by ``fill_decoded_window``, then gathered by
+``generate_batch_core`` -- SVAR1 for free (already global), PGEN via the
+``.pvar`` row index (correct, issue #305 Phase 2), VCF still window-local
+until Phase 3 -- see ``_VcfBackend.build_engine``'s doc comment and GitHub
+issue #305 for the documented gap).
 
 ``streaming_case`` (``tests/dataset/conftest.py``) supplies
 ``(regions, reference, variants, written)``; ``written`` is a plain

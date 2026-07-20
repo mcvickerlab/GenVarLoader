@@ -150,24 +150,12 @@ impl WindowFiller for VcfWindowFiller {
         let sample_indices = self.sample_indices[job.s_lo..job.s_hi].to_vec();
         let n_local_samples = sample_indices.len();
 
-        // `var_base` (issue #277 Wave A Task 4, annotated output): the dataset-GLOBAL
-        // variant-id base for this window's local column 0. Unlike `PgenWindowFiller`
-        // (which pre-scans the `.pvar` into a per-contig position table and can derive
-        // this cheaply, see `pgen.rs`), `VcfWindowFiller` has no per-contig variant
-        // count/position index — genoray's `VcfRecordSource` does not expose one
-        // (checked: no cheap `contig_ranges`-equivalent). Hard-coding `var_base = 0`
-        // is CORRECT for every Wave A / current fixture (all single-contig, each
-        // window's region starts at that contig's first variant — i.e. global variant
-        // 0), but is a KNOWN GAP for a window that does not start at global variant 0
-        // (multi-contig cohorts, or a region not covering a contig's first variant):
-        // the emitted `annot_v_idxs` would be window-local, not global, in that case.
-        // Tracked as a follow-up (`streaming: VCF annotated var_idxs need a
-        // per-contig variant-count table`, GitHub issue TBD) rather than silently
-        // shipping wrong ids for an untested config; every TESTED VCF annotated
-        // config (Task 4 + Task 5 same-POS fixtures) is single-contig/whole-contig,
-        // so `var_base = 0` is exact there. Must be set on every call — see the
-        // `DecodedWindow::var_base` doc comment on why (recycled slot).
-        slot.var_base = 0;
+        // Window-local -> dataset-global annotation-id remap is now per-variant via
+        // `slot.global_v_idxs`, filled below by `fill_decoded_window` from genoray's
+        // `DenseChunk.global_idx` (not a scalar base added to a local index). VCF's
+        // genoray ids are hard-coded `-1` until Phase 3 (issue #305 follow-on), so
+        // `remap_annot_local_to_global` skips them and emits window-local ids — the
+        // known VCF gap; see that function's doc comment in `src/ffi/mod.rs`.
 
         let source = VcfRecordSource::with_sample_indices(
             &self.vcf_path,

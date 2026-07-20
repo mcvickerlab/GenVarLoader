@@ -1042,8 +1042,9 @@ class _Svar1Backend:
         Wave A `with_len`); forwarded straight to the engine constructor's trailing
         `output_length` parameter. `annotated` (issue #277 Wave A Task 4) selects
         whether the engine computes `annot_v_idxs`/`annot_ref_pos` -- SVAR1's
-        `geno_v_idxs` is already dataset-global, so the Rust side needs no `var_base`
-        (see `stream_engine.rs`'s `Svar1Backend.annotated` doc comment).
+        `geno_v_idxs` is already dataset-global, so the Rust side passes `None` for
+        the per-variant global-id gather (see `stream_engine.rs`'s
+        `Svar1Backend.annotated` doc comment).
 
         Cohort-independent job residency (issue #284 / final-review Finding 1): the
         full public->physical sample map `self._phys_sample_idx` crosses ONCE (length
@@ -1295,11 +1296,12 @@ class _VcfBackend:
         length >= 1 (issue #277 Wave A `with_len`), forwarded straight to the
         engine constructor's trailing `output_length` parameter. `annotated`
         (issue #277 Wave A Task 4) selects whether the engine computes
-        `annot_v_idxs`/`annot_ref_pos`; `VcfWindowFiller` maps window-local
-        variant ids to dataset-global ones via `var_base = 0` -- CORRECT for
-        every current single-contig/whole-contig fixture but a KNOWN GAP for a
-        window that doesn't start at global variant 0 (see `vcf.rs`'s
-        `WindowFiller::fill` doc comment and GitHub issue #305).
+        `annot_v_idxs`/`annot_ref_pos`, remapped window-local -> dataset-global
+        per-variant via `slot.global_v_idxs` (genoray `DenseChunk.global_idx`,
+        gathered by `generate_batch_core`). VCF's genoray ids are hard-coded
+        `-1` until Phase 3, so the gather is a no-op and emitted ids stay
+        window-local -- the known VCF gap (see `vcf.rs`'s `WindowFiller::fill`
+        doc comment and GitHub issue #305).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1430,19 +1432,15 @@ class _PgenBackend:
         `vcf_path` naming (here it's the resolved `.pgen` path). `output_length`
         is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A `with_len`).
         `annotated` (issue #277 Wave A Task 4) selects whether the engine
-        computes `annot_v_idxs`/`annot_ref_pos`; `PgenWindowFiller` uses the
-        SAME `var_base = 0` default as `_VcfBackend` (see its doc comment
-        above) -- an earlier version of this filler set `var_base` from the
-        pre-scanned `.pvar` per-contig position table's `var_start`, but that
-        value is the PADDED search lower bound, not necessarily the global id
-        of the first variant the window actually keeps (genoray's precise
-        extent-overlap filter can skip leading padded-in candidates), so it
-        silently undercounted `annot_v_idxs` for narrowed windows. `var_base
-        = 0` is exact for every window that starts at a contig's first KEPT
-        variant (whole-contig / from-contig-start regions -- every current
-        fixture) but a KNOWN GAP for a narrowed/partial-prefix or multi-contig
-        window, same limitation as VCF (see `pgen.rs`'s `PgenWindowFiller::fill`
-        doc comment and GitHub issue #305, which now covers PGEN as well as VCF).
+        computes `annot_v_idxs`/`annot_ref_pos`, remapped window-local ->
+        dataset-global per-variant via `slot.global_v_idxs`. Unlike VCF, PGEN's
+        genoray ids are sourced from the `.pvar` row index for each kept
+        variant -- always known/correct, including across the region-overlap
+        gap that made the earlier scalar `var_base` (derived from the padded
+        `var_start` search bound, not the first KEPT variant) silently
+        undercount `annot_v_idxs` for narrowed windows. PGEN no longer shares
+        VCF's Phase-3 gap (see `pgen.rs`'s `PgenWindowFiller::fill` doc comment
+        and GitHub issue #305).
         """
         from ..genvarloader import RecordStreamEngine
 
