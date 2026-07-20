@@ -347,17 +347,35 @@ class StreamingDataset:
         for the full rng contract."""
         return np.random.default_rng(self._rng)
 
+    def _region_jitter_offsets(self, rng: np.random.Generator) -> NDArray[np.int64]:
+        """Draw ONE jitter offset per region (indexed by absolute region index into
+        `self._regions`, which is pre-sorted by `(contig, start)`), ONCE per
+        `to_iter` call -- i.e. before `_plan()`'s per-window/per-sample-chunk loop,
+        not once per plan job. `_plan()` re-yields the same region-window `r_idx`
+        once per sample chunk whenever `n_samples > _window_samples` (cohort
+        scale); drawing offsets here and looking them up by region index (see
+        `_jitter_region_bounds`) means every sample chunk of the same region gets
+        the SAME offset, independent of `_window_samples`/`_window_regions`
+        chunking. Drawing all `len(self._regions)` offsets in one vectorized call
+        also visits them in ascending region-index order, which IS sweep order
+        (regions are pre-sorted and `_plan` sweeps ascending indices) -- see
+        `to_iter`'s docstring for the full rng contract.
+        """
+        return rng.integers(-self._jitter, self._jitter + 1, size=len(self._regions))
+
     def _jitter_region_bounds(
         self,
-        rng: np.random.Generator,
+        region_offsets: NDArray[np.int64],
         r_idx: NDArray[np.intp],
     ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
-        """Translate `r_idx`'s region bounds by one rng draw per region (in `r_idx`
-        order). The window SIZE is preserved (translate, don't resize) -- a fixed
-        `output_length` that fit the base region still fits the jittered one. This
-        is a pure Python-side region-bounds transform; no Rust change. See
-        `to_iter`'s docstring for the rng contract (translation-only; NOT
-        byte-parity).
+        """Translate `r_idx`'s region bounds using the precomputed per-region
+        `region_offsets` (see `_region_jitter_offsets`; indexed by absolute region
+        index, so the same region always gets the same offset regardless of which
+        window/sample-chunk it's visited from). The window SIZE is preserved
+        (translate, don't resize) -- a fixed `output_length` that fit the base
+        region still fits the jittered one. This is a pure Python-side
+        region-bounds transform; no Rust change. See `to_iter`'s docstring for the
+        rng contract (translation-only; NOT byte-parity).
 
         Only the LOWER bound is clamped (`start + offset >= 0`): region bounds
         cross into Rust as `u32`, so a negative start would silently wrap to a
@@ -376,8 +394,7 @@ class StreamingDataset:
         """
         starts = self._regions[r_idx, 1].astype(np.int64)
         ends = self._regions[r_idx, 2].astype(np.int64)
-        # One draw per region, in `r_idx` order (this window's sweep order).
-        jitter_off = rng.integers(-self._jitter, self._jitter + 1, size=len(r_idx))
+        jitter_off = region_offsets[r_idx]
         jitter_off = np.maximum(jitter_off, -starts)
         return (
             np.ascontiguousarray(starts + jitter_off, np.uint32),
@@ -420,17 +437,24 @@ class StreamingDataset:
                     )
                 # Region bounds (u32) per window for the engine constructor; transient
                 # (dropped after `build_engine`), also region-scale. When `_jitter>0`,
-                # ONE `Generator` is created here (outside this loop) so per-region
-                # draws are deterministic in `plan_jobs` sweep order -- see
-                # `to_iter`'s docstring for the full rng contract. `_jitter==0` (the
-                # default) takes the untranslated path unchanged, preserving the
-                # jitter=0 byte-parity gate exactly.
+                # ONE `Generator` is created here (outside this loop) and the
+                # per-region offsets are drawn ONCE, indexed by absolute region index
+                # (see `_region_jitter_offsets`) -- NOT once per `plan_jobs` entry.
+                # `_plan()` re-yields the same region-window `r_idx` once per sample
+                # chunk whenever `n_samples > _window_samples`, so drawing per
+                # `plan_jobs` entry would give the same region a DIFFERENT offset per
+                # sample chunk; indexing a precomputed per-region array instead means
+                # every sample chunk of a region shares its offset, independent of
+                # `_window_samples`/`_window_regions` chunking (issue #277 review
+                # finding). `_jitter==0` (the default) takes the untranslated path
+                # unchanged, preserving the jitter=0 byte-parity gate exactly.
                 if self._jitter > 0:
                     rng = self._rng_gen()
+                    region_offsets = self._region_jitter_offsets(rng)
                     engine_jobs = [
                         (
                             contig_idx,
-                            *self._jitter_region_bounds(rng, r_idx),
+                            *self._jitter_region_bounds(region_offsets, r_idx),
                             s_lo,
                             s_hi,
                         )
@@ -594,8 +618,15 @@ class StreamingDataset:
         clamping the end as well would make jitter a no-op for any region that
         already spans its whole contig. Exactly one ``numpy.random.Generator``
         (seeded from ``rng``, see ``with_settings``) is created per ``to_iter``
-        call; one offset is drawn per region, **in sweep order** (the order
-        ``_plan()`` visits regions), so the
+        call; one offset per region is drawn from it in a single vectorized draw,
+        **once per** ``to_iter`` **call** (before the internal window/sample-chunk
+        loop), indexed by each region's absolute index in **sweep order** (regions
+        are pre-sorted by ``(contig, start)`` and ``_plan()`` sweeps them in that
+        index order). Because the draw is keyed by region index rather than by
+        plan step, the same region gets the same offset every time it recurs --
+        including when a large cohort makes ``_plan()`` revisit the same region
+        once per sample chunk -- so jitter output is independent of
+        ``max_mem``/cohort-size-driven chunking. The
         same ``rng`` always reproduces the same translated windows and a different
         ``rng`` almost certainly does not. This is a **reproducible augmentation**,
         **NOT** byte-parity with a written ``gvl.Dataset`` -- ``jitter=0`` (the
