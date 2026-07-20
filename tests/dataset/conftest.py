@@ -491,18 +491,25 @@ class VcfSnpInsDelMultiFixture:
       pos=149  A>G     ilen=0   (multiallelic split, atom 1)
       pos=149  A>T     ilen=0   (multiallelic split, atom 2)
 
-    Same-POS tie-break CAVEAT: the streamed decoder (Rust `ChunkAssembler`)
-    orders same-POS atoms via a `BinaryHeap` keyed on `(pos, seq)` --
-    lexicographic ALT order -- while the written oracle (`gvl.write`) preserves
-    genoray's `.gvi` file-row order (VCF file order). For the pos=149 pair
-    above, `A>G` sorts before `A>T` BOTH lexicographically and in file order,
-    so the two mechanisms agree COINCIDENTALLY. This is not a guarantee: if a
-    future edit reorders these split ALTs, or adds a same-POS triallelic site
-    where lexicographic order != file order, the two decoders would legitimately
-    tie-break differently and `test_streaming_vcf_parity.py` would fail for a
-    reason unrelated to any real decoder bug. Don't reorder/add same-POS atoms
-    here without re-checking that lexicographic and file order still coincide
-    (or updating the parity test to tolerate a permutation).
+    Same-POS tie-break (issue #300, corrected): the streamed decoder (Rust
+    `ChunkAssembler`, `chunk_assembler.rs` at the pinned genoray rev) orders
+    same-POS atoms via a `BinaryHeap<Reverse<PendingAtom>>` whose `Ord`
+    compares `self.pos.then(self.seq)`; `seq = record_seq<<32 | atom_ix` is a
+    monotonic counter assigned in VCF FILE-ROW order (`atom_ix` walks a
+    record's ALTs in file/ALT-column order too) -- the `alt: Vec<u8>` field is
+    never read by `Ord`/`PartialEq`, so there is NO lexicographic ALT
+    comparison anywhere in the tie-break. The written oracle (`gvl.write` /
+    `_write_from_vcf`) likewise orders by genoray's `.gvi` FILE-ROW index, no
+    ALT sort. Both sides tie-break same-POS atoms by FILE ORDER, and since
+    `gvl.write` only accepts pre-split biallelic input (one atom per record),
+    `(pos, record-order)` agreement between the two decoders holds BY
+    CONSTRUCTION, not by coincidence. For the pos=149 pair above, `A>G` (file
+    row 1) precedes `A>T` (file row 2) on both sides; this happens to also be
+    lexicographic order here, but that is not what makes them agree -- see
+    `vcf_same_pos_nonlex`/`vcf_same_pos_triallelic` below for fixtures where
+    file order and lexicographic order genuinely diverge and the invariant
+    still holds (`test_same_pos_var_idxs_file_order` in
+    `test_streaming_vcf_parity.py`).
     """
 
     vcf: Path
@@ -678,9 +685,10 @@ class PgenSnpInsDelMultiFixture:
     plink2's default un-prefixed human-contig coding). The `.pvar` carries
     the SAME 5 records (POS 30/70/110/150/150, same REF/ALT) as
     `vcf_snp_ins_del_multi`'s VCF -- see that fixture's docstring for the
-    full variant table and the same-POS tie-break caveat, which applies
-    identically here since both decoders read the same already-split input.
-    SAME `_VCF_PARITY_REF` reference/contig/samples/regions as
+    full variant table and the file-order same-POS tie-break invariant
+    (issue #300), which applies identically here since both decoders read
+    the same already-split input in the same file-row order plink2 preserves
+    in the `.pvar`. SAME `_VCF_PARITY_REF` reference/contig/samples/regions as
     `vcf_snp_ins_del_multi`, so `vcf_snp_ins_del_multi_regions` is reusable
     unmodified for PGEN multi-region coverage.
     """
@@ -713,6 +721,242 @@ def pgen_snp_ins_del_multi(tmp_path_factory) -> PgenSnpInsDelMultiFixture:
     )
 
     return PgenSnpInsDelMultiFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class VcfSamePosNonlexFixture:
+    """Task 5 (issue #300): a GENUINE (not coincidental) file-order same-POS
+    fixture. Two pre-split biallelic rows at 0-based pos=199 (1-based POS
+    200, REF `A` in `_VCF_PARITY_REF`) in file order `A>T` then `A>G` --
+    NON-lexicographic, since `"A>G" < "A>T"` lexicographically but the file
+    puts `A>T` first. If either decoder tie-broke lexicographically instead
+    of by file order, this fixture would expose it (unlike
+    `vcf_snp_ins_del_multi`'s pos=149 pair, where file order and
+    lexicographic order happen to coincide).
+
+    Committed under `tests/data/streaming/vcf_same_pos_nonlex.vcf.gz` (+
+    `.tbi`), already biallelic (hand-authored one ALT per row, no
+    `bcftools norm -m -` needed) and left-aligned against `_VCF_PARITY_REF`
+    (verified via `bcftools norm -f <ref> -c e`, 0 realigned/split).
+
+    Variants (0-based pos, REF>ALT, file order):
+      pos=199  A>T  (row 1)
+      pos=199  A>G  (row 2)
+
+    Genotypes (phased, hap0|hap1) -- s2 carries BOTH same-POS ALTs on its two
+    haplotypes, so its `var_idxs` genuinely distinguish which record (file
+    row 1 vs 2) each haplotype's atom resolves to:
+      s0: 1|0 / 0|0  (hap0=T from row 1, hap1=REF)
+      s1: 0|0 / 0|1  (hap0=REF, hap1=G from row 2)
+      s2: 1|0 / 0|1  (hap0=T from row 1, hap1=G from row 2)
+
+    PGEN twin: `tests/data/streaming/vcf_same_pos_nonlex.{pgen,pvar,psam}`,
+    generated via `plink2 --vcf vcf_same_pos_nonlex.vcf.gz --make-pgen
+    --allow-extra-chr --output-chr chrM --out vcf_same_pos_nonlex` (same
+    convention as `vcf_snp_ins_del_multi`'s PGEN twin); the `.pvar` preserves
+    the VCF's file-row order exactly (verified: `A>T` then `A>G`).
+    """
+
+    vcf: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_same_pos_nonlex(tmp_path_factory) -> VcfSamePosNonlexFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_same_pos_nonlex.vcf.gz"
+    )
+
+    d = tmp_path_factory.mktemp("vcf_same_pos_nonlex_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return VcfSamePosNonlexFixture(
+        vcf=vcf,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenSamePosNonlexFixture:
+    """PGEN-source counterpart to `vcf_same_pos_nonlex` (issue #300). Points
+    at the committed `tests/data/streaming/vcf_same_pos_nonlex.{pgen,pvar,
+    psam}` fileset -- see that fixture's docstring for the full variant
+    table, genotypes, and the file-order (non-lexicographic) same-POS
+    invariant this pair is designed to test genuinely.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_same_pos_nonlex(tmp_path_factory) -> PgenSamePosNonlexFixture:
+    pgen = (
+        Path(__file__).parent.parent / "data" / "streaming" / "vcf_same_pos_nonlex.pgen"
+    )
+
+    d = tmp_path_factory.mktemp("pgen_same_pos_nonlex_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return PgenSamePosNonlexFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class VcfSamePosTriallelicFixture:
+    """Task 5 (issue #300): a GENUINE (not coincidental) file-order same-POS
+    fixture with THREE pre-split biallelic rows at one position (rather than
+    two), so the invariant is tested against a triallelic split, not just a
+    pairwise tie. 0-based pos=179 (1-based POS 180, REF `A` in
+    `_VCF_PARITY_REF`), file order `A>T`, `A>C`, `A>G` -- lexicographic order
+    would be `A>C`, `A>G`, `A>T`, so file order and lexicographic order
+    diverge on all three positions, not just a swap.
+
+    Committed under `tests/data/streaming/vcf_same_pos_triallelic.vcf.gz` (+
+    `.tbi`), already biallelic (hand-authored one ALT per row) and
+    left-aligned against `_VCF_PARITY_REF` (verified via `bcftools norm -f
+    <ref> -c e`, 0 realigned/split).
+
+    Variants (0-based pos, REF>ALT, file order):
+      pos=179  A>T  (row 1)
+      pos=179  A>C  (row 2)
+      pos=179  A>G  (row 3)
+
+    Genotypes (phased, hap0|hap1) -- s0 and s2 each carry two DIFFERENT
+    same-POS ALTs on their two haplotypes (mirrored: s0 is T/G, s2 is G/T),
+    so `var_idxs` must resolve each haplotype to the correct file-order
+    record rather than any lexicographic-order id:
+      s0: 1|0 / 0|1  (hap0=T from row 1, hap1=G from row 3)
+      s1: 0|0 / 1|0  (hap0=REF, hap1=C from row 2)
+      s2: 0|1 / 1|0  (hap0=G from row 3, hap1=T from row 1)
+
+    PGEN twin: `tests/data/streaming/vcf_same_pos_triallelic.{pgen,pvar,
+    psam}`, generated via `plink2 --vcf vcf_same_pos_triallelic.vcf.gz
+    --make-pgen --allow-extra-chr --output-chr chrM --out
+    vcf_same_pos_triallelic`; the `.pvar` preserves the VCF's file-row order
+    exactly (verified: `A>T`, `A>C`, `A>G`).
+    """
+
+    vcf: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_same_pos_triallelic(tmp_path_factory) -> VcfSamePosTriallelicFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_same_pos_triallelic.vcf.gz"
+    )
+
+    d = tmp_path_factory.mktemp("vcf_same_pos_triallelic_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return VcfSamePosTriallelicFixture(
+        vcf=vcf,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenSamePosTriallelicFixture:
+    """PGEN-source counterpart to `vcf_same_pos_triallelic` (issue #300).
+    Points at the committed `tests/data/streaming/vcf_same_pos_triallelic.
+    {pgen,pvar,psam}` fileset -- see that fixture's docstring for the full
+    variant table, genotypes, and the file-order same-POS invariant this
+    triple is designed to test genuinely.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_same_pos_triallelic(tmp_path_factory) -> PgenSamePosTriallelicFixture:
+    pgen = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_same_pos_triallelic.pgen"
+    )
+
+    d = tmp_path_factory.mktemp("pgen_same_pos_triallelic_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return PgenSamePosTriallelicFixture(
         pgen=pgen,
         fasta=fasta,
         contig="chr1",
@@ -833,3 +1077,41 @@ def pgen_multi_contig(
         sample_names=vcf_multi_contig.sample_names,
         regions=vcf_multi_contig.regions,
     )
+
+
+@pytest.fixture
+def streaming_case(request, tmp_path_factory):
+    """Shared factory fixture mapping a backend name to
+    ``(regions, reference, variants, written)`` for the streaming Wave A
+    output-mode tests (issue #277, Tasks 2/3/4/5). ``written`` is a plain
+    ``gvl.Dataset.open(...)`` -- NO output mode applied -- so each test can
+    layer its own ``.with_len``/``.with_seqs``/etc. on both `written` and a
+    freshly constructed `StreamingDataset` for the same inputs.
+
+    Backed by three real, already-committed SNP+INS+DEL/3-sample fixtures (one
+    per backend): `svar1_multicontig_fixture` (pre-written dataset dir reused
+    directly), `vcf_snp_ins_del_multi` and `pgen_snp_ins_del_multi` (written
+    lazily here into a fresh `tmp_path_factory` dir, since those fixtures only
+    carry the source VCF/PGEN, not a pre-written `gvl.Dataset`).
+    """
+
+    def _case(backend: str):
+        if backend == "svar1":
+            f = request.getfixturevalue("svar1_multicontig_fixture")
+            written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+            return f.bed, f.reference_path, f.svar_path, written
+        elif backend == "vcf":
+            f = request.getfixturevalue("vcf_snp_ins_del_multi")
+            out = tmp_path_factory.mktemp("sc_vcf") / "ds"
+            gvl.write(out, f.regions, variants=str(f.vcf), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return f.regions, str(f.fasta), str(f.vcf), written
+        elif backend == "pgen":
+            f = request.getfixturevalue("pgen_snp_ins_del_multi")
+            out = tmp_path_factory.mktemp("sc_pgen") / "ds"
+            gvl.write(out, f.regions, variants=str(f.pgen), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return f.regions, str(f.fasta), str(f.pgen), written
+        raise ValueError(f"streaming_case: unknown backend {backend!r}")
+
+    return _case

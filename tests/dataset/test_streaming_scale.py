@@ -151,8 +151,8 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
     was replaced with this one. See the module docstring for the same lesson learned
     about the prior `ru_maxrss` scale guard.)
 
-    `_Svar1Backend.generate_batch(r_idx, s_idx, o_starts, o_stops, lo, hi)` allocates
-    its output for exactly the `hi - lo` rows sliced IN -- the batch rows are chosen
+    `_Svar1Backend.generate_batch(r_idx, s_idx, o_starts, o_stops, lo, hi, output_length)`
+    allocates its output for exactly the `hi - lo` rows sliced IN -- the batch rows are chosen
     before generation, not after. So the returned `Ragged`'s total byte count IS the
     backend's internal peak output allocation for that call. At a fixed `batch_size`,
     that byte count depends only on the batch's rows (region lengths x ploidy), never
@@ -241,7 +241,9 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
         o_starts, o_stops = backend.read_window(r_idx, s_idx)
         batch_size = 4
         assert batch_size <= len(r_idx) * len(s_idx)
-        data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, batch_size)
+        data = backend.generate_batch(
+            r_idx, s_idx, o_starts, o_stops, 0, batch_size, -1
+        )
         return int(data.data.nbytes)
 
     bytes_50 = batch_output_bytes(50)

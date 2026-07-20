@@ -86,6 +86,14 @@ struct RecordBackend {
     ploidy: usize,
     pad_char: u8,
     parallel: bool,
+    /// -1 = ragged (per-hap actual length, pre-#277 behavior), >=0 = fixed length
+    /// (issue #277 Wave A `with_len`). Forwarded verbatim to `generate_batch_core`.
+    output_length: i64,
+    /// Issue #277 Wave A Task 4: when `true`, `generate` requests the two annotation
+    /// outputs (`annot_v_idxs`/`annot_ref_pos`) from `generate_batch_core`, mapped to
+    /// dataset-GLOBAL ids via the filled slot's `var_base`. `false` (default)
+    /// preserves pre-Task-4 behavior exactly (no extra allocation/work).
+    annotated: bool,
 }
 
 impl RecordBackend {
@@ -143,7 +151,7 @@ impl EngineBackend for RecordBackend {
         slot: &DecodedWindow,
         row_lo: usize,
         row_hi: usize,
-    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
+    ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)> {
         let job = &self.jobs[job_idx];
         let c = &self.contigs[job.contig_idx];
         let n_samples = job.s_hi - job.s_lo;
@@ -201,6 +209,10 @@ impl EngineBackend for RecordBackend {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             self.pad_char,
+            self.output_length,
+            None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
+            self.annotated,
+            slot.var_base,
             self.parallel,
         ))
     }
@@ -227,6 +239,8 @@ impl RecordStreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
+        annotated: bool,
     ) -> Self {
         let backend = RecordBackend {
             filler,
@@ -236,16 +250,23 @@ impl RecordStreamEngine {
             ploidy,
             pad_char,
             parallel,
+            output_length,
+            annotated,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
         }
     }
 
-    /// Return the next batch's `(data, offsets)`, or `None` when the plan is exhausted.
-    /// Delegates to the shared core; see `stream_core`'s doc comment for the
-    /// exhaustion/error/panic classification contract.
-    pub fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
+    /// Return the next batch's `(data, annot_v_idxs, annot_ref_pos, offsets)`, or
+    /// `None` when the plan is exhausted. Delegates to the shared core; see
+    /// `stream_core`'s doc comment for the exhaustion/error/panic classification
+    /// contract. The two annotation arrays are `Some` iff the engine was constructed
+    /// with `annotated: true`.
+    pub fn next_batch_core(
+        &self,
+    ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
+    {
         self.core.next_batch_core()
     }
 }
@@ -274,7 +295,7 @@ impl RecordStreamEngine {
         source_kind, vcf_path, sample_names, ploidy,
         contig_names, contig_ref_bytes,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
-        fasta_path, pad_char, parallel, batch_size,
+        fasta_path, pad_char, parallel, batch_size, output_length, annotated=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -293,6 +314,8 @@ impl RecordStreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
+        annotated: bool,
     ) -> PyResult<Self> {
         let n_contigs = contig_names.len();
         if contig_ref_bytes.len() != n_contigs {
@@ -361,6 +384,8 @@ impl RecordStreamEngine {
                     pad_char,
                     parallel,
                     batch_size,
+                    output_length,
+                    annotated,
                 ))
             }
             "pgen" => {
@@ -393,6 +418,8 @@ impl RecordStreamEngine {
                     pad_char,
                     parallel,
                     batch_size,
+                    output_length,
+                    annotated,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
@@ -412,8 +439,44 @@ impl RecordStreamEngine {
         let out = py.detach(|| self.next_batch_core());
         match out {
             None => Ok(None),
-            Some(Ok((data, offsets))) => {
+            Some(Ok((data, _annot_v, _annot_pos, offsets))) => {
                 Ok(Some((data.into_pyarray(py), offsets.into_pyarray(py))))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Annotated counterpart of `next_batch` (issue #277 Wave A Task 4): returns
+    /// `(data, annot_v_idxs, annot_ref_pos, offsets)`, or `None` when the plan is
+    /// exhausted. Only valid when the engine was constructed with `annotated=true` —
+    /// otherwise the two annotation arrays are absent and this raises `RuntimeError`
+    /// (a caller bug, not a data condition; `StreamingDataset._iter_batches` never
+    /// calls this unless `annotated` was passed to `build_engine`).
+    fn next_batch_annotated<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<
+        Option<(
+            Bound<'py, PyArray1<u8>>,
+            Bound<'py, PyArray1<i32>>,
+            Bound<'py, PyArray1<i32>>,
+            Bound<'py, PyArray1<i64>>,
+        )>,
+    > {
+        let out = py.detach(|| self.next_batch_core());
+        match out {
+            None => Ok(None),
+            Some(Ok((data, Some(annot_v), Some(annot_pos), offsets))) => Ok(Some((
+                data.into_pyarray(py),
+                annot_v.into_pyarray(py),
+                annot_pos.into_pyarray(py),
+                offsets.into_pyarray(py),
+            ))),
+            Some(Ok((_, None, _, _))) | Some(Ok((_, _, None, _))) => {
+                Err(PyRuntimeError::new_err(
+                    "RecordStreamEngine.next_batch_annotated() called on an engine \
+                     constructed with annotated=false",
+                ))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
@@ -586,7 +649,7 @@ mod tests {
         let o_stops_b: Vec<i64> = slot.geno_offsets[o_lo + 1..=o_hi].to_vec();
         let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
 
-        let (data, offs) = crate::ffi::generate_batch_core(
+        let (data, _annot_v, _annot_pos, offs) = crate::ffi::generate_batch_core(
             &slot.geno_v_idxs,
             ploidy,
             &o_starts_b,
@@ -599,6 +662,10 @@ mod tests {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             b'N',
+            -1, // ragged
+            None,
+            false, // annotated
+            0,     // var_base
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -623,11 +690,13 @@ mod tests {
             b'N',
             false,
             1000, // batch_size larger than any window -> one batch per window
+            -1,   // ragged
+            false, // annotated
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error");
+            let (d, _av, _ap, o) = r.expect("no producer error");
             batches.push((d.to_vec(), o.to_vec()));
         }
         assert_eq!(batches.len(), 2, "one batch per window, in plan order");
@@ -652,6 +721,8 @@ mod tests {
             b'N',
             false,
             8,
+            -1,    // ragged
+            false, // annotated
         );
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
@@ -679,6 +750,8 @@ mod tests {
             b'N',
             false,
             8,
+            -1,    // ragged
+            false, // annotated
         );
 
         match engine.next_batch_core() {
@@ -751,7 +824,7 @@ mod tests {
             1, 1, /*bi0*/ 2, 4, /*bi1*/ 1, 1, /*bi2*/ 2, 4, /*bi3*/
         ];
         let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
-        let (exp_data, exp_offs) = crate::ffi::generate_batch_core(
+        let (exp_data, _exp_annot_v, _exp_annot_pos, exp_offs) = crate::ffi::generate_batch_core(
             &slot.geno_v_idxs,
             ploidy,
             &o_starts_b,
@@ -764,6 +837,10 @@ mod tests {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             b'N',
+            -1, // ragged
+            None,
+            false, // annotated
+            0,     // var_base
             false,
         );
         let expected = (exp_data.to_vec(), exp_offs.to_vec());
@@ -786,11 +863,13 @@ mod tests {
             b'N',
             false,
             1000, // one batch for the whole 4-row window
+            -1,    // ragged
+            false, // annotated
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error / no OOB panic");
+            let (d, _av, _ap, o) = r.expect("no producer error / no OOB panic");
             batches.push((d.to_vec(), o.to_vec()));
         }
         assert_eq!(

@@ -323,7 +323,7 @@ def _drive_sync(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
                 s_hi,
             )
         ]
-        engine = backend.build_engine(job, batch_size)
+        engine = backend.build_engine(job, batch_size, -1)
         while True:
             nxt = engine.next_batch()
             if nxt is None:

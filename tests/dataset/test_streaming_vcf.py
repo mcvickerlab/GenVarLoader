@@ -32,6 +32,7 @@ def test_record_stream_engine_vcf_yields_then_none(streaming_vcf_fixture):
         ord("N"),
         False,
         32,
+        -1,  # output_length: ragged
     )
 
     batches = []
@@ -93,4 +94,5 @@ def test_record_stream_engine_pgen_source_kind_rejects_non_pgen_ploidy(
             ord("N"),
             False,
             32,
+            -1,  # output_length: ragged
         )

@@ -13,6 +13,7 @@ from genoray._contigs import ContigNormalizer
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
+from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from .._torch import requires_torch
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import bed_to_regions
@@ -56,8 +57,9 @@ class StreamingDataset:
       classification (``_write.py``): a ``.svar`` directory (a genoray
       ``SparseVar``/SVAR1 store), a VCF/BCF, and a PGEN file-set are all
       supported; ``.svar2`` (SVAR2) input raises :class:`NotImplementedError`
-      (a later plan). Only ``jitter=0`` (the default) is supported in this
-      plan.
+      (a later plan). ``jitter>0`` (a per-region reproducible read-window
+      translation) is supported with the default ``"engine"`` prefetch
+      strategy -- see :meth:`to_iter`'s docstring for the rng contract.
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
@@ -125,6 +127,17 @@ class StreamingDataset:
     # (`benchmarking/streaming/cold_cache_overlap.py`); it will be removed once a winner
     # is chosen (see docs/roadmaps/streaming-dataset.md).
     _prefetch_strategy: str = "engine"
+    # --- Wave A (#277) output-mode config; defaults preserve pre-Wave-A behavior ---
+    # Sequence output kind: RaggedSeqs (haplotypes) | RaggedAnnotatedHaps (annotated).
+    _seq_kind: type = RaggedSeqs
+    # Output length: "ragged" (per-hap actual length) or a fixed int >= 1.
+    _output_length: "int | str" = "ragged"
+    # Read-time jitter (0 = deterministic, byte-parity gate).
+    _jitter: int = 0
+    # rng seed/Generator for jitter + fixed-length shifts (matches Dataset.with_settings).
+    _rng: "int | np.random.Generator | None" = None
+    # Deterministic: disables random within-window shifts for fixed-length output.
+    _deterministic: bool = True
 
     def __init__(
         self,
@@ -168,12 +181,6 @@ class StreamingDataset:
                     "StreamingDataset(...) requires `reference` to reconstruct "
                     "haplotypes."
                 )
-            if jitter != 0:
-                raise NotImplementedError(
-                    "StreamingDataset read-time jitter is not implemented yet; "
-                    "only jitter=0 (the default) is supported in this plan."
-                )
-
             p = Path(variants)
             if p.is_dir() and p.suffix == ".svar":
                 from genoray import SparseVar
@@ -247,6 +254,27 @@ class StreamingDataset:
         # See the field's comment: internal/experimental, flipped only by the
         # cold-cache A-vs-C harness via `object.__setattr__`.
         object.__setattr__(self, "_prefetch_strategy", "engine")
+        # Wave A (#277) output-mode fields: `slots=True` + a custom `__init__` means
+        # the dataclass-generated defaults are never auto-applied (there's no class
+        # attribute to fall back on at runtime), so every construction path -- public
+        # and injected -- must set them explicitly here. Task 1 defaults exactly
+        # preserve pre-Wave-A output.
+        for _name in (
+            "_seq_kind",
+            "_output_length",
+            "_jitter",
+            "_rng",
+            "_deterministic",
+        ):
+            object.__setattr__(
+                self, _name, type(self).__dataclass_fields__[_name].default
+            )
+        # Wire the public `jitter=` kwarg AFTER the default-init loop above (else the
+        # loop's dataclass-default (0) would overwrite it). Default `jitter=0` exactly
+        # preserves pre-Task-3 behavior (no translation, byte-parity gate unaffected).
+        if jitter < 0:
+            raise ValueError(f"jitter must be non-negative, got {jitter}.")
+        object.__setattr__(self, "_jitter", int(jitter))
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -312,6 +340,67 @@ class StreamingDataset:
                     s_hi = min(s_lo + self._window_samples, n_samples)
                     yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
 
+    def _rng_gen(self) -> np.random.Generator:
+        """One `Generator` for this `to_iter` call's jitter draws. `_iter_batches`
+        creates exactly one of these per call (never per-window) so the per-region
+        draw sequence is deterministic in sweep order -- see `to_iter`'s docstring
+        for the full rng contract."""
+        return np.random.default_rng(self._rng)
+
+    def _region_jitter_offsets(self, rng: np.random.Generator) -> NDArray[np.int64]:
+        """Draw ONE jitter offset per region (indexed by absolute region index into
+        `self._regions`, which is pre-sorted by `(contig, start)`), ONCE per
+        `to_iter` call -- i.e. before `_plan()`'s per-window/per-sample-chunk loop,
+        not once per plan job. `_plan()` re-yields the same region-window `r_idx`
+        once per sample chunk whenever `n_samples > _window_samples` (cohort
+        scale); drawing offsets here and looking them up by region index (see
+        `_jitter_region_bounds`) means every sample chunk of the same region gets
+        the SAME offset, independent of `_window_samples`/`_window_regions`
+        chunking. Drawing all `len(self._regions)` offsets in one vectorized call
+        also visits them in ascending region-index order, which IS sweep order
+        (regions are pre-sorted and `_plan` sweeps ascending indices) -- see
+        `to_iter`'s docstring for the full rng contract.
+        """
+        return rng.integers(-self._jitter, self._jitter + 1, size=len(self._regions))
+
+    def _jitter_region_bounds(
+        self,
+        region_offsets: NDArray[np.int64],
+        r_idx: NDArray[np.intp],
+    ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
+        """Translate `r_idx`'s region bounds using the precomputed per-region
+        `region_offsets` (see `_region_jitter_offsets`; indexed by absolute region
+        index, so the same region always gets the same offset regardless of which
+        window/sample-chunk it's visited from). The window SIZE is preserved
+        (translate, don't resize) -- a fixed `output_length` that fit the base
+        region still fits the jittered one. This is a pure Python-side
+        region-bounds transform; no Rust change. See `to_iter`'s docstring for the
+        rng contract (translation-only; NOT byte-parity).
+
+        Only the LOWER bound is clamped (`start + offset >= 0`): region bounds
+        cross into Rust as `u32`, so a negative start would silently wrap to a
+        huge unsigned value -- that must never happen. An upper bound (`end <=
+        contig_len`) is deliberately NOT enforced: the shared reconstruction
+        kernel (`reconstruct_haplotype_core`, `src/reconstruct/mod.rs`) already
+        tail-pads with `pad_char` whenever a region's end runs past the contig
+        (the same N-padding behavior `gvl.Dataset` gives any region that
+        overhangs a chromosome edge), so an end beyond `contig_len` is safe, not
+        a bug. Clamping the upper bound too would make jitter a deterministic
+        no-op for any region that already spans its full contig (exactly the
+        single-contig VCF/PGEN streaming test fixtures) -- mathematically, a
+        window that already covers `[0, contig_len)` cannot be translated at all
+        under a strict two-sided in-bounds clamp, since ANY nonzero offset would
+        push one side out of range.
+        """
+        starts = self._regions[r_idx, 1].astype(np.int64)
+        ends = self._regions[r_idx, 2].astype(np.int64)
+        jitter_off = region_offsets[r_idx]
+        jitter_off = np.maximum(jitter_off, -starts)
+        return (
+            np.ascontiguousarray(starts + jitter_off, np.uint32),
+            np.ascontiguousarray(ends + jitter_off, np.uint32),
+        )
+
     def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
         """Drive the plan; generate each window PER BATCH so output is batch-bounded.
 
@@ -323,6 +412,19 @@ class StreamingDataset:
         slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
         if self._backend is not None:
+            # Resolve the effective fixed/ragged length ONCE: -1 = ragged (per-hap
+            # actual length, the pre-Wave-A default), >=0 = fixed (issue #277
+            # `with_len(L)`). Threaded through both prefetch-strategy branches below;
+            # the Ragged output shaping further down is UNCHANGED -- offsets from the
+            # engine/generate_batch already encode the fixed length when >=0.
+            _out_len = (
+                -1 if self._output_length == "ragged" else int(self._output_length)
+            )
+            # Wave A (#277) Task 4: whether to request AnnotatedHaps (var_idxs +
+            # ref_coords) alongside haplotypes. Resolved ONCE here (not per window) and
+            # threaded through `build_engine`/the engine constructor -- the engine only
+            # allocates/computes the two annotation arrays when this is `True`.
+            _annotated = self._seq_kind is RaggedAnnotatedHaps
             if self._prefetch_strategy == "engine":
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
@@ -339,19 +441,56 @@ class StreamingDataset:
                         (contig_idx, r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
                     )
                 # Region bounds (u32) per window for the engine constructor; transient
-                # (dropped after `build_engine`), also region-scale.
-                engine_jobs = [
-                    (
-                        contig_idx,
-                        np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
-                        np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
-                        s_lo,
-                        s_hi,
-                    )
-                    for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
-                ]
-                engine = self._backend.build_engine(engine_jobs, batch_size)
+                # (dropped after `build_engine`), also region-scale. When `_jitter>0`,
+                # ONE `Generator` is created here (outside this loop) and the
+                # per-region offsets are drawn ONCE, indexed by absolute region index
+                # (see `_region_jitter_offsets`) -- NOT once per `plan_jobs` entry.
+                # `_plan()` re-yields the same region-window `r_idx` once per sample
+                # chunk whenever `n_samples > _window_samples`, so drawing per
+                # `plan_jobs` entry would give the same region a DIFFERENT offset per
+                # sample chunk; indexing a precomputed per-region array instead means
+                # every sample chunk of a region shares its offset, independent of
+                # `_window_samples`/`_window_regions` chunking (issue #277 review
+                # finding). `_jitter==0` (the default) takes the untranslated path
+                # unchanged, preserving the jitter=0 byte-parity gate exactly.
+                if self._jitter > 0:
+                    rng = self._rng_gen()
+                    region_offsets = self._region_jitter_offsets(rng)
+                    engine_jobs = [
+                        (
+                            contig_idx,
+                            *self._jitter_region_bounds(region_offsets, r_idx),
+                            s_lo,
+                            s_hi,
+                        )
+                        for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
+                    ]
+                else:
+                    engine_jobs = [
+                        (
+                            contig_idx,
+                            np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
+                            np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
+                            s_lo,
+                            s_hi,
+                        )
+                        for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
+                    ]
+                engine = self._backend.build_engine(
+                    engine_jobs, batch_size, _out_len, _annotated
+                )
                 del engine_jobs
+                # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
+                # `(data, annot_v_idxs, annot_ref_pos, offsets)` from the engine and
+                # packs a `RaggedAnnotatedHaps`; haplotype output is unchanged (2-tuple,
+                # `RaggedSeqs`-shaped). Both share the SAME `offsets` layout (every
+                # array is one entry per output position), so all three `Ragged`s below
+                # are built from one `Ragged.from_offsets` call each over that offsets
+                # array -- mirrors the written path's `_FlatAnnotatedHaps.to_padded()`
+                # packing (`_flat.py`).
+                next_batch = (
+                    engine.next_batch_annotated if _annotated else engine.next_batch
+                )
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
                     n_s = s_hi - s_lo
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
@@ -359,26 +498,39 @@ class StreamingDataset:
                     n_rows = len(flat_r)
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
-                        nxt = engine.next_batch()
+                        nxt = next_batch()
                         if nxt is None:
                             raise RuntimeError(
-                                "Svar1StreamEngine exhausted before the plan did"
+                                "streaming engine exhausted before the plan did"
                             )
-                        data, offsets = nxt
-                        yield (
-                            Ragged.from_offsets(
+                        if _annotated:
+                            data, annot_v, annot_pos, offsets = nxt
+                            shape = (hi - lo, self._backend.ploidy, None)
+                            offsets = np.asarray(offsets, np.int64)
+                            out = RaggedAnnotatedHaps(
+                                Ragged.from_offsets(
+                                    np.asarray(data).view("S1"), shape, offsets
+                                ),
+                                Ragged.from_offsets(
+                                    np.asarray(annot_v), shape, offsets
+                                ),
+                                Ragged.from_offsets(
+                                    np.asarray(annot_pos), shape, offsets
+                                ),
+                            )
+                        else:
+                            data, offsets = nxt
+                            out = Ragged.from_offsets(
                                 np.asarray(data).view("S1"),
                                 (hi - lo, self._backend.ploidy, None),
                                 np.asarray(offsets, np.int64),
-                            ),
-                            flat_r[lo:hi],
-                            flat_s[lo:hi],
-                        )
+                            )
+                        yield (out, flat_r[lo:hi], flat_s[lo:hi])
                 # `-O`-safe (Minor 3): a bare `assert` is stripped under `python -O`,
                 # silently dropping this end-of-plan invariant.
-                if engine.next_batch() is not None:
+                if next_batch() is not None:
                     raise RuntimeError(
-                        "Svar1StreamEngine had extra batches beyond the plan"
+                        "streaming engine had extra batches beyond the plan"
                     )
             elif self._prefetch_strategy == "readahead":
                 # Design C (issue #283): single-thread read-ahead-one-window drive.
@@ -387,6 +539,36 @@ class StreamingDataset:
                 # pure page-warming no-op on output, so this is byte-identical to the
                 # "engine" branch above. See `test_streaming_matches_written_all_cells`'s
                 # "readahead" parity variant.
+                #
+                # Jitter (issue #277 Task 3) is NOT supported here: `read_window`/
+                # `generate_batch` re-derive region bounds internally from
+                # `self._regions` (unjittered) -- there is no seam to pass translated
+                # bounds through without a backend signature change. This experimental,
+                # non-default toggle (issue #283 A-vs-C measurement) is out of scope
+                # for that change; fail fast rather than silently ignoring jitter.
+                if self._jitter > 0:
+                    raise NotImplementedError(
+                        "StreamingDataset read-time jitter (jitter>0) is only "
+                        'supported with the default "engine" prefetch strategy; the '
+                        'experimental "readahead" toggle re-derives region bounds '
+                        "internally and cannot accept translated bounds. Use the "
+                        'default `_prefetch_strategy="engine"` (do not set jitter '
+                        'with "readahead").'
+                    )
+                # Annotated output (issue #277 Wave A Task 4) is likewise only wired
+                # through the default "engine" path: `_Svar1Backend.generate_batch`
+                # (the readahead seam) has no annotated variant, and this experimental
+                # toggle is out of scope for that addition. Fail fast rather than
+                # silently ignoring `with_seqs("annotated")`.
+                if _annotated:
+                    raise NotImplementedError(
+                        'StreamingDataset with_seqs("annotated") is only supported '
+                        'with the default "engine" prefetch strategy; the '
+                        'experimental "readahead" toggle has no annotated variant. '
+                        'Use the default `_prefetch_strategy="engine"` (do not '
+                        'combine with_seqs("annotated") with "readahead").'
+                    )
+
                 from ..genvarloader import svar1_prefetch_runs
 
                 # Compact, region-scale plan (same treatment as the engine branch): hold
@@ -426,7 +608,7 @@ class StreamingDataset:
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
                         data = self._backend.generate_batch(
-                            r_idx, s_idx, cur[0], cur[1], lo, hi
+                            r_idx, s_idx, cur[0], cur[1], lo, hi, _out_len
                         )
                         yield data, flat_r[lo:hi], flat_s[lo:hi]
                     cur = nxt
@@ -467,6 +649,43 @@ class StreamingDataset:
             If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``;
             if ``False``, yield ``data`` alone. Indices are in the caller's **original
             BED-row order** (not sorted-storage order), matching ``gvl.Dataset[r, s]``.
+
+        Read-time jitter (``jitter>0``, set via ``with_settings``)
+        -------------------------------------------------------------
+        When ``jitter>0``, each region's read window is translated by an integer
+        offset drawn from ``Uniform[-jitter, jitter]`` (inclusive), clamped only so
+        the translated start stays ``>= 0`` -- the window SIZE never changes
+        (translate, don't resize), so a fixed ``with_len(L)`` output is unaffected.
+        A translated end may run past the contig; that's safe, not a bug -- the
+        reconstruction kernel already N-pads a region that overhangs a chromosome
+        edge (the same behavior any ``gvl.Dataset`` region gets there), and
+        clamping the end as well would make jitter a no-op for any region that
+        already spans its whole contig. Exactly one ``numpy.random.Generator``
+        (seeded from ``rng``, see ``with_settings``) is created per ``to_iter``
+        call; one offset per region is drawn from it in a single vectorized draw,
+        **once per** ``to_iter`` **call** (before the internal window/sample-chunk
+        loop), indexed by each region's absolute index in **sweep order** (regions
+        are pre-sorted by ``(contig, start)`` and ``_plan()`` sweeps them in that
+        index order). Because the draw is keyed by region index rather than by
+        plan step, the same region gets the same offset every time it recurs --
+        including when a large cohort makes ``_plan()`` revisit the same region
+        once per sample chunk -- so jitter output is independent of
+        ``max_mem``/cohort-size-driven chunking. The
+        same ``rng`` always reproduces the same translated windows and a different
+        ``rng`` almost certainly does not. This is a **reproducible augmentation**,
+        **NOT** byte-parity with a written ``gvl.Dataset`` -- ``jitter=0`` (the
+        default) is the only byte-parity-gated setting. Only the default
+        ``"engine"`` prefetch strategy supports jitter; the experimental
+        ``"readahead"`` toggle raises :class:`NotImplementedError` if combined with
+        ``jitter>0`` (it re-derives region bounds internally and has no seam to
+        accept translated ones).
+
+        Per-hap within-window sub-shifts (``deterministic=False`` further jittering
+        each haplotype independently within its already-translated window, for
+        fixed-length output) are a **documented Wave A deferral** -- not
+        implemented yet; that needs a Rust engine ``shifts`` API addition and is
+        out of scope for this plan. ``deterministic`` currently has no effect
+        beyond gating that unimplemented path.
         """
         for data, r_idx, s_idx in self._iter_batches(batch_size):
             if return_indices:
@@ -490,17 +709,87 @@ class StreamingDataset:
             for lo in range(0, n_rows, batch_size):
                 yield min(lo + batch_size, n_rows) - lo
 
-    def with_seqs(self, kind: Literal["haplotypes"]) -> "StreamingDataset":
-        """Select the sequence output kind. Only ``"haplotypes"`` is supported
-        in this plan; reference, annotated, and variants output are later
-        plans."""
-        if kind != "haplotypes":
+    def with_seqs(self, kind: Literal["haplotypes", "annotated"]) -> "StreamingDataset":
+        """Select the sequence output kind. ``"haplotypes"`` (default) or
+        ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
+        variant indices and reference coordinates). ``"variants"`` /
+        ``"variant-windows"`` / ``"reference"`` are Wave B / later plans."""
+        kind_map = {"haplotypes": RaggedSeqs, "annotated": RaggedAnnotatedHaps}
+        if kind not in kind_map:
             raise NotImplementedError(
-                f"StreamingDataset.with_seqs({kind!r}) is not implemented yet; "
-                'only "haplotypes" is supported in this plan. Reference, '
-                "annotated, and variants output are later plans."
+                f"StreamingDataset.with_seqs({kind!r}) is not implemented; "
+                'only "haplotypes" and "annotated" are supported in Wave A. '
+                '"variants"/"variant-windows" are Wave B (#304); "reference" is later.'
             )
-        return copy.copy(self)
+        out = copy.copy(self)
+        object.__setattr__(out, "_seq_kind", kind_map[kind])
+        return out
+
+    def with_len(self, length: "int | Literal['ragged']") -> "StreamingDataset":
+        """Set haplotype/annotated output length. ``"ragged"`` (default) yields
+        per-hap actual length; a fixed ``int >= 1`` yields exactly that many bases
+        per hap. Unlike :meth:`Dataset.with_len`, ``"variable"`` is not accepted:
+        :meth:`to_iter` always yields ``Ragged`` (there is no ArrayDataset analog),
+        so pad the ragged output yourself for a dense array."""
+        if length == "variable":
+            raise NotImplementedError(
+                'StreamingDataset.with_len("variable") is not supported; to_iter '
+                'always yields Ragged. Use with_len(int) or with_len("ragged").'
+            )
+        if length != "ragged":
+            if not isinstance(length, (int, np.integer)) or int(length) < 1:
+                raise ValueError(
+                    f"with_len(length) must be a positive int or 'ragged', got {length!r}."
+                )
+            length = int(length)
+        out = copy.copy(self)
+        object.__setattr__(out, "_output_length", length)
+        return out
+
+    def with_settings(
+        self,
+        *,
+        jitter: "int | None" = None,
+        rng: "int | np.random.Generator | None" = None,
+        deterministic: "bool | None" = None,
+    ) -> "StreamingDataset":
+        """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
+        relevant subset of :meth:`Dataset.with_settings` (same parameter names).
+
+        Parameters
+        ----------
+        jitter
+            Non-negative int; each region's read window is translated by an
+            integer offset drawn from ``Uniform[-jitter, jitter]`` (window SIZE
+            unchanged), clamped so the translated start stays ``>= 0`` (a
+            translated end may safely run past the contig -- see :meth:`to_iter`'s
+            docstring). ``0`` (the default) disables jitter and is the only
+            byte-parity-gated setting.
+        rng
+            Seed (int) or :class:`numpy.random.Generator` for the jitter draws.
+            One ``Generator`` (via ``numpy.random.default_rng(rng)``) is created
+            per :meth:`to_iter` call and drawn from once per region, in sweep
+            order -- so the same ``rng`` reproduces the same translated windows
+            across calls/runs, and a different ``rng`` yields different ones.
+        deterministic
+            Reserved for per-hap within-window sub-shifts on fixed-length output;
+            not yet implemented (documented Wave A deferral -- needs a Rust engine
+            API addition). Currently has no observable effect on ``to_iter``'s
+            output.
+
+        ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
+        with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
+        rng contract)."""
+        out = copy.copy(self)
+        if jitter is not None:
+            if jitter < 0:
+                raise ValueError(f"jitter must be non-negative, got {jitter}.")
+            object.__setattr__(out, "_jitter", int(jitter))
+        if rng is not None:
+            object.__setattr__(out, "_rng", rng)
+        if deterministic is not None:
+            object.__setattr__(out, "_deterministic", bool(deterministic))
+        return out
 
     def __getitem__(self, idx) -> None:
         raise TypeError(
@@ -742,11 +1031,19 @@ class _Svar1Backend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
         `(contig_idx, region_starts, region_ends, s_lo, s_hi)`, in the SAME order
-        `_iter_batches` will drive `.next_batch()`.
+        `_iter_batches` will drive `.next_batch()`. `output_length` is `-1` for ragged
+        (per-hap actual length, pre-Wave-A behavior) or a fixed length >= 1 (issue #277
+        Wave A `with_len`); forwarded straight to the engine constructor's trailing
+        `output_length` parameter. `annotated` (issue #277 Wave A Task 4) selects
+        whether the engine computes `annot_v_idxs`/`annot_ref_pos` -- SVAR1's
+        `geno_v_idxs` is already dataset-global, so the Rust side needs no `var_base`
+        (see `stream_engine.rs`'s `Svar1Backend.annotated` doc comment).
 
         Cohort-independent job residency (issue #284 / final-review Finding 1): the
         full public->physical sample map `self._phys_sample_idx` crosses ONCE (length
@@ -810,6 +1107,8 @@ class _Svar1Backend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
+            annotated,
         )
 
     def read_window(
@@ -861,11 +1160,14 @@ class _Svar1Backend:
         o_stops: NDArray[np.int64],
         lo: int,
         hi: int,
+        output_length: int,
     ) -> Ragged:
         """Generate haplotypes for window rows [lo:hi] (C-order (region, sample)).
         Output is (hi-lo)-bounded -- NEVER the whole window (issue #284). `o_starts`/
         `o_stops` are the whole window's offsets (from `read_window`); this slices the
         CSR rows [lo*ploidy : hi*ploidy] and the matching per-row region bounds.
+        `output_length` is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A),
+        forwarded straight to `svar1_generate_batch`.
         """
         from ..genvarloader import svar1_generate_batch
 
@@ -905,6 +1207,7 @@ class _Svar1Backend:
             ref_bytes,
             ref_offsets,
             self._ref.pad_char,
+            output_length,
             True,
         )
         n_rows = hi - lo
@@ -977,6 +1280,8 @@ class _VcfBackend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -986,7 +1291,15 @@ class _VcfBackend:
         `_Svar1Backend.build_engine`'s job-array unpacking exactly, minus the
         SVAR1-only store/physical-sample-map arguments (a VCF job's
         `[s_lo, s_hi)` indexes straight into `sample_names`, no public->
-        physical indirection).
+        physical indirection). `output_length` is `-1` for ragged or a fixed
+        length >= 1 (issue #277 Wave A `with_len`), forwarded straight to the
+        engine constructor's trailing `output_length` parameter. `annotated`
+        (issue #277 Wave A Task 4) selects whether the engine computes
+        `annot_v_idxs`/`annot_ref_pos`; `VcfWindowFiller` maps window-local
+        variant ids to dataset-global ones via `var_base = 0` -- CORRECT for
+        every current single-contig/whole-contig fixture but a KNOWN GAP for a
+        window that doesn't start at global variant 0 (see `vcf.rs`'s
+        `WindowFiller::fill` doc comment and GitHub issue #305).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1026,6 +1339,8 @@ class _VcfBackend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
+            annotated,
         )
 
 
@@ -1103,6 +1418,8 @@ class _PgenBackend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -1110,7 +1427,22 @@ class _PgenBackend:
         one entry per WINDOW, `(contig_idx, region_starts, region_ends, s_lo,
         s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
         mirrors `_VcfBackend.build_engine` exactly, minus the VCF-only
-        `vcf_path` naming (here it's the resolved `.pgen` path).
+        `vcf_path` naming (here it's the resolved `.pgen` path). `output_length`
+        is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A `with_len`).
+        `annotated` (issue #277 Wave A Task 4) selects whether the engine
+        computes `annot_v_idxs`/`annot_ref_pos`; `PgenWindowFiller` uses the
+        SAME `var_base = 0` default as `_VcfBackend` (see its doc comment
+        above) -- an earlier version of this filler set `var_base` from the
+        pre-scanned `.pvar` per-contig position table's `var_start`, but that
+        value is the PADDED search lower bound, not necessarily the global id
+        of the first variant the window actually keeps (genoray's precise
+        extent-overlap filter can skip leading padded-in candidates), so it
+        silently undercounted `annot_v_idxs` for narrowed windows. `var_base
+        = 0` is exact for every window that starts at a contig's first KEPT
+        variant (whole-contig / from-contig-start regions -- every current
+        fixture) but a KNOWN GAP for a narrowed/partial-prefix or multi-contig
+        window, same limitation as VCF (see `pgen.rs`'s `PgenWindowFiller::fill`
+        doc comment and GitHub issue #305, which now covers PGEN as well as VCF).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1148,4 +1480,6 @@ class _PgenBackend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
+            annotated,
         )

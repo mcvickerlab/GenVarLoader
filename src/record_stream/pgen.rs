@@ -592,6 +592,26 @@ impl WindowFiller for PgenWindowFiller {
         };
         debug_assert!(var_start >= contig_lo && var_end <= contig_hi);
         VARIANTS_DECODED.fetch_add(var_end.saturating_sub(var_start), Ordering::Relaxed);
+        // `slot.var_base` is intentionally left at its default 0, NOT set to
+        // `var_start` (issue #277 Wave A Task 4, annotated output — this was a
+        // confirmed bug in an earlier version of this fill). `var_start` above is
+        // the PADDED, over-inclusive search lower bound (`partition_point` minus
+        // the contig's max ref_len pad), not the global id of the first variant
+        // this window actually KEEPS: `PgenRecordSource` (constructed below) runs
+        // a precise anchor-trimmed `extent_overlaps` filter that can skip leading
+        // padded-in candidates whose trimmed extent doesn't reach `win_start`. When
+        // it does, the `DecodedWindow`'s local column 0 corresponds to global id
+        // `var_start + skip_count`, not `var_start` — so `var_base + local` in
+        // `generate_batch_core` would silently UNDERCOUNT every emitted global
+        // `var_idx` by `skip_count`. Hard-coding `var_base = 0` matches
+        // `VcfWindowFiller`'s same-value default (see `vcf.rs`'s `var_base` doc
+        // comment) and is exact for every window that starts at the contig's
+        // first KEPT variant (whole-contig / from-contig-start regions — every
+        // current fixture) but a KNOWN GAP for a narrowed/partial-prefix or
+        // multi-contig window, same as VCF. Tracked in GitHub issue #305 (now
+        // scoped to cover PGEN too, not just VCF). Must still be set on every call
+        // — see the `DecodedWindow::var_base` doc comment on why (recycled slot).
+        slot.var_base = 0;
 
         let reader = Python::attach(|py| self.reader.clone_ref(py));
         let source = PgenRecordSource::new(

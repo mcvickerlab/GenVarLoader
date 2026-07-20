@@ -971,12 +971,25 @@ pub fn svar1_prefetch_runs<'py>(
 /// `(n_rows, 2)`, already expanded per (region, sample). Output is `n_rows`-bounded —
 /// the #284 fix. Sparse input IS the store's `variant_idxs` mmap (zero copy). `ref_` /
 /// `ref_offsets` are the ACTIVE contig's slice (`ref_offsets = [0, contig_len]`), since
-/// the per-row `regions` this builds carry `contig_idx = 0`. Ragged output only,
-/// jitter=0.
+/// the per-row `regions` this builds carry `contig_idx = 0`. `output_length` selects
+/// ragged (`-1`, per-hap actual length) vs fixed-length (`>=0`) output; `shifts`
+/// (`None` => zeros) supplies per-(query, hap) jitter shifts for fixed-length output
+/// (issue #277 Wave A) -- mirrors `reconstruct_haplotypes_fused`'s length/shift
+/// handling exactly.
 ///
 /// This function does not touch Python and takes no GIL token; callers own the
 /// `into_pyarray` marshaling. It is infallible (all inputs are pre-validated by the
 /// caller / the store contract), so it returns the owned arrays directly.
+///
+/// `annotated` selects whether the two annotation outputs (`annot_v_idxs`/
+/// `annot_ref_pos`, issue #277 Wave A Task 4) are computed at all — when `false` the
+/// kernel is called with `None, None` for them (zero extra allocation/work), matching
+/// pre-Task-4 behavior exactly. When `true`, `var_base` is added to every non-negative
+/// entry of the emitted `annot_v_idxs` AFTER reconstruction — the kernel itself always
+/// writes window-LOCAL variant column ids (`geno_v_idxs`' own indexing space); callers
+/// whose `geno_v_idxs` is window-local (VCF/PGEN record-stream windows) pass their
+/// window's global variant-id base here so the emitted ids are dataset-GLOBAL. SVAR1's
+/// `geno_v_idxs` is already dataset-global, so it passes `var_base = 0` (a no-op add).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_batch_core(
     geno_v_idxs: &[i32],
@@ -991,8 +1004,12 @@ pub(crate) fn generate_batch_core(
     ref_: ndarray::ArrayView1<u8>,
     ref_offsets: ndarray::ArrayView1<i64>,
     pad_char: u8,
+    output_length: i64, // -1 = ragged (per-hap actual length), >=0 = fixed
+    shifts: Option<ndarray::ArrayView2<i32>>, // None => zeros (deterministic / jitter=0)
+    annotated: bool, // issue #277 Wave A Task 4: emit annot_v_idxs/annot_ref_pos
+    var_base: i64,   // added to non-negative annot_v_idxs entries when annotated
     parallel: bool,
-) -> (Array1<u8>, Array1<i64>) {
+) -> (Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>) {
     use crate::genotypes;
     use crate::reconstruct;
 
@@ -1005,7 +1022,14 @@ pub(crate) fn generate_batch_core(
         regions_arr[[bi, 1]] = region_bounds_b[[bi, 0]];
         regions_arr[[bi, 2]] = region_bounds_b[[bi, 1]];
     }
-    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0
+    let shifts_owned;
+    let shifts_view = match shifts {
+        Some(s) => s,
+        None => {
+            shifts_owned = Array2::<i32>::zeros((batch, ploidy));
+            shifts_owned.view()
+        }
+    };
 
     // Local identity map over THIS batch's rows: batch row bi, hap p -> local CSR row
     // bi*ploidy + p, indexing o_starts_b/o_stops_b (which are already the batch slice).
@@ -1044,21 +1068,30 @@ pub(crate) fn generate_batch_core(
         for k in 0..n_work {
             let query = k / ploidy;
             let hap = k % ploidy;
-            let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
-            let diff = diffs[[query, hap]] as i64;
-            acc += (ref_len + diff).max(0);
+            let per: i64 = if output_length >= 0 {
+                output_length
+            } else {
+                let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                (ref_len + diff).max(0)
+            };
+            acc += per;
             out_offsets_vec[k + 1] = acc;
         }
     }
 
     let total = out_offsets_vec[n_work] as usize;
     let mut out_data: Array1<u8> = uninit_output(total);
+    // Only allocate the annotation buffers when requested — the kernel writes every
+    // position when `Some`, so `uninit_output` (no zero-init) is safe here too.
+    let mut annot_v: Option<Array1<i32>> = annotated.then(|| uninit_output(total));
+    let mut annot_pos: Option<Array1<i32>> = annotated.then(|| uninit_output(total));
 
     reconstruct::reconstruct_haplotypes_from_sparse(
         out_data.view_mut(),
         out_offsets_vec.view(),
         regions_arr.view(),
-        shifts_arr.view(),
+        shifts_view,
         geno_offset_idx.view(),
         o_starts_a,
         o_stops_a,
@@ -1072,19 +1105,32 @@ pub(crate) fn generate_batch_core(
         pad_char,
         None, // keep
         None, // keep_offsets
-        None, // annot_v_idxs
-        None, // annot_ref_pos
+        annot_v.as_mut().map(|a| a.view_mut()),
+        annot_pos.as_mut().map(|a| a.view_mut()),
         parallel,
     );
 
-    (out_data, out_offsets_vec)
+    if var_base != 0 {
+        if let Some(av) = annot_v.as_mut() {
+            for x in av.iter_mut() {
+                if *x >= 0 {
+                    *x += var_base as i32;
+                }
+            }
+        }
+    }
+
+    (out_data, annot_v, annot_pos, out_offsets_vec)
 }
 
 /// Generate haplotypes for ONE batch of window rows. `o_starts_b`/`o_stops_b` are the
 /// CSR-row offsets for exactly this batch (length `n_rows * ploidy`, ABSOLUTE indices
 /// into `variant_idxs`); `region_bounds_b` is `(n_rows, 2)`, already expanded per
 /// (region, sample). Output is `n_rows`-bounded — the #284 fix. `geno_v_idxs` is the
-/// shared `variant_idxs` mmap (zero copy). Ragged output only, jitter=0.
+/// shared `variant_idxs` mmap (zero copy). `output_length=-1` yields ragged (per-hap
+/// actual length) output; `>=0` yields fixed-length output (issue #277 Wave A). No
+/// shifts/jitter support here (always zeros) -- this standalone wrapper is only used
+/// by `_Svar1Backend`'s readahead ("Design C") path, which does not support jitter.
 ///
 /// Thin FFI wrapper over [`generate_batch_core`] (which the streaming engine also uses).
 #[pyfunction]
@@ -1102,6 +1148,7 @@ pub fn svar1_generate_batch<'py>(
     ref_: PyReadonlyArray1<u8>,
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
+    output_length: i64,
     parallel: bool,
 ) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
     require_contiguous_1d(&ref_, "ref_")?;
@@ -1128,7 +1175,7 @@ pub fn svar1_generate_batch<'py>(
     let geno_v_idxs_s = store_ref.geno_v_idxs();
     let ploidy = store_ref.ploidy();
 
-    let (out_data, out_offsets_vec) = py.detach(move || {
+    let (out_data, _annot_v, _annot_pos, out_offsets_vec) = py.detach(move || {
         generate_batch_core(
             geno_v_idxs_s,
             ploidy,
@@ -1142,6 +1189,10 @@ pub fn svar1_generate_batch<'py>(
             ref_a,
             ref_offsets_a,
             pad_char,
+            output_length,
+            None, // shifts -- SVAR1's standalone wrapper does not support jitter/shifts
+            false, // annotated -- the readahead-only wrapper does not support annotated output
+            0,     // var_base -- unused when annotated=false
             parallel,
         )
     });

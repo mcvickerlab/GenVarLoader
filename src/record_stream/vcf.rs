@@ -150,6 +150,25 @@ impl WindowFiller for VcfWindowFiller {
         let sample_indices = self.sample_indices[job.s_lo..job.s_hi].to_vec();
         let n_local_samples = sample_indices.len();
 
+        // `var_base` (issue #277 Wave A Task 4, annotated output): the dataset-GLOBAL
+        // variant-id base for this window's local column 0. Unlike `PgenWindowFiller`
+        // (which pre-scans the `.pvar` into a per-contig position table and can derive
+        // this cheaply, see `pgen.rs`), `VcfWindowFiller` has no per-contig variant
+        // count/position index — genoray's `VcfRecordSource` does not expose one
+        // (checked: no cheap `contig_ranges`-equivalent). Hard-coding `var_base = 0`
+        // is CORRECT for every Wave A / current fixture (all single-contig, each
+        // window's region starts at that contig's first variant — i.e. global variant
+        // 0), but is a KNOWN GAP for a window that does not start at global variant 0
+        // (multi-contig cohorts, or a region not covering a contig's first variant):
+        // the emitted `annot_v_idxs` would be window-local, not global, in that case.
+        // Tracked as a follow-up (`streaming: VCF annotated var_idxs need a
+        // per-contig variant-count table`, GitHub issue TBD) rather than silently
+        // shipping wrong ids for an untested config; every TESTED VCF annotated
+        // config (Task 4 + Task 5 same-POS fixtures) is single-contig/whole-contig,
+        // so `var_base = 0` is exact there. Must be set on every call — see the
+        // `DecodedWindow::var_base` doc comment on why (recycled slot).
+        slot.var_base = 0;
+
         let source = VcfRecordSource::with_sample_indices(
             &self.vcf_path,
             &contig.name,

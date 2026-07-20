@@ -216,7 +216,7 @@ def _time_readahead_with_overlap_proxy(
             for lo in range(0, n_rows, batch_size):
                 hi = min(lo + batch_size, n_rows)
                 t_g0 = time.perf_counter()
-                backend.generate_batch(r_idx, s_idx, cur[0], cur[1], lo, hi)
+                backend.generate_batch(r_idx, s_idx, cur[0], cur[1], lo, hi, -1)
                 t_generate += time.perf_counter() - t_g0
             cur = nxt
     total = time.perf_counter() - t0
