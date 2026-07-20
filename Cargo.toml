@@ -37,6 +37,15 @@ features = ["abi3-py310"]
 bytemuck = "1"
 rstest = "0.26.1"
 tempfile = "3"
+# For Svar2StreamEngine's Rust unit tests: SVAR2's on-disk layout (var_key/dense CSR
+# sidecars, codec-encoded keys) has no SVAR1-style "write raw npy bytes" fixture
+# shortcut, so tests build a real finished contig via genoray_core's actual conversion
+# pipeline (`process_chromosome`, already a hard dependency via the `conversion`
+# feature) fed a synthetic indexed BCF — same approach genoray_core's OWN Rust tests
+# use (`tests/common/mod.rs::build_contig`, not reachable from this downstream crate).
+# Version/features matched to genoray_core's own choice (see its Cargo.toml) so the
+# already-resolved Cargo.lock entry is reused, not a second htslib build.
+rust-htslib = { version = "1.0", default-features = false, features = ["libdeflate"] }
 
 # Perf call-graph attribution only (`perf report --children`). Inherits release
 # codegen and adds line tables + frame pointers. NEVER the gate artifact — all

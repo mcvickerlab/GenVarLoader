@@ -10,6 +10,7 @@ use std::ops::Range;
 use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, VariantBufs};
 
 pub(crate) mod stream_engine;
+pub(crate) mod svar2_stream_engine;
 
 use crate::genotypes;
 use crate::intervals;

@@ -26,6 +26,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<svar2::store::Svar2ReconBuf>()?;
     m.add_class::<svar1::store::Svar1Store>()?;
     m.add_class::<ffi::stream_engine::Svar1StreamEngine>()?;
+    m.add_class::<ffi::svar2_stream_engine::Svar2StreamEngine>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
