@@ -18,18 +18,27 @@ Not in scope here (Task 8): end-to-end haplotype byte parity. This test never
 reconstructs a haplotype -- it only compares the two decoders' POS/ILEN/ALT
 tables.
 
-CAVEAT (see `vcf_snp_ins_del_multi` fixture docstring in conftest.py for
-detail): the streamed and written decoders tie-break same-POS multiallelic
-atoms by DIFFERENT mechanisms (Rust `(pos, seq)` heap order vs. genoray
-`.gvi` file-row order) and only agree for this fixture's pos=149 split
-because lexicographic and file order happen to coincide -- not a general
-guarantee.
+Same-POS tie-break (issue #300, corrected): the streamed decoder (Rust
+`ChunkAssembler`) and the written oracle (`gvl.write` / `.gvi`) both
+tie-break same-POS atoms by FILE ORDER -- the streamed side via a
+`BinaryHeap` keyed on `(pos, seq)` where `seq = record_seq<<32 | atom_ix` is
+a monotonic file-row counter (no lexicographic ALT comparison anywhere in
+that `Ord` impl), the written side via genoray's `.gvi` file-row index (no
+ALT sort). Since `gvl.write` only accepts pre-split biallelic input (one
+atom per record), `(pos, record-order)` agreement between the two decoders
+holds BY CONSTRUCTION. `vcf_snp_ins_del_multi`'s pos=149 pair happens to
+also be in lexicographic order, so it alone wouldn't distinguish a
+file-order tie-break from a (wrong) lexicographic one;
+`test_same_pos_var_idxs_file_order` below uses `vcf_same_pos_nonlex` /
+`vcf_same_pos_triallelic`, where file order and lexicographic order
+genuinely diverge, to prove the invariant is real and not coincidental.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 import genvarloader as gvl
 from genvarloader.genvarloader import RecordStreamEngine
@@ -213,6 +222,76 @@ def test_vcf_streaming_matches_written_all_cells_multi_region(
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (issue #300): lock the file-order same-POS tie-break invariant with
+# GENUINE (non-lexicographic) fixtures, correcting the previously-wrong
+# "lexicographic ALT order" docstrings (see module docstring above and the
+# `vcf_snp_ins_del_multi` / `pgen_snp_ins_del_multi` fixture docstrings in
+# conftest.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "vcf_same_pos_nonlex",
+        "pgen_same_pos_nonlex",
+        "vcf_same_pos_triallelic",
+        "pgen_same_pos_triallelic",
+    ],
+)
+def test_same_pos_var_idxs_file_order(request, fixture_name, tmp_path):
+    """Annotated `var_idxs` parity vs. the written oracle for same-POS
+    fixtures where FILE ORDER != LEXICOGRAPHIC ALT ORDER by construction
+    (see `vcf_same_pos_nonlex`/`vcf_same_pos_triallelic` docstrings in
+    conftest.py for the exact variant tables and genotypes).
+
+    This is expected to PASS: both the streamed `ChunkAssembler` and the
+    written oracle tie-break same-POS atoms by file order (issue #300), so
+    their `var_idxs` must agree even though a lexicographic tie-break would
+    have produced a DIFFERENT (and here, wrong) answer -- a pass on these
+    fixtures is not a coincidence the way it would be on
+    `vcf_snp_ins_del_multi`'s pos=149 pair (see module docstring).
+    """
+    f = request.getfixturevalue(fixture_name)
+    variants = str(f.vcf) if hasattr(f, "vcf") else str(f.pgen)
+
+    out = tmp_path / "ds"
+    gvl.write(out, f.regions, variants=variants, overwrite=True)
+    written = gvl.Dataset.open(out, reference=f.fasta)
+    ds = written.with_seqs("annotated")
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=variants
+    ).with_seqs("annotated")
+
+    n_cells = 0
+    saw_same_pos_variant = False
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for row in range(len(r_idx)):
+            exp = ds[int(r_idx[row]), int(s_idx[row])]  # RaggedAnnotatedHaps
+            for h in range(sds.ploidy):
+                got_vidx = np.asarray(data.var_idxs[row][h])
+                exp_vidx = np.asarray(exp.var_idxs[h])
+                np.testing.assert_array_equal(
+                    got_vidx,
+                    exp_vidx,
+                    err_msg=(
+                        f"{fixture_name} row={row} hap={h}: streamed "
+                        "var_idxs must match the written (file-order) "
+                        "oracle for same-POS atoms even when file order != "
+                        "lexicographic ALT order (#300)"
+                    ),
+                )
+                if np.any(exp_vidx >= 0):
+                    saw_same_pos_variant = True
+            n_cells += 1
+    assert n_cells > 0, f"{fixture_name}: fixture yielded no cells"
+    assert saw_same_pos_variant, (
+        f"{fixture_name}: no variant-carrying haplotype seen; the "
+        "same-POS var_idxs comparison proves nothing without one"
+    )
 
 
 def test_vcf_streaming_matches_written_all_cells_multi_contig(

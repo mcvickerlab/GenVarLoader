@@ -1,0 +1,7 @@
+##contig=<ID=chr1,length=250>
+##bcftools_viewVersion=1.22+htslib-1.23.1
+##bcftools_viewCommand=view -Oz -o vcf_same_pos_triallelic.vcf.gz triallelic.vcf; Date=Mon Jul 20 02:09:37 2026
+#CHROM	POS	ID	REF	ALT
+chr1	180	.	A	T
+chr1	180	.	A	C
+chr1	180	.	A	G
