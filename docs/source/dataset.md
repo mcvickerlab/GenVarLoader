@@ -175,13 +175,37 @@ dummy-fill details.
 
 Everything above describes [`Dataset`](api.md#genvarloader.Dataset), which reads from an on-disk
 directory produced by [`gvl.write()`](api.md#genvarloader.write). [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset)
-skips that step: it reconstructs haplotype batches directly from a live `.svar` (SparseVar) store,
-with no `gvl.write()` call and no `.gvl` directory on disk.
+skips that step: it reconstructs haplotype batches directly from a live variant source, with no
+`gvl.write()` call and no `.gvl` directory on disk. `variants=` accepts a `.svar`
+(SparseVar/SVAR1) store, a VCF/BCF path (`.vcf`, `.vcf.gz`/`.vcf.bgz`, `.bcf`; indexed, normalized the same
+way `gvl.write` requires — see [write.md](write.md)), or a PGEN file-set (`.pgen` with sibling
+`.pvar`/`.psam`, same trio `gvl.write` expects; **biallelic only**). All three read paths go through
+a shared Rust `RecordStreamEngine`, with VCF/BCF decoded window-by-window via genoray's Rust
+`VcfRecordSource → ChunkAssembler → DenseChunk` pipeline and PGEN via `PgenRecordSource →
+ChunkAssembler → DenseChunk`. **Streaming VCF/BCF makes htslib a hard runtime
+requirement** (statically linked into gvl's wheel via genoray's `conversion` feature; no separate
+install step).
+
+For the VCF/BCF path, that normalization requirement is **not enforced**: genoray's
+`ChunkAssembler` applies atomization (biallelic split) automatically on read, but does not
+perform left-alignment or REF/FASTA check-ref, and does not validate the input at all —
+un-normalized or non-left-aligned records are silently accepted (no error) and will break
+byte-identical parity. Pre-normalize with `bcftools norm` as described in [write.md](write.md)
+before streaming. The `.svar` path is unaffected — it reads from a store validated at build time.
+
+The PGEN path is the opposite case: **multiallelic PGEN is validated and rejected**, loudly, at
+construction time (before any genotype decode) — `PgenWindowFiller` requires biallelic (split)
+input because it omits pgenlib's `allele_idx_offsets`, which is only correct for biallelic data.
+Build a PGEN file-set with `bcftools norm` (as `gvl.write` requires) followed by
+`plink2 --make-pgen`; a multiallelic ALT anywhere in the `.pvar` raises immediately rather than
+silently misdecoding genotypes.
 
 ```python
 sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
+# or: variants="normed.vcf.gz" / "normed.bcf" -- reads VCF/BCF directly, no .svar needed
+# or: variants="normed.pgen" -- reads a plink2 file-set directly (biallelic only)
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
@@ -206,10 +230,10 @@ re-reads the live store instead of hitting a pre-indexed dataset — prefer a wr
 for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
 rather not pay for the write.
 
-`StreamingDataset` is currently more limited than `Dataset`: `.svar` variant sources only
-(VCF/PGEN/`.svar2` raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
-only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
-`sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
-`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the
-variant store's native column order. See the `genvarloader` skill for the
+`StreamingDataset` is currently more limited than `Dataset`: `.svar`, VCF/BCF, and PGEN
+(biallelic only) variant sources (`.svar2` raises `NotImplementedError`),
+`with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and **iterable-only** —
+`sds[r, s]` raises `TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch).
+`sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching
+`gvl.write()`), not the variant source's native column order. See the `genvarloader` skill for the
 full list of what's not yet wired.

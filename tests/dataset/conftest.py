@@ -337,3 +337,499 @@ def snap_dataset(source_bed, vcf_dir, reference, tmp_path_factory):
         max_jitter=2,
     )
     return gvl.Dataset.open(out, reference=reference)
+
+
+@dataclass(slots=True)
+class StreamingVcfFixture:
+    """VCF-source counterpart to `svar1_dataset_fixture` for the record-stream
+    engine (`RecordStreamEngine`, issue #276 tasks 5+). Reuses the two-sample/
+    two-variant VCF fixture Task 4 committed for the Rust `VcfWindowFiller`
+    tests (`tests/data/streaming/two_var_two_sample.vcf.gz` +
+    `src/record_stream/vcf.rs`'s `vcf_filler_decodes_window_to_local_table`),
+    so the Rust and Python suites exercise the SAME variant data: chr1
+    SNP@POS=11 (0-based 10, A>G) and DEL@POS=21 (0-based 20, ACGT>A,
+    ilen=-3), samples s1/s2, ploidy 2.
+
+    `chr1_ref_bytes` mirrors the 100 'A' bytes the Rust fixture uses (long
+    enough to cover both variants and a `[0, 100)` test region). `fasta` is a
+    matching FASTA (same 100bp of 'A', samtools-indexed) for callers that
+    want a real reference path (e.g. a future left-align opt-in); the Task 5
+    FFI-seam test itself passes `fasta_path=None`, matching `gvl.write`'s VCF
+    parity contract (no read-time left-align -- see `vcf.rs`'s module doc).
+    `regions` is a single-contig, single-region bed in the same
+    `{"chrom", "chromStart", "chromEnd"}` shape `gvl.write`/`StreamingDataset`
+    use, so Task 6 can reuse it directly.
+    """
+
+    vcf: Path
+    fasta: Path
+    chr1_ref_bytes: bytes
+    sample_names: list[str]
+    n_samples: int
+    ploidy: int
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def streaming_vcf_fixture(tmp_path_factory) -> StreamingVcfFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "two_var_two_sample.vcf.gz"
+    )
+    chr1_ref_bytes = b"A" * 100
+
+    d = tmp_path_factory.mktemp("streaming_vcf_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{chr1_ref_bytes.decode()}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(chr1_ref_bytes)]}
+    )
+
+    return StreamingVcfFixture(
+        vcf=vcf,
+        fasta=fasta,
+        chr1_ref_bytes=chr1_ref_bytes,
+        sample_names=["s1", "s2"],
+        n_samples=2,
+        ploidy=2,
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class StreamingPgenFixture:
+    """PGEN-source counterpart to `streaming_vcf_fixture`, for the record-stream
+    engine's `_PgenBackend` (issue #276 task 11). Reuses the committed
+    `tests/data/streaming/two_var_two_sample.{pgen,pvar,psam}` fixture (Task
+    10's `PgenWindowFiller` tests, `src/record_stream/pgen.rs`), generated
+    from `two_var_two_sample.vcf.gz` via `plink2 --make-pgen` -- SAME
+    variants/samples/reference as `streaming_vcf_fixture` (chr1 SNP@POS=11
+    0-based 10, DEL@POS=21 0-based 20, samples s1/s2, ploidy 2), so the two
+    fixtures are drop-in interchangeable for cross-backend tests.
+    """
+
+    pgen: Path
+    fasta: Path
+    chr1_ref_bytes: bytes
+    sample_names: list[str]
+    n_samples: int
+    ploidy: int
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def streaming_pgen_fixture(tmp_path_factory) -> StreamingPgenFixture:
+    pgen = (
+        Path(__file__).parent.parent / "data" / "streaming" / "two_var_two_sample.pgen"
+    )
+    chr1_ref_bytes = b"A" * 100
+
+    d = tmp_path_factory.mktemp("streaming_pgen_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{chr1_ref_bytes.decode()}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(chr1_ref_bytes)]}
+    )
+
+    return StreamingPgenFixture(
+        pgen=pgen,
+        fasta=fasta,
+        chr1_ref_bytes=chr1_ref_bytes,
+        sample_names=["s1", "s2"],
+        n_samples=2,
+        ploidy=2,
+        regions=regions,
+    )
+
+
+# 250bp reference for the Task 7 parity-gate fixture (issue #276). Built once via
+# vcfixture's `ReferenceBuilder(seed=7)` + explicit overrides at each variant locus
+# (anchor bases pinned to match the VCF's REF alleles, flank-guard bases pinned to
+# something other than the indel's trailing base to prevent `bcftools norm`
+# left-alignment from silently shifting a variant off its intended position) --
+# see `.superpowers/sdd/task-7-report.md` for the exact generation script. Stored as
+# a literal here (like `_SVAR1_STREAM_REF` above) so the fixture doesn't need a
+# checked-in FASTA binary; only the harder-to-regenerate VCF is committed.
+_VCF_PARITY_REF = (
+    "TGGTGTTAACCTTACTATACTCCCGCTCCAGGGTTTGGCTCATATGAACAAGTCTTTGCG"
+    "CCCATAAAGCTAGCCAGTGAGCTTAGTTGGAGCAAGGGGTGCGGAAGCGGTACTCCGTCG"
+    "CGCGGGTAGCCAACTACTTAAGACCTAGGATTCTGTTGCAGATTAGAACTTGGGACTCAA"
+    "GATTGCTGCCCTAAGCTATACTAGGCAGCTGCAGCGTCTGGTTTTACTCAGTGTGATCTT"
+    "TATGCTTGAG"
+)
+assert len(_VCF_PARITY_REF) == 250
+
+
+@dataclass(slots=True)
+class VcfSnpInsDelMultiFixture:
+    """Task 7 (issue #276) parity-gate fixture: a richer VCF than
+    `streaming_vcf_fixture` covering a SNP, an insertion (ILEN > 0), a deletion
+    (ILEN < 0), and a multiallelic site (2 ALTs, pre-split biallelic by
+    `bcftools norm -m -` since `gvl.write` rejects multi-allelic records) across
+    3 samples -- exercises ILEN's sign both ways plus the biallelic-split path
+    on the SAME position (both split atoms anchor at 0-based pos 149).
+
+    Committed under `tests/data/streaming/vcf_snp_ins_del_multi.vcf.gz` (+ `.tbi`)
+    already left-aligned/atomized/split via `bcftools norm -f <ref> -a
+    --atom-overlaps . -f <ref> -m -` against `_VCF_PARITY_REF`, so both the
+    written-dataset oracle (`gvl.write`, Python cyvcf2 decode) and the streamed
+    table (`RecordStreamEngine.debug_decode_window`, Rust `ChunkAssembler`
+    decode) read the identical already-normalized records -- the differential
+    test is checking that two INDEPENDENT decoders agree on an already-atomic
+    input, not asking either one to normalize anything.
+
+    Variants (0-based pos, REF>ALT, ilen):
+      pos=29   A>G     ilen=0   (SNP)
+      pos=69   C>CAT   ilen=+2  (insertion)
+      pos=109  GTAC>G  ilen=-3  (deletion)
+      pos=149  A>G     ilen=0   (multiallelic split, atom 1)
+      pos=149  A>T     ilen=0   (multiallelic split, atom 2)
+
+    Same-POS tie-break CAVEAT: the streamed decoder (Rust `ChunkAssembler`)
+    orders same-POS atoms via a `BinaryHeap` keyed on `(pos, seq)` --
+    lexicographic ALT order -- while the written oracle (`gvl.write`) preserves
+    genoray's `.gvi` file-row order (VCF file order). For the pos=149 pair
+    above, `A>G` sorts before `A>T` BOTH lexicographically and in file order,
+    so the two mechanisms agree COINCIDENTALLY. This is not a guarantee: if a
+    future edit reorders these split ALTs, or adds a same-POS triallelic site
+    where lexicographic order != file order, the two decoders would legitimately
+    tie-break differently and `test_streaming_vcf_parity.py` would fail for a
+    reason unrelated to any real decoder bug. Don't reorder/add same-POS atoms
+    here without re-checking that lexicographic and file order still coincide
+    (or updating the parity test to tolerate a permutation).
+    """
+
+    vcf: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_snp_ins_del_multi(tmp_path_factory) -> VcfSnpInsDelMultiFixture:
+    vcf = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_snp_ins_del_multi.vcf.gz"
+    )
+
+    d = tmp_path_factory.mktemp("vcf_snp_ins_del_multi_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return VcfSnpInsDelMultiFixture(
+        vcf=vcf,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@pytest.fixture(scope="module")
+def vcf_snp_ins_del_multi_regions(
+    vcf_snp_ins_del_multi: VcfSnpInsDelMultiFixture,
+) -> pl.DataFrame:
+    """Task 8 (issue #276): a 3-region bed splitting `vcf_snp_ins_del_multi`'s
+    single 250bp contig into disjoint sub-windows, over the SAME committed VCF
+    + FASTA (no fixture regeneration needed -- `regions` is the only axis that
+    changes). This exercises `RecordBackend::generate`'s per-(region, sample)
+    CSR expansion (`src/record_stream/engine.rs`, the Critical bug fixed in
+    Task 3b) across >=2 regions in one window, which the single-region
+    `vcf_snp_ins_del_multi.regions` (reused unmodified by Task 7's table gate)
+    does not.
+
+    Region boundaries land clear of every variant's extent so no variant spans
+    a region edge:
+      region 0 [0, 90)    contains pos=29 (SNP) and pos=69 (INS, extent [69,70))
+      region 1 [90, 170)  contains pos=109 (DEL, extent [109,113)) and both
+                           pos=149 multiallelic-split atoms
+      region 2 [170, 250) no variants -- pure-reference region
+    """
+    contig = vcf_snp_ins_del_multi.contig
+    return pl.DataFrame(
+        {
+            "chrom": [contig, contig, contig],
+            "chromStart": [0, 90, 170],
+            "chromEnd": [90, 170, 250],
+        }
+    )
+
+
+# Task 8 (issue #276) multi-contig fixture: hand-authored (already-atomic,
+# already-left-of-any-ambiguity) SNP/INS/DEL records across TWO contigs, built
+# inline (bgzip+tabix at fixture time) rather than committed as a binary --
+# unlike `vcf_snp_ins_del_multi` (which needed `vcfixture` + `bcftools norm`
+# to produce a genuinely-multiallelic-then-split site), these records need no
+# normalization pass: neither `gvl.write`'s VCF read path nor the streaming
+# `VcfWindowFiller` left-aligns or REF-checks when `fasta_path=None` (see
+# `src/record_stream/vcf.rs`'s module doc), so a hand-written already-biallelic
+# VCF is read literally by both decoders -- same convention `_SVAR1_MC_VCF`
+# already uses for its inline (non-committed) multi-contig fixture.
+_VCF_MC_REF1 = (
+    "GACGGGATCTGCGGTACGCATAACTTTGCGTGAATCGATGATCTGCTGATATTCTATTATCCATTGAATG"
+    "CTTGGCCCCCCTGCAGTCATAATCGTCATAGTCAGTATGCTCCACTCATC"
+)
+assert len(_VCF_MC_REF1) == 120
+_VCF_MC_REF2 = (
+    "CAGTCCACGGCTGTCATGAGCTCAAACTTATGGCCAAATGAAACTCGTGCGTTAGAACAACTCTCCTATA"
+    "CACCTACTTGCACGAGCGGCCATCGACGGT"
+)
+assert len(_VCF_MC_REF2) == 100
+# chr1: SNP@0-based-20 (T>C), INS@0-based-50 (A>AGG, ilen+2), DEL@0-based-85
+# (GTCA>G, ilen-3). chr2: SNP@0-based-15 (A>G), SNP@0-based-70 (C>T). REF
+# alleles match `_VCF_MC_REF1`/`_VCF_MC_REF2` at each 0-based position exactly.
+_VCF_MC_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=120>
+##contig=<ID=chr2,length=100>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts0\ts1\ts2
+chr1\t21\t.\tT\tC\t.\t.\t.\tGT\t1|0\t0|1\t0|0
+chr1\t51\t.\tA\tAGG\t.\t.\t.\tGT\t0|1\t1|1\t1|0
+chr1\t86\t.\tGTCA\tG\t.\t.\t.\tGT\t1|0\t0|1\t1|1
+chr2\t16\t.\tA\tG\t.\t.\t.\tGT\t0|1\t1|0\t1|1
+chr2\t71\t.\tC\tT\t.\t.\t.\tGT\t1|1\t0|1\t0|0
+"""
+
+
+@dataclass(slots=True)
+class VcfMultiContigFixture:
+    """Task 8 (issue #276) end-to-end parity fixture spanning two contigs, so
+    the streamed haplotype comparison exercises the engine's per-contig window
+    boundary (`_plan`'s contig-run splitting, `_streaming.py`) in addition to
+    the per-region CSR expansion `vcf_snp_ins_del_multi_regions` covers."""
+
+    vcf: Path
+    fasta: Path
+    contigs: list[str]
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def vcf_multi_contig(tmp_path_factory) -> VcfMultiContigFixture:
+    d = tmp_path_factory.mktemp("vcf_mc_src")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_MC_REF1}\n>chr2\n{_VCF_MC_REF2}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    vcf_txt = d / "in.vcf"
+    vcf_txt.write_text(_VCF_MC_VCF)
+    vcf_gz = d / "in.vcf.gz"
+    with vcf_gz.open("wb") as fh:
+        subprocess.run(["bgzip", "-c", str(vcf_txt)], stdout=fh, check=True)
+    subprocess.run(["tabix", "-p", "vcf", str(vcf_gz)], check=True)
+
+    # 2 regions per contig (chr1: variants split SNP+INS in region 0, DEL in
+    # region 1; chr2: one SNP per region) -- contiguous per-contig row blocks,
+    # matching `_plan`'s `np.diff(contig_idxs)` run-detection requirement.
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr2", "chr2"],
+            "chromStart": [0, 60, 0, 50],
+            "chromEnd": [60, 120, 50, 100],
+        }
+    )
+
+    return VcfMultiContigFixture(
+        vcf=vcf_gz,
+        fasta=fasta,
+        contigs=["chr1", "chr2"],
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenSnpInsDelMultiFixture:
+    """PGEN-source counterpart to `vcf_snp_ins_del_multi`, for Task 12's PGEN
+    parity gates (issue #276). Points at the committed
+    `tests/data/streaming/vcf_snp_ins_del_multi.{pgen,pvar,psam}` fileset,
+    generated via:
+
+        plink2 --vcf tests/data/streaming/vcf_snp_ins_del_multi.vcf.gz \\
+               --make-pgen --allow-extra-chr --output-chr chrM \\
+               --out tests/data/streaming/vcf_snp_ins_del_multi
+
+    (same `--output-chr chrM` convention Task 10 used for
+    `two_var_two_sample.pgen`, needed to keep the `chr1` name rather than
+    plink2's default un-prefixed human-contig coding). The `.pvar` carries
+    the SAME 5 records (POS 30/70/110/150/150, same REF/ALT) as
+    `vcf_snp_ins_del_multi`'s VCF -- see that fixture's docstring for the
+    full variant table and the same-POS tie-break caveat, which applies
+    identically here since both decoders read the same already-split input.
+    SAME `_VCF_PARITY_REF` reference/contig/samples/regions as
+    `vcf_snp_ins_del_multi`, so `vcf_snp_ins_del_multi_regions` is reusable
+    unmodified for PGEN multi-region coverage.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_snp_ins_del_multi(tmp_path_factory) -> PgenSnpInsDelMultiFixture:
+    pgen = (
+        Path(__file__).parent.parent
+        / "data"
+        / "streaming"
+        / "vcf_snp_ins_del_multi.pgen"
+    )
+
+    d = tmp_path_factory.mktemp("pgen_snp_ins_del_multi_fasta")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_VCF_PARITY_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_VCF_PARITY_REF)]}
+    )
+
+    return PgenSnpInsDelMultiFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        ploidy=2,
+        sample_names=["s0", "s1", "s2"],
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenUnsortedSamplesFixture:
+    """Regression fixture (issue #276 final-review blocker) for the PGEN
+    sample-ordering bug: a `.psam` whose physical sample order is NOT
+    lexicographically sorted. Points at the committed
+    `tests/data/streaming/unsorted_samples.{pgen,pvar,psam}` fileset,
+    generated via:
+
+        plink2 --vcf tests/data/streaming/unsorted_samples.vcf.gz \\
+               --make-pgen --allow-extra-chr --output-chr chrM \\
+               --out tests/data/streaming/unsorted_samples
+
+    The `.psam` physical order is `S10, S2, S1`; the public `sample_idx`
+    (lexicographically-sorted) order `gvl.write`/`gvl.Dataset` use is
+    `S1, S10, S2` (note `"S10" < "S2"` in string order). Each sample carries
+    exactly one distinct SNP (contig `chr1`, 60bp all-`A` ref):
+    S10→pos10 A>C, S2→pos30 A>G, S1→pos50 A>T. So streaming PGEN reading the
+    WRONG (physical) column for a public index changes the reconstructed
+    haplotypes -- the pre-fix bug this fixture proves fixed, and which every
+    prior PGEN fixture (pre-sorted `s0/s1/s2` names) could not catch.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_unsorted_samples(tmp_path_factory) -> PgenUnsortedSamplesFixture:
+    pgen = Path(__file__).parent.parent / "data" / "streaming" / "unsorted_samples.pgen"
+
+    d = tmp_path_factory.mktemp("pgen_unsorted_samples_fasta")
+    fasta = d / "ref.fa"
+    ref = "A" * 60
+    fasta.write_text(f">chr1\n{ref}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(ref)]}
+    )
+
+    return PgenUnsortedSamplesFixture(
+        pgen=pgen,
+        fasta=fasta,
+        contig="chr1",
+        n_samples=3,
+        # Public lexicographically-sorted order -- what gvl.Dataset[r, s] and
+        # the streamed backend both index by ("S10" < "S2" in string order).
+        # The .psam physical order is S10, S2, S1.
+        sample_names=["S1", "S10", "S2"],
+        ploidy=2,
+        regions=regions,
+    )
+
+
+@dataclass(slots=True)
+class PgenMultiContigFixture:
+    """PGEN-source counterpart to `vcf_multi_contig`, for Task 12's
+    multi-contig end-to-end PGEN parity coverage (issue #276). Converts that
+    fixture's VCF via `plink2 --make-pgen` into a fresh `tmp_path_factory`
+    dir at fixture time (no binary needs committing -- `vcf_multi_contig`'s
+    VCF is itself built inline, so re-deriving the PGEN alongside it keeps
+    the two fixtures' variant data trivially in sync). Same 2-contig SNP/
+    INS/DEL records, samples, and regions as `vcf_multi_contig`.
+    """
+
+    pgen: Path
+    fasta: Path
+    contigs: list[str]
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_multi_contig(
+    vcf_multi_contig: VcfMultiContigFixture, tmp_path_factory
+) -> PgenMultiContigFixture:
+    d = tmp_path_factory.mktemp("pgen_mc")
+    out_prefix = d / "mc"
+    subprocess.run(
+        [
+            "plink2",
+            "--vcf",
+            str(vcf_multi_contig.vcf),
+            "--make-pgen",
+            "--allow-extra-chr",
+            "--output-chr",
+            "chrM",
+            "--out",
+            str(out_prefix),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    return PgenMultiContigFixture(
+        pgen=out_prefix.with_suffix(".pgen"),
+        fasta=vcf_multi_contig.fasta,
+        contigs=vcf_multi_contig.contigs,
+        n_samples=vcf_multi_contig.n_samples,
+        ploidy=vcf_multi_contig.ploidy,
+        sample_names=vcf_multi_contig.sample_names,
+        regions=vcf_multi_contig.regions,
+    )

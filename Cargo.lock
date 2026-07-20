@@ -600,11 +600,12 @@ dependencies = [
 [[package]]
 name = "genoray"
 version = "0.1.0"
-source = "git+https://github.com/d-laub/genoray.git?rev=e07477e687c913f9605fc79ea251f1bb3b177aa9#e07477e687c913f9605fc79ea251f1bb3b177aa9"
+source = "git+https://github.com/d-laub/genoray.git?rev=1d756adc8324198781f75610eb465c8c0ac4772f#1d756adc8324198781f75610eb465c8c0ac4772f"
 dependencies = [
  "bytemuck",
  "crossbeam-channel",
  "half",
+ "libc",
  "memmap2",
  "ndarray",
  "ndarray-npy",
@@ -1733,7 +1734,7 @@ dependencies = [
 [[package]]
 name = "svar2-codec"
 version = "0.1.0"
-source = "git+https://github.com/d-laub/genoray.git?rev=e07477e687c913f9605fc79ea251f1bb3b177aa9#e07477e687c913f9605fc79ea251f1bb3b177aa9"
+source = "git+https://github.com/d-laub/genoray.git?rev=1d756adc8324198781f75610eb465c8c0ac4772f#1d756adc8324198781f75610eb465c8c0ac4772f"
 
 [[package]]
 name = "syn"
