@@ -230,11 +230,22 @@ since every window re-reads the live store instead of hitting a pre-indexed data
 written `Dataset` for repeated-epoch training, and `StreamingDataset` for one-shot/inference work
 or when you'd rather not pay for the write.
 
+**Parallelism lives inside Rust, not in worker processes.** For a `.svar2` source, each
+read window's haplotypes are reconstructed in coarse *super-batches* dispatched across
+cores by a GIL-free Rust kernel — so a single `StreamingDataset` iterator saturates the
+machine on its own. `num_workers > 0` is therefore **not** the scaling path (and
+`to_dataloader(num_workers>0)` raises): sharding across worker processes would only add
+per-worker RAM, IPC, and idle-core overhead on top of work Rust already parallelizes. The
+super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iteration order
+stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
+with each batch identify every row.
+
 ### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`
 
 `StreamingDataset` supports the following read-time knobs (issue
 [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
-`Dataset` methods:
+`Dataset` methods. These Wave A knobs are wired for the **SVAR1, VCF, and PGEN** backends;
+the `.svar2` backend does not yet support them (see the `.svar2` note below):
 
 - **`with_len(length: int | "ragged")`** — `"ragged"` (the default) yields each hap's actual
   length; a positive `int` yields exactly that many bases per hap. Unlike `Dataset.with_len`,
@@ -268,9 +279,14 @@ are **not yet implemented** for `StreamingDataset` — that's Wave B (issue
 [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs` raises
 `NotImplementedError` for any kind other than `"haplotypes"`/`"annotated"`.
 
-`StreamingDataset` is otherwise more limited than `Dataset`: `.svar`, VCF/BCF, and PGEN
-(biallelic only) variant sources (`.svar2` raises `NotImplementedError`), and **iterable-only** —
-`sds[r, s]` raises `TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch).
-`sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching
-`gvl.write()`), not the variant source's native column order. See the `genvarloader` skill for the
+The **`.svar2` backend** does not yet support these Wave A knobs. It is currently
+**haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
+`with_len(<int>)`, or `with_seqs("annotated")` raises `NotImplementedError` (SVAR2 Wave A support
+is a known follow-up).
+
+`StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
+and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises
+`TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
+`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the variant
+source's native column order. See the `genvarloader` skill for the
 full list of what's not yet wired.

@@ -11,6 +11,7 @@ use crate::variants::windows::{assemble_variants_mode, assemble_windows_mode, Va
 
 pub(crate) mod stream_core;
 pub(crate) mod stream_engine;
+pub(crate) mod svar2_stream_engine;
 
 use crate::genotypes;
 use crate::intervals;
@@ -910,6 +911,76 @@ pub fn svar1_read_window<'py>(
     Ok((o_starts.into_pyarray(py), o_stops.into_pyarray(py)))
 }
 
+/// Compute a window's SVAR2 read-bound ranges in Rust (GIL released), replacing the
+/// Python `SparseVar2._find_ranges` call. `sample_idx` are PHYSICAL store columns
+/// (public sorted-name -> physical translation happens Python-side). Returns flat i64
+/// range arrays: vk_snp/vk_indel are `[start, stop, ...]` in (region, sample, ploid)
+/// C-order (len n_reg*n_s*P*2); dense_snp/dense_indel per region (len n_reg*2);
+/// sample_cols len n_s. No genoray rev bump: `find_ranges` is public at the pinned rev.
+#[pyfunction]
+pub fn svar2_read_window<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    starts: PyReadonlyArray1<u32>,
+    ends: PyReadonlyArray1<u32>,
+    sample_idx: PyReadonlyArray1<i64>,
+) -> PyResult<(
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<i64>>,
+)> {
+    require_contiguous_1d(&starts, "starts")?;
+    require_contiguous_1d(&ends, "ends")?;
+
+    let starts_a = starts.as_array();
+    let ends_a = ends.as_array();
+    let regions_v: Vec<(u32, u32)> = starts_a
+        .iter()
+        .zip(ends_a.iter())
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    let samples_v: Vec<usize> = sample_idx.as_array().iter().map(|&s| s as usize).collect();
+
+    let store_ref: &crate::svar2::store::Svar2Store = &store;
+
+    let result = py.detach(
+        move || -> anyhow::Result<(Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>)> {
+            let reader = store_ref
+                .reader(contig)
+                .ok_or_else(|| anyhow::anyhow!("no reader for contig {contig}"))?;
+            let rb = genoray_core::query::find_ranges(reader, &regions_v, Some(&samples_v));
+            let flat = |v: &[std::ops::Range<usize>]| -> Vec<i64> {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for r in v {
+                    out.push(r.start as i64);
+                    out.push(r.end as i64);
+                }
+                out
+            };
+            Ok((
+                flat(&rb.vk_snp_range),
+                flat(&rb.vk_indel_range),
+                flat(&rb.dense_snp_range),
+                flat(&rb.dense_indel_range),
+                rb.sample_cols.iter().map(|&c| c as i64).collect(),
+            ))
+        },
+    );
+
+    let (vk_snp, vk_indel, dense_snp, dense_indel, sample_cols) =
+        result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    Ok((
+        Array1::from_vec(vk_snp).into_pyarray(py),
+        Array1::from_vec(vk_indel).into_pyarray(py),
+        Array1::from_vec(dense_snp).into_pyarray(py),
+        Array1::from_vec(dense_indel).into_pyarray(py),
+        Array1::from_vec(sample_cols).into_pyarray(py),
+    ))
+}
+
 /// Read-through prefetch: fault the EXACT pages a later `generate_batch` call will
 /// read, warming the shared OS page cache (and triggering kernel readahead of
 /// subsequent pages that overlaps with the caller's own CPU work). `o_starts`/
@@ -1425,15 +1496,11 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     parallel: bool,
     filter_exonic: bool,
 ) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
-    use crate::reconstruct;
-    use crate::svar2;
-
     let reader = store.reader(contig).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
     })?;
 
     let shifts_a = shifts.as_array();
-    let ploidy = shifts_a.ncols();
     let region_bounds_a = region_bounds.as_array();
     let n_q = region_bounds_a.nrows();
 
@@ -1478,95 +1545,216 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     let ref_offsets_a = ref_offsets.as_array();
 
     let (out_data, out_offsets_vec) = py.detach(move || {
-        let rb = genoray_core::query::HapRanges::new(
+        let mut out_data: Vec<u8> = Vec::new();
+        let mut out_offsets: Vec<i64> = Vec::new();
+        crate::svar2::svar2_readbound_chain(
+            reader,
             &region_starts_v,
             &orig_samples_v,
             &vk_snp_range_v,
             &vk_indel_range_v,
             &dense_snp_range_v,
             &dense_indel_range_v,
-            ploidy,
-        );
-        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
-
-        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
-        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
-
-        let flat = svar2::split_to_flat(&br);
-        let dense_range_a =
-            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
-
-        // Step 1: size via the same two-source diff core the union path uses.
-        let diffs = svar2::hap_diffs_svar2(
-            regions.view(),
-            ploidy,
-            &flat.vk_pos,
-            &flat.vk_key,
-            &flat.vk_off,
-            &flat.dense_pos,
-            &flat.dense_key,
-            dense_range_a,
-            &flat.dense_present,
-            &flat.dense_present_off,
-            &lut_bytes,
-            &lut_off,
-            filter_exonic,
-        );
-
-        // Step 2: per-haplotype output lengths and prefix-sum offsets.
-        let n_work = n_q * ploidy;
-        let mut out_offsets_vec: Array1<i64> = Array1::zeros(n_work + 1);
-        {
-            let mut acc: i64 = 0;
-            out_offsets_vec[0] = 0;
-            for k in 0..n_work {
-                let query = k / ploidy;
-                let hap = k % ploidy;
-                let len: i64 = if output_length >= 0 {
-                    output_length
-                } else {
-                    let ref_len = (regions[[query, 2]] - regions[[query, 1]]) as i64;
-                    let diff = diffs[[query, hap]] as i64;
-                    (ref_len + diff).max(0)
-                };
-                acc += len;
-                out_offsets_vec[k + 1] = acc;
-            }
-        }
-
-        // Step 3: allocate the output buffer in Rust.
-        let total = out_offsets_vec[n_work] as usize;
-        let mut out_data: Array1<u8> = uninit_output(total);
-
-        // Step 4: reconstruct — reuse the byte-validated union-path kernel
-        // unchanged, now fed the read-bound gather's flat channels.
-        let out_bounds = reconstruct::bounds_from_offsets(out_offsets_vec.view());
-        reconstruct::reconstruct_haplotypes_from_svar2(
-            out_data.view_mut(),
-            out_bounds.view(),
             regions.view(),
             shifts_a,
-            numpy::ndarray::ArrayView1::from(flat.vk_pos.as_slice()),
-            numpy::ndarray::ArrayView1::from(flat.vk_key.as_slice()),
-            numpy::ndarray::ArrayView1::from(flat.vk_off.as_slice()),
-            numpy::ndarray::ArrayView1::from(flat.dense_pos.as_slice()),
-            numpy::ndarray::ArrayView1::from(flat.dense_key.as_slice()),
-            dense_range_a,
-            numpy::ndarray::ArrayView1::from(flat.dense_present.as_slice()),
-            numpy::ndarray::ArrayView1::from(flat.dense_present_off.as_slice()),
-            numpy::ndarray::ArrayView1::from(lut_bytes.as_slice()),
-            numpy::ndarray::ArrayView1::from(lut_off.as_slice()),
             ref_a,
             ref_offsets_a,
             pad_char,
+            output_length,
             parallel,
             filter_exonic,
+            &mut out_data,
+            &mut out_offsets,
         );
-
-        (out_data, out_offsets_vec)
+        (Array1::from_vec(out_data), Array1::from_vec(out_offsets))
     });
 
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
+}
+
+/// Fill a recycled [`crate::svar2::store::Svar2ReconBuf`] with the read-bound
+/// reconstruction of a streaming "super-batch" of (region, sample) rows — a coarser
+/// batch than [`reconstruct_haplotypes_from_svar2_readbound`]'s per-`batch_size` call,
+/// letting the sync/async drive amortize one Rust crossing (and, when `parallel`,
+/// one rayon fork/join) over many drained `batch_size` slices
+/// ([`crate::svar2::store::Svar2ReconBuf::batch`]).
+///
+/// `parallel` is supplied by Python (`should_parallelize(total_out_bytes)`); output is
+/// always ragged (`output_length = -1`, splicing out of scope so `filter_exonic` is
+/// hard-`false`). Mirrors `reconstruct_haplotypes_from_svar2_readbound`'s pre-detach
+/// prep (regions build, `arr2_to_ranges`, view builders) and GIL-free chain call.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+pub fn svar2_reconstruct_super_batch<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    shifts: PyReadonlyArray2<i32>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    parallel: bool,
+    mut buf: PyRefMut<'py, crate::svar2::store::Svar2ReconBuf>,
+) -> PyResult<()> {
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let shifts_a = shifts.as_array();
+    let region_bounds_a = region_bounds.as_array();
+    let n_q = region_bounds_a.nrows();
+
+    // Build `regions` (n_q, 3) as [contig_idx=0, start, end) — same layout as
+    // `reconstruct_haplotypes_from_svar2_readbound`.
+    let mut regions = Array2::<i32>::zeros((n_q, 3));
+    for q in 0..n_q {
+        regions[[q, 1]] = region_bounds_a[[q, 0]];
+        regions[[q, 2]] = region_bounds_a[[q, 1]];
+    }
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
+
+    // See `reconstruct_haplotypes_from_svar2_readbound` for why `ref_` (but not
+    // `ref_offsets`) needs this guard.
+    require_contiguous_1d(&ref_, "ref_")?;
+
+    let ref_a = ref_.as_array();
+    let ref_offsets_a = ref_offsets.as_array();
+
+    let (data, offsets) = py.detach(move || {
+        let mut out_data: Vec<u8> = Vec::new();
+        let mut out_offsets: Vec<i64> = Vec::new();
+        crate::svar2::svar2_readbound_chain(
+            reader,
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            regions.view(),
+            shifts_a,
+            ref_a,
+            ref_offsets_a,
+            pad_char,
+            -1,
+            parallel,
+            false,
+            &mut out_data,
+            &mut out_offsets,
+        );
+        (out_data, out_offsets)
+    });
+    buf.set(data, offsets, n_q);
+    Ok(())
+}
+
+/// Thin GIL-holding wrapper around the GIL-free [`crate::svar2::window`] core
+/// (`Svar2WindowRanges::compute` -> [`crate::svar2::window::fill_super_batch_rs`]):
+/// runs the whole find_ranges -> gather -> reconstruct chain for window rows
+/// `[sb_lo, sb_hi)` in one call, returning a freshly allocated `(data, offsets)`
+/// pair instead of filling a recycled [`crate::svar2::store::Svar2ReconBuf`].
+///
+/// This exists to prove byte-identity against the existing "sync" fill+drain path
+/// (`svar2_read_window` + `svar2_reconstruct_super_batch`) before the streaming
+/// engine's producer thread is built (PR-3 Task 2) -- the producer thread has no
+/// GIL to hold, so it calls `fill_super_batch_rs` directly; this pyfunction is the
+/// parity harness, not the production call site.
+///
+/// `region_bounds` is the window's per-region `(start, end)` i32 pairs `(n_reg, 2)`.
+/// `ref_offsets` is accepted for signature symmetry with the sync path but unused --
+/// the ref slice the caller passes is always a single contiguous contig
+/// (`ref_offsets = [0, len]`), same convention `reconstruct_haplotypes_from_svar2_readbound`
+/// documents for `ref_`.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+pub fn svar2_fill_super_batch<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    starts: PyReadonlyArray1<u32>,
+    ends: PyReadonlyArray1<u32>,
+    sample_idx: PyReadonlyArray1<i64>,
+    region_bounds: PyReadonlyArray2<i32>,
+    ref_: PyReadonlyArray1<u8>,
+    ref_offsets: PyReadonlyArray1<i64>,
+    pad_char: u8,
+    sb_lo: usize,
+    sb_hi: usize,
+    parallel: bool,
+) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
+    let starts_v: Vec<u32> = starts.as_slice()?.to_vec();
+    let ends_v: Vec<u32> = ends.as_slice()?.to_vec();
+    let regions_v: Vec<(u32, u32)> = starts_v
+        .iter()
+        .zip(&ends_v)
+        .map(|(&s, &e)| (s, e))
+        .collect();
+    let samples_v: Vec<usize> = sample_idx
+        .as_slice()?
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let rbnd = region_bounds.as_array();
+    let region_bnd_v: Vec<(i32, i32)> = (0..rbnd.nrows())
+        .map(|i| (rbnd[[i, 0]], rbnd[[i, 1]]))
+        .collect();
+    // See `reconstruct_haplotypes_from_svar2_readbound` for why `ref_` (but not
+    // `ref_offsets`) needs to be contiguous. Use the shared helper for a friendly
+    // "ref_ must be C-contiguous" message, matching the sibling
+    // `svar2_reconstruct_super_batch` (#307).
+    require_contiguous_1d(&ref_, "ref_")?;
+    let ref_v: Vec<u8> = ref_
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above")
+        .to_vec();
+    let _ = ref_offsets; // ref slice is a single contiguous contig; offsets are [0, len]
+
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+    let ploidy = reader.ploidy();
+
+    let (data, offsets) = py.detach(move || -> (Vec<u8>, Vec<i64>) {
+        let ranges = crate::svar2::window::Svar2WindowRanges::compute(
+            reader,
+            &regions_v,
+            &samples_v,
+            ploidy,
+        );
+        let mut out_data = Vec::new();
+        let mut out_offsets = Vec::new();
+        crate::svar2::window::fill_super_batch_rs(
+            reader,
+            &ranges,
+            &region_bnd_v,
+            &ref_v,
+            pad_char,
+            sb_lo,
+            sb_hi,
+            parallel,
+            &mut out_data,
+            &mut out_offsets,
+        );
+        (out_data, out_offsets)
+    });
+    Ok((data.into_pyarray(py), offsets.into_pyarray(py)))
 }
 
 /// Scatter-write variant of [`reconstruct_haplotypes_from_svar2_readbound`]: writes

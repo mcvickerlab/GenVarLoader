@@ -12,6 +12,8 @@ scripts/
 .custom_benchmarks/
 benchmarking/*
 !benchmarking/streaming/
+benchmarking/streaming/*.cache/
+benchmarking/streaming/.*cache/
 genvarloader*.tar.gz
 .nfs*
 commit_msg.txt

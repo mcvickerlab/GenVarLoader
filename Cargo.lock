@@ -635,6 +635,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "rstest",
+ "rust-htslib",
  "seqpro-core",
  "svar2-codec",
  "tempfile",
