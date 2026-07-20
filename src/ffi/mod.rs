@@ -1628,8 +1628,14 @@ pub fn svar2_fill_super_batch<'py>(
         .map(|i| (rbnd[[i, 0]], rbnd[[i, 1]]))
         .collect();
     // See `reconstruct_haplotypes_from_svar2_readbound` for why `ref_` (but not
-    // `ref_offsets`) needs to be contiguous; `as_slice()` already enforces it.
-    let ref_v: Vec<u8> = ref_.as_slice()?.to_vec();
+    // `ref_offsets`) needs to be contiguous. Use the shared helper for a friendly
+    // "ref_ must be C-contiguous" message, matching the sibling
+    // `svar2_reconstruct_super_batch` (#307).
+    require_contiguous_1d(&ref_, "ref_")?;
+    let ref_v: Vec<u8> = ref_
+        .as_slice()
+        .expect("contiguity checked by require_contiguous_1d above")
+        .to_vec();
     let _ = ref_offsets; // ref slice is a single contiguous contig; offsets are [0, len]
 
     let reader = store.reader(contig).ok_or_else(|| {
