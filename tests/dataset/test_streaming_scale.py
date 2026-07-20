@@ -388,10 +388,16 @@ def test_svar2_super_batch_buffer_is_flat_in_cohort_size(tmp_path):
 
     Correctness note: rows are C-order (region, sample), so row = region_i * n_samples
     + sample_j. With `_super_batch_rows` forced to 16 and n_samples >= 50, the first 16
-    window rows are always region 0, samples 0..15 in BOTH cohorts -- same underlying
-    genotypes regardless of how many samples follow them in the window. So a
-    fixed-16-row super-batch fill must produce identical buffer bytes across cohorts;
-    if it doesn't, the buffer is retaining/copying something sized by the whole window
+    window rows are always region 0, samples 0..15 in BOTH cohorts -- the SAME region
+    (same fixed width) regardless of how many samples follow them in the window.
+    Because the fixture is SNP-only (REF/ALT both 1bp), every haplotype's length equals
+    the region width no matter which allele each sample carries, so the buffer's byte
+    count is genotype-independent -- 16 rows x ploidy 2 x region-0 width 100 = 3200B in
+    either cohort. (The genotype *content* does diverge between the 50- and 400-sample
+    builds -- reseeding rng(1) then drawing 2*n_samples values per position shifts the
+    stream -- but that only changes which bases appear, not the byte count.) So a
+    fixed-16-row super-batch fill must produce identical buffer bytes across cohorts; if
+    it doesn't, the buffer is retaining/copying something sized by the whole window
     rather than just the filled super-batch rows.
     """
     import subprocess
