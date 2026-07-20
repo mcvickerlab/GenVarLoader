@@ -19,6 +19,44 @@ def _sync_reference(backend: _Svar2Backend, r_idx, s_idx, window, lo, hi):
     return backend._drain(buf, 0, hi - lo)
 
 
+def _with_strategy(sds, strategy):
+    import copy
+
+    clone = copy.copy(sds)
+    object.__setattr__(clone, "_prefetch_strategy", strategy)
+    return clone
+
+
+def _collect(sds, batch_size):
+    """All (r, s) -> per-ploid haplotype rows, keyed by cell, as a dict for
+    order-independent compare. Stored per-ploid (not `np.asarray(data[i])` as a
+    whole row) because ploids are independently variable-length under indels --
+    e.g. this fixture has rows where ploid 0 and ploid 1 differ in length -- so a
+    row is a genuinely jagged `Ragged`, not a rectangular array."""
+    ploidy = sds._backend.ploidy
+    out = {}
+    for data, r_idx, s_idx in sds.to_iter(batch_size=batch_size, return_indices=True):
+        for i in range(len(r_idx)):
+            out[(int(r_idx[i]), int(s_idx[i]))] = [
+                np.asarray(data[i][p]).copy() for p in range(ploidy)
+            ]
+    return out
+
+
+def test_svar2_engine_matches_sync_bytewise(svar2_multicontig_fixture):
+    fx = svar2_multicontig_fixture
+    base = gvl.StreamingDataset(
+        fx.bed, reference=fx.reference_path, variants=fx.svar2_path
+    ).with_seqs("haplotypes")
+    sync = _collect(base, batch_size=4)  # default "sync"
+    eng_sds = _with_strategy(base, "svar2_engine")
+    eng = _collect(eng_sds, batch_size=4)
+    assert set(sync) == set(eng)
+    for cell in sync:
+        for p in range(base._backend.ploidy):
+            np.testing.assert_array_equal(sync[cell][p], eng[cell][p])
+
+
 def test_fill_super_batch_matches_sync_path(svar2_multicontig_fixture):
     fx = svar2_multicontig_fixture
     sds = gvl.StreamingDataset(

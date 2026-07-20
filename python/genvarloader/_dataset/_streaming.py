@@ -506,10 +506,68 @@ class StreamingDataset:
                             hi = min(lo + batch_size, sb_hi)
                             data = backend._drain(buf, lo - sb_lo, hi - sb_lo)
                             yield data, flat_r[lo:hi], flat_s[lo:hi]
+            elif self._prefetch_strategy == "svar2_engine":
+                # PR-3 Task 3: drive a `Svar2StreamEngine` (Task 2) in lockstep with
+                # `_plan()`, mirroring the SVAR1 "engine" branch above -- same
+                # compact region-scale `plan_jobs`/`engine_jobs`, same flat_r/flat_s
+                # lockstep drive. Only the isinstance check + backend type +
+                # `build_engine` call differ (SVAR2-shaped job tuples, no offsets
+                # CSR / Svar1Store). Not yet the default (`_Svar2Backend.
+                # _default_strategy` stays "sync"; Task 4 decides any flip) -- this
+                # is a test-only seam (`_with_strategy`) until then.
+                assert isinstance(self._backend, _Svar2Backend), (
+                    '"svar2_engine" prefetch strategy requires the SVAR2 backend'
+                )
+                backend = self._backend
+                plan_jobs: list[tuple[int, NDArray[np.intp], int, int]] = []
+                for r_idx, s_idx in self._plan():
+                    contig_idx = int(self._regions[r_idx[0], 0])
+                    plan_jobs.append(
+                        (contig_idx, r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
+                    )
+                engine_jobs = [
+                    (
+                        c_idx,
+                        np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
+                        np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
+                        s_lo,
+                        s_hi,
+                    )
+                    for (c_idx, r_idx, s_lo, s_hi) in plan_jobs
+                ]
+                engine = backend.build_engine(engine_jobs, batch_size)
+                del engine_jobs
+                for _c_idx, r_idx, s_lo, s_hi in plan_jobs:
+                    n_s = s_hi - s_lo
+                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                    flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
+                    n_rows = len(flat_r)
+                    for lo in range(0, n_rows, batch_size):
+                        hi = min(lo + batch_size, n_rows)
+                        nxt = engine.next_batch()
+                        if nxt is None:
+                            raise RuntimeError(
+                                "Svar2StreamEngine exhausted before the plan did"
+                            )
+                        data, offsets = nxt
+                        yield (
+                            Ragged.from_offsets(
+                                np.asarray(data).view("S1"),
+                                (hi - lo, backend.ploidy, None),
+                                np.asarray(offsets, np.int64),
+                            ),
+                            flat_r[lo:hi],
+                            flat_s[lo:hi],
+                        )
+                if engine.next_batch() is not None:
+                    raise RuntimeError(
+                        "Svar2StreamEngine had extra batches beyond the plan"
+                    )
             else:
                 raise ValueError(
                     f"StreamingDataset._prefetch_strategy={self._prefetch_strategy!r} "
-                    'is not recognized; expected "engine", "readahead", or "sync".'
+                    'is not recognized; expected "engine", "readahead", "sync", or '
+                    '"svar2_engine".'
                 )
         else:
             for r_idx, s_idx in self._plan():
@@ -1067,6 +1125,50 @@ class _Svar2Backend:
         if not np.all(contig_idxs == contig_idx):
             raise ValueError("_Svar2Backend: window spans multiple contigs")
         return contig_idx, self._contigs[contig_idx]
+
+    def build_engine(
+        self,
+        jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
+        batch_size: int,
+    ) -> object:
+        """Construct a `Svar2StreamEngine` (Rust producer/consumer engine, PR-3 Task
+        2) that overlaps window read (`find_ranges`) with super-batch reconstruct.
+        `jobs` is one entry per WINDOW, `(contig_idx, region_starts, region_ends,
+        s_lo, s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
+        mirrors `_Svar1Backend.build_engine`'s cohort-independent job residency
+        contract (issue #284): the full public->physical sample map crosses ONCE,
+        each job carries only its contiguous `[s_lo, s_hi)` sub-range.
+        """
+        from ..genvarloader import Svar2StreamEngine
+
+        contig_names = list(self._contigs)
+        contig_ref_bytes = [
+            np.asarray(self._ref._contig_slice(i)[0], np.uint8).tobytes()
+            for i in range(len(contig_names))
+        ]
+        job_contig_idx = [int(j[0]) for j in jobs]
+        job_region_starts = [np.ascontiguousarray(j[1], np.uint32) for j in jobs]
+        job_region_ends = [np.ascontiguousarray(j[2], np.uint32) for j in jobs]
+        job_s_lo = [int(j[3]) for j in jobs]
+        job_s_hi = [int(j[4]) for j in jobs]
+        phys = self._phys_sample_idx.astype(np.int64, copy=False).tolist()
+        return Svar2StreamEngine(
+            str(self._sv.path),
+            list(self._sv.contigs),
+            int(self._sv.n_samples),
+            self.ploidy,
+            contig_names,
+            contig_ref_bytes,
+            phys,
+            job_contig_idx,
+            job_region_starts,
+            job_region_ends,
+            job_s_lo,
+            job_s_hi,
+            int(self._ref.pad_char),
+            int(self._super_batch_rows),
+            batch_size,
+        )
 
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
