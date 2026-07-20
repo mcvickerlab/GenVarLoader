@@ -85,7 +85,8 @@ def _narrowed_pgen_case(pgen_snp_ins_del_multi, tmp_path):
     below: writes the oracle dataset and constructs a matching
     `StreamingDataset`, both restricted to region `[71, 200)`. See
     `test_annotated_pgen_narrowed_window_var_idxs_gap`'s docstring for why
-    this region exposes the `var_base` gap (issue #305).
+    this region exercises the non-contiguous global `var_idxs` set that the
+    per-variant global-id gather now handles correctly (issue #305).
     """
     f = pgen_snp_ins_del_multi
     out = tmp_path / "ds"
@@ -101,11 +102,11 @@ def _narrowed_pgen_case(pgen_snp_ins_del_multi, tmp_path):
 def test_annotated_pgen_narrowed_window_haps_match(pgen_snp_ins_del_multi, tmp_path):
     """Sanity check (NOT xfail): haplotype reconstruction and ref_coords for
     a narrowed (non-whole-contig) PGEN window still match the written oracle
-    exactly. Only the *global numbering* of `var_idxs` is affected by the
-    `var_base` gap (see `test_annotated_pgen_narrowed_window_var_idxs_gap`)
+    exactly. Only the *global numbering* of `var_idxs` was ever affected by
+    the #305 gap (see `test_annotated_pgen_narrowed_window_var_idxs_gap`)
     -- the underlying decode (which variants are applied, and where) is
-    correct regardless of `var_base`, since `var_base` is only added as a
-    final offset onto already-correctly-decoded local ids.
+    correct regardless of id numbering, since the global id is only applied
+    as a final per-variant gather onto already-correctly-decoded local ids.
     """
     ds, sds = _narrowed_pgen_case(pgen_snp_ins_del_multi, tmp_path)
 
