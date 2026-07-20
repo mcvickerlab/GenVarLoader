@@ -731,6 +731,103 @@ def pgen_snp_ins_del_multi(tmp_path_factory) -> PgenSnpInsDelMultiFixture:
     )
 
 
+# Interior-exclusion fixture (#305 Part B, `test_streaming_annotated_parity.py`):
+# a spanning DEL that CONSUMES an interior SNP's reference position (the
+# interior SNP's site lies inside the DEL's deleted span, so no byte is ever
+# emitted there regardless of the interior SNP's own genotype), plus a
+# TRAILING SNP beyond the DEL's extent. This produces a HOLE in the middle of
+# the global variant-id set (unlike the `pgen_snp_ins_del_multi` narrowed-
+# window test's leading-only gap): verified empirically (see task report) --
+# even with the interior SNP genotype carried (ALT) on the SAME haplotype as
+# the DEL, both the written oracle and the streamed PGEN backend emit
+# `var_idxs` `[0, -1, -1, 2, -1]` for that haplotype (kept global ids {0, 2},
+# non-contiguous) -- confirming this is genuine interior exclusion, not a
+# trivial "genotype absent" artifact.
+#
+# Reference: "ACGT" repeated 15x = 60bp, so ref[i] cycles A,C,G,T by i % 4.
+# chr1: DEL POS=21 (0-based 20), REF=ref[20:26]="ACGTAC", ALT="A" (extent
+# 0-based [20, 26)); interior SNP POS=23 (0-based 22, REF='G', ALT='T',
+# extent [22, 23) -- inside the DEL's deleted span); trailing SNP POS=29
+# (0-based 28, REF='A', ALT='G', extent [28, 29) -- beyond the DEL's extent).
+# Query region [20, 30) (starts at the DEL's own position, so the DEL's
+# surviving ALT base is itself in-window): kept global ids {0, 2}.
+_INTERIOR_EXCLUSION_REF = "ACGT" * 15
+assert len(_INTERIOR_EXCLUSION_REF) == 60
+_INTERIOR_EXCLUSION_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=60>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts0
+chr1\t21\t.\tACGTAC\tA\t.\t.\t.\tGT\t1|0
+chr1\t23\t.\tG\tT\t.\t.\t.\tGT\t1|0
+chr1\t29\t.\tA\tG\t.\t.\t.\tGT\t1|0
+"""
+
+
+@dataclass(slots=True)
+class PgenInteriorExclusionFixture:
+    """PGEN-source counterpart of the hand-authored `_INTERIOR_EXCLUSION_VCF`
+    (see the module-level comment above it for the variant table and why the
+    narrowed `regions` window produces a non-contiguous kept-variant set).
+    Converts the inline VCF via `plink2 --make-pgen` at fixture time, same
+    convention as `pgen_multi_contig` converting `vcf_multi_contig`.
+    """
+
+    pgen: Path
+    fasta: Path
+    contig: str
+    n_samples: int
+    ploidy: int
+    sample_names: list[str]
+    regions: pl.DataFrame
+
+
+@pytest.fixture(scope="module")
+def pgen_interior_exclusion(tmp_path_factory) -> PgenInteriorExclusionFixture:
+    d = tmp_path_factory.mktemp("pgen_interior_exclusion_src")
+    fasta = d / "ref.fa"
+    fasta.write_text(f">chr1\n{_INTERIOR_EXCLUSION_REF}\n")
+    subprocess.run(["samtools", "faidx", str(fasta)], check=True)
+
+    vcf_txt = d / "in.vcf"
+    vcf_txt.write_text(_INTERIOR_EXCLUSION_VCF)
+    vcf_gz = d / "in.vcf.gz"
+    with vcf_gz.open("wb") as fh:
+        subprocess.run(["bgzip", "-c", str(vcf_txt)], stdout=fh, check=True)
+    subprocess.run(["tabix", "-p", "vcf", str(vcf_gz)], check=True)
+
+    out_prefix = d / "ie"
+    subprocess.run(
+        [
+            "plink2",
+            "--vcf",
+            str(vcf_gz),
+            "--make-pgen",
+            "--allow-extra-chr",
+            "--output-chr",
+            "chrM",
+            "--out",
+            str(out_prefix),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    # Narrowed query window [20, 30) -- see the module-level comment above
+    # `_INTERIOR_EXCLUSION_VCF` for the overlap arithmetic.
+    regions = pl.DataFrame({"chrom": ["chr1"], "chromStart": [20], "chromEnd": [30]})
+
+    return PgenInteriorExclusionFixture(
+        pgen=out_prefix.with_suffix(".pgen"),
+        fasta=fasta,
+        contig="chr1",
+        n_samples=1,
+        ploidy=2,
+        sample_names=["s0"],
+        regions=regions,
+    )
+
+
 @dataclass(slots=True)
 class VcfSamePosNonlexFixture:
     """Task 5 (issue #300): a GENUINE (not coincidental) file-order same-POS

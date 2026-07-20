@@ -122,13 +122,6 @@ def test_annotated_pgen_narrowed_window_haps_match(pgen_snp_ins_del_multi, tmp_p
     assert n_cells > 0, "narrowed-window fixture yielded no cells"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#305: record-backend var_base for narrowed/partial-prefix windows "
-        "deferred; PGEN currently emits local (var_base=0) var_idxs"
-    ),
-)
 def test_annotated_pgen_narrowed_window_var_idxs_gap(pgen_snp_ins_del_multi, tmp_path):
     """Regression lock for the CONFIRMED bug found in review of Task 4: a
     NARROWED (not whole-contig) window on `pgen_snp_ins_del_multi` used to
@@ -145,14 +138,16 @@ def test_annotated_pgen_narrowed_window_var_idxs_gap(pgen_snp_ins_del_multi, tmp
     INS's extent, so the padded search (padded by the contig's max ref_len,
     4, for the DEL) lands on local index 1 (pos69) as `var_start`, but the
     precise filter skips that candidate -- the window's first KEPT variant is
-    pos109 (global id 2). The written oracle reports `var_idxs` `[2, 3, 4]`;
-    the streaming PGEN backend (var_base=0, issue #277 Wave A / #305 gap)
-    reports local ids `[0, 1, 2]` instead.
+    pos109 (global id 2). The written oracle reports `var_idxs` `[2, 3, 4]`.
 
-    This test is expected to XFAIL until #305 gives PGEN a correct per-contig
-    global var_base (the first KEPT variant's global id, not the padded
-    search lower bound). If it unexpectedly XPASSES, the gap has been fixed
-    and this test (and its `xfail` marker) should be removed/updated.
+    This is now a PASSING REGRESSION LOCK: #305 gives PGEN correct per-variant
+    global ids via genoray's `.pvar` row index (the source of truth for each
+    variant's dataset-global id) plus gvl's per-variant gather onto that id
+    (retiring the scalar `var_base`, which could only ever encode a single
+    offset and thus couldn't represent a skipped leading candidate). The
+    narrowed region `[71, 200)` drops leading candidates 0 and 1, so the
+    first KEPT variant is global id 2, and the streamed `var_idxs` must equal
+    the written oracle's `[2, 3, 4]`.
     """
     ds, sds = _narrowed_pgen_case(pgen_snp_ins_del_multi, tmp_path)
 
@@ -173,3 +168,65 @@ def test_annotated_pgen_narrowed_window_var_idxs_gap(pgen_snp_ins_del_multi, tmp
                 )
             n_cells += 1
     assert n_cells > 0, "narrowed-window fixture yielded no cells"
+
+
+def test_annotated_pgen_interior_exclusion_var_idxs_gapped(
+    pgen_interior_exclusion, tmp_path
+):
+    """Regression lock for a HOLE in the middle of the global variant-id set
+    (issue #305), complementing `test_annotated_pgen_narrowed_window_var_idxs_gap`
+    above: that test's `[2, 3, 4]` is a leading-gap-only (still contiguous)
+    set; this test exercises a genuinely NON-CONTIGUOUS kept set with a gap
+    in the interior.
+
+    `pgen_interior_exclusion` (see its docstring/comment in ``conftest.py``)
+    is a spanning DEL (global id 0) whose deleted span [20, 26) consumes an
+    interior SNP's reference position (global id 1, at 0-based pos 22) --
+    genotyped 1|0 (carried on hap0) to confirm empirically that the exclusion
+    is genuine interior consumption, not merely "genotype absent": no byte is
+    ever emitted at a deleted reference position regardless of what any
+    variant record at that position's genotype says. A trailing SNP (global
+    id 2, at 0-based pos 28) sits beyond the DEL's extent. Over the query
+    region [20, 30), hap0 of sample s0 carries the DEL and the trailing SNP
+    but never the interior SNP -- confirmed by inspecting the WRITTEN oracle
+    directly: `var_idxs` is `[0, -1, -1, 2, -1]`, i.e. kept global ids
+    `{0, 2}` with `np.diff([0, 2]) == [2] > 1`, a genuine gap. The streaming
+    PGEN backend must reproduce this exact non-contiguous set, not just a
+    uniformly-shifted contiguous one -- this is the case a scalar `var_base`
+    offset cannot represent, since offsetting local index `i` by a constant
+    can never skip a candidate that falls strictly between two kept ones.
+    """
+    f = pgen_interior_exclusion
+    out = tmp_path / "ds"
+    gvl.write(out, f.regions, variants=str(f.pgen), overwrite=True)
+    written = gvl.Dataset.open(out, reference=f.fasta)
+    ds = written.with_seqs("annotated")
+    sds = gvl.StreamingDataset(
+        f.regions, reference=f.fasta, variants=str(f.pgen)
+    ).with_seqs("annotated")
+
+    n_cells = 0
+    saw_gap = False
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for row in range(len(r_idx)):
+            exp = ds[int(r_idx[row]), int(s_idx[row])]  # RaggedAnnotatedHaps
+            for h in range(sds.ploidy):
+                got_vidx = np.asarray(data.var_idxs[row][h])
+                exp_vidx = np.asarray(exp.var_idxs[h])
+                np.testing.assert_array_equal(
+                    got_vidx,
+                    exp_vidx,
+                    err_msg=(
+                        f"row={row} hap={h}: streamed var_idxs must be "
+                        "dataset-GLOBAL, matching the written oracle exactly"
+                    ),
+                )
+                kept = exp_vidx[exp_vidx >= 0]
+                if kept.size >= 2 and np.any(np.diff(kept) > 1):
+                    saw_gap = True
+            n_cells += 1
+    assert n_cells > 0, "interior-exclusion fixture yielded no cells"
+    assert saw_gap, (
+        "fixture did not produce a non-contiguous kept var_idxs set for any "
+        "hap; the test can't guard the interior-exclusion gap without one"
+    )

@@ -358,17 +358,18 @@ git commit -m "feat(streaming): remap annot var_idxs via per-variant global gath
 **Interfaces:**
 - Consumes: the corrected global-id path (2.1–2.3).
 
-- [ ] **Step 1: Un-xfail the existing narrowed-window gap test.** Delete the `@pytest.mark.xfail(…)`
+- [x] **Step 1: Un-xfail the existing narrowed-window gap test.** Delete the `@pytest.mark.xfail(…)`
   decorator on `test_annotated_pgen_narrowed_window_var_idxs_gap` (`:125-131`) and update its
   docstring to state it is now a passing regression lock (the narrowed region `[71,200)` first-kept
   variant is global id 2; the streamed `var_idxs` must be `[2,3,4]`).
 
-- [ ] **Step 2: Run it to verify it now PASSES**
+- [x] **Step 2: Run it to verify it now PASSES**
 
 Run: `pixi run -e dev pytest tests/dataset/test_streaming_annotated_parity.py::test_annotated_pgen_narrowed_window_var_idxs_gap -q`
 Expected: PASS (previously `xfail`). If it still fails, the global-id plumbing is wrong — debug 2.2/2.3.
+Actual: PASS.
 
-- [ ] **Step 3: Write a failing interior-exclusion test.** Add a fixture (in `conftest.py`) whose
+- [x] **Step 3: Write a failing interior-exclusion test.** Add a fixture (in `conftest.py`) whose
   variants include a spanning deletion that, for a chosen region, is kept while an interior variant
   behind it is dropped — so the written oracle's `var_idxs` are a **gapped** set (e.g. `{0, 2}`).
   Add `test_annotated_pgen_interior_exclusion_var_idxs_gapped` asserting streamed `var_idxs` equal
@@ -395,10 +396,26 @@ P+3, with a query region `[P+5, P+9)` — the DEL's extent reaches the region (k
 does not (dropped). Confirm the written `Dataset` produces a gapped `var_idxs` for this cell first
 (that's the oracle); the `saw_gap` assert guards against a fixture that doesn't actually gap.
 
-- [ ] **Step 4: Run it to verify it passes** → PASS. If the streamed set is contiguous while the
-  oracle is gapped, 2.2/2.3 are wrong.
+**Verified-first finding (deviation from the geometry sketched above):** a window starting *after*
+the DEL's own POS (e.g. `[P+4, P+10)` over a `REF=ACGTAC`/`ALT=A` DEL at P, mirroring this plan's
+`[P+5,P+9)` sketch) does **not** gap — empirically, the written oracle simply omits the DEL's
+`var_idx` entirely for that cell (`kept={2}`, not `{0,2}`), because the annotated array only stamps
+a variant id at the position where its ALT bytes are actually emitted (the DEL's POS), and that
+position lies *before* such a window. Streamed matched written exactly in this case too — so it's
+not a write-vs-stream divergence, just a non-gapping geometry. The gap the plan wants only appears
+when the window **includes the DEL's own POS** (so its surviving ALT byte is in-window) while an
+interior SNP's reference position — inside the DEL's deleted span — is never emitted regardless of
+that SNP's own genotype (confirmed by setting the interior SNP's GT to ALT on the *same* haplotype
+as the DEL: the gap is unchanged, `[0,-1,-1,2,-1]`, proving genuine interior consumption rather than
+a "genotype absent" artifact). Implemented as `pgen_interior_exclusion` in `conftest.py`: DEL at
+0-based pos 20 (`REF=ACGTAC`/`ALT=A`, extent `[20,26)`), interior SNP at pos 22 (`G>T`), trailing SNP
+at pos 28 (`A>G`), query region `[20,30)` → written oracle (and streamed) `var_idxs` for hap0
+`[0,-1,-1,2,-1]`, kept `{0,2}`.
 
-- [ ] **Step 5: Full annotated parity suite + commit**
+- [x] **Step 4: Run it to verify it passes** → PASS. Streamed matches the written oracle's gapped
+  set (`{0,2}`) exactly; `saw_gap` guard confirmed non-trivial.
+
+- [x] **Step 5: Full annotated parity suite + commit**
 
 Run: `pixi run -e dev pytest tests/dataset/test_streaming_annotated_parity.py -q` → PASS.
 
