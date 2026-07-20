@@ -57,8 +57,9 @@ class StreamingDataset:
       classification (``_write.py``): a ``.svar`` directory (a genoray
       ``SparseVar``/SVAR1 store), a VCF/BCF, and a PGEN file-set are all
       supported; ``.svar2`` (SVAR2) input raises :class:`NotImplementedError`
-      (a later plan). Only ``jitter=0`` (the default) is supported in this
-      plan.
+      (a later plan). ``jitter>0`` (a per-region reproducible read-window
+      translation) is supported with the default ``"engine"`` prefetch
+      strategy -- see :meth:`to_iter`'s docstring for the rng contract.
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
@@ -180,12 +181,6 @@ class StreamingDataset:
                     "StreamingDataset(...) requires `reference` to reconstruct "
                     "haplotypes."
                 )
-            if jitter != 0:
-                raise NotImplementedError(
-                    "StreamingDataset read-time jitter is not implemented yet; "
-                    "only jitter=0 (the default) is supported in this plan."
-                )
-
             p = Path(variants)
             if p.is_dir() and p.suffix == ".svar":
                 from genoray import SparseVar
@@ -263,7 +258,7 @@ class StreamingDataset:
         # the dataclass-generated defaults are never auto-applied (there's no class
         # attribute to fall back on at runtime), so every construction path -- public
         # and injected -- must set them explicitly here. Task 1 defaults exactly
-        # preserve pre-Wave-A output; `jitter` is still gated by the guard above.
+        # preserve pre-Wave-A output.
         for _name in (
             "_seq_kind",
             "_output_length",
@@ -274,6 +269,12 @@ class StreamingDataset:
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
             )
+        # Wire the public `jitter=` kwarg AFTER the default-init loop above (else the
+        # loop's dataclass-default (0) would overwrite it). Default `jitter=0` exactly
+        # preserves pre-Task-3 behavior (no translation, byte-parity gate unaffected).
+        if jitter < 0:
+            raise ValueError(f"jitter must be non-negative, got {jitter}.")
+        object.__setattr__(self, "_jitter", int(jitter))
         # Derive the read-window sizing from `max_mem`, NOT from the field defaults
         # above (those are just fallback literals for `__dataclass_fields__`; `slots=True`
         # means there's no class attribute to fall back on at runtime, and this class
@@ -339,6 +340,50 @@ class StreamingDataset:
                     s_hi = min(s_lo + self._window_samples, n_samples)
                     yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
 
+    def _rng_gen(self) -> np.random.Generator:
+        """One `Generator` for this `to_iter` call's jitter draws. `_iter_batches`
+        creates exactly one of these per call (never per-window) so the per-region
+        draw sequence is deterministic in sweep order -- see `to_iter`'s docstring
+        for the full rng contract."""
+        return np.random.default_rng(self._rng)
+
+    def _jitter_region_bounds(
+        self,
+        rng: np.random.Generator,
+        r_idx: NDArray[np.intp],
+    ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
+        """Translate `r_idx`'s region bounds by one rng draw per region (in `r_idx`
+        order). The window SIZE is preserved (translate, don't resize) -- a fixed
+        `output_length` that fit the base region still fits the jittered one. This
+        is a pure Python-side region-bounds transform; no Rust change. See
+        `to_iter`'s docstring for the rng contract (translation-only; NOT
+        byte-parity).
+
+        Only the LOWER bound is clamped (`start + offset >= 0`): region bounds
+        cross into Rust as `u32`, so a negative start would silently wrap to a
+        huge unsigned value -- that must never happen. An upper bound (`end <=
+        contig_len`) is deliberately NOT enforced: the shared reconstruction
+        kernel (`reconstruct_haplotype_core`, `src/reconstruct/mod.rs`) already
+        tail-pads with `pad_char` whenever a region's end runs past the contig
+        (the same N-padding behavior `gvl.Dataset` gives any region that
+        overhangs a chromosome edge), so an end beyond `contig_len` is safe, not
+        a bug. Clamping the upper bound too would make jitter a deterministic
+        no-op for any region that already spans its full contig (exactly the
+        single-contig VCF/PGEN streaming test fixtures) -- mathematically, a
+        window that already covers `[0, contig_len)` cannot be translated at all
+        under a strict two-sided in-bounds clamp, since ANY nonzero offset would
+        push one side out of range.
+        """
+        starts = self._regions[r_idx, 1].astype(np.int64)
+        ends = self._regions[r_idx, 2].astype(np.int64)
+        # One draw per region, in `r_idx` order (this window's sweep order).
+        jitter_off = rng.integers(-self._jitter, self._jitter + 1, size=len(r_idx))
+        jitter_off = np.maximum(jitter_off, -starts)
+        return (
+            np.ascontiguousarray(starts + jitter_off, np.uint32),
+            np.ascontiguousarray(ends + jitter_off, np.uint32),
+        )
+
     def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
         """Drive the plan; generate each window PER BATCH so output is batch-bounded.
 
@@ -374,17 +419,34 @@ class StreamingDataset:
                         (contig_idx, r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
                     )
                 # Region bounds (u32) per window for the engine constructor; transient
-                # (dropped after `build_engine`), also region-scale.
-                engine_jobs = [
-                    (
-                        contig_idx,
-                        np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
-                        np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
-                        s_lo,
-                        s_hi,
-                    )
-                    for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
-                ]
+                # (dropped after `build_engine`), also region-scale. When `_jitter>0`,
+                # ONE `Generator` is created here (outside this loop) so per-region
+                # draws are deterministic in `plan_jobs` sweep order -- see
+                # `to_iter`'s docstring for the full rng contract. `_jitter==0` (the
+                # default) takes the untranslated path unchanged, preserving the
+                # jitter=0 byte-parity gate exactly.
+                if self._jitter > 0:
+                    rng = self._rng_gen()
+                    engine_jobs = [
+                        (
+                            contig_idx,
+                            *self._jitter_region_bounds(rng, r_idx),
+                            s_lo,
+                            s_hi,
+                        )
+                        for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
+                    ]
+                else:
+                    engine_jobs = [
+                        (
+                            contig_idx,
+                            np.ascontiguousarray(self._regions[r_idx, 1], np.uint32),
+                            np.ascontiguousarray(self._regions[r_idx, 2], np.uint32),
+                            s_lo,
+                            s_hi,
+                        )
+                        for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
+                    ]
                 engine = self._backend.build_engine(engine_jobs, batch_size, _out_len)
                 del engine_jobs
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
@@ -422,6 +484,23 @@ class StreamingDataset:
                 # pure page-warming no-op on output, so this is byte-identical to the
                 # "engine" branch above. See `test_streaming_matches_written_all_cells`'s
                 # "readahead" parity variant.
+                #
+                # Jitter (issue #277 Task 3) is NOT supported here: `read_window`/
+                # `generate_batch` re-derive region bounds internally from
+                # `self._regions` (unjittered) -- there is no seam to pass translated
+                # bounds through without a backend signature change. This experimental,
+                # non-default toggle (issue #283 A-vs-C measurement) is out of scope
+                # for that change; fail fast rather than silently ignoring jitter.
+                if self._jitter > 0:
+                    raise NotImplementedError(
+                        "StreamingDataset read-time jitter (jitter>0) is only "
+                        'supported with the default "engine" prefetch strategy; the '
+                        'experimental "readahead" toggle re-derives region bounds '
+                        "internally and cannot accept translated bounds. Use the "
+                        'default `_prefetch_strategy="engine"` (do not set jitter '
+                        'with "readahead").'
+                    )
+
                 from ..genvarloader import svar1_prefetch_runs
 
                 # Compact, region-scale plan (same treatment as the engine branch): hold
@@ -502,6 +581,36 @@ class StreamingDataset:
             If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``;
             if ``False``, yield ``data`` alone. Indices are in the caller's **original
             BED-row order** (not sorted-storage order), matching ``gvl.Dataset[r, s]``.
+
+        Read-time jitter (``jitter>0``, set via ``with_settings``)
+        -------------------------------------------------------------
+        When ``jitter>0``, each region's read window is translated by an integer
+        offset drawn from ``Uniform[-jitter, jitter]`` (inclusive), clamped only so
+        the translated start stays ``>= 0`` -- the window SIZE never changes
+        (translate, don't resize), so a fixed ``with_len(L)`` output is unaffected.
+        A translated end may run past the contig; that's safe, not a bug -- the
+        reconstruction kernel already N-pads a region that overhangs a chromosome
+        edge (the same behavior any ``gvl.Dataset`` region gets there), and
+        clamping the end as well would make jitter a no-op for any region that
+        already spans its whole contig. Exactly one ``numpy.random.Generator``
+        (seeded from ``rng``, see ``with_settings``) is created per ``to_iter``
+        call; one offset is drawn per region, **in sweep order** (the order
+        ``_plan()`` visits regions), so the
+        same ``rng`` always reproduces the same translated windows and a different
+        ``rng`` almost certainly does not. This is a **reproducible augmentation**,
+        **NOT** byte-parity with a written ``gvl.Dataset`` -- ``jitter=0`` (the
+        default) is the only byte-parity-gated setting. Only the default
+        ``"engine"`` prefetch strategy supports jitter; the experimental
+        ``"readahead"`` toggle raises :class:`NotImplementedError` if combined with
+        ``jitter>0`` (it re-derives region bounds internally and has no seam to
+        accept translated ones).
+
+        Per-hap within-window sub-shifts (``deterministic=False`` further jittering
+        each haplotype independently within its already-translated window, for
+        fixed-length output) are a **documented Wave A deferral** -- not
+        implemented yet; that needs a Rust engine ``shifts`` API addition and is
+        out of scope for this plan. ``deterministic`` currently has no effect
+        beyond gating that unimplemented path.
         """
         for data, r_idx, s_idx in self._iter_batches(batch_size):
             if return_indices:
@@ -571,8 +680,31 @@ class StreamingDataset:
     ) -> "StreamingDataset":
         """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
         relevant subset of :meth:`Dataset.with_settings` (same parameter names).
+
+        Parameters
+        ----------
+        jitter
+            Non-negative int; each region's read window is translated by an
+            integer offset drawn from ``Uniform[-jitter, jitter]`` (window SIZE
+            unchanged), clamped so the translated start stays ``>= 0`` (a
+            translated end may safely run past the contig -- see :meth:`to_iter`'s
+            docstring). ``0`` (the default) disables jitter and is the only
+            byte-parity-gated setting.
+        rng
+            Seed (int) or :class:`numpy.random.Generator` for the jitter draws.
+            One ``Generator`` (via ``numpy.random.default_rng(rng)``) is created
+            per :meth:`to_iter` call and drawn from once per region, in sweep
+            order -- so the same ``rng`` reproduces the same translated windows
+            across calls/runs, and a different ``rng`` yields different ones.
+        deterministic
+            Reserved for per-hap within-window sub-shifts on fixed-length output;
+            not yet implemented (documented Wave A deferral -- needs a Rust engine
+            API addition). Currently has no observable effect on ``to_iter``'s
+            output.
+
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
-        with a written ``Dataset`` (see :meth:`to_iter`)."""
+        with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
+        rng contract)."""
         out = copy.copy(self)
         if jitter is not None:
             if jitter < 0:
