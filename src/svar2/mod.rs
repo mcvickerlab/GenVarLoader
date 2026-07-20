@@ -10,6 +10,7 @@ use ndarray::{Array2, ArrayView2};
 use svar2_codec::{decode_key, DecodedKey};
 
 pub mod store;
+pub(crate) mod window;
 
 /// Decode one uniform key into `(v_diff, allele)`, resolving long-INS via the LUT
 /// arrays. Mirrors genoray's `decode_keyref`.
