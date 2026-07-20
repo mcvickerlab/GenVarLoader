@@ -508,20 +508,32 @@ class StreamingDataset:
                             yield data, flat_r[lo:hi], flat_s[lo:hi]
             elif self._prefetch_strategy == "svar2_engine":
                 # PR-3 Task 3: drive a `Svar2StreamEngine` (Task 2) in lockstep with
-                # `_plan()`, mirroring the SVAR1 "engine" branch above -- same
-                # compact region-scale `plan_jobs`/`engine_jobs`, same flat_r/flat_s
-                # lockstep drive. Only the isinstance check + backend type +
-                # `build_engine` call differ (SVAR2-shaped job tuples, no offsets
-                # CSR / Svar1Store). Not yet the default (`_Svar2Backend.
-                # _default_strategy` stays "sync"; Task 4 decides any flip) -- this
-                # is a test-only seam (`_with_strategy`) until then.
+                # `_plan()`. The engine RESETS its batch boundaries at every
+                # super-batch (it splits each window into `ceil(n_rows /
+                # super_batch_rows)` jobs and drains each independently in
+                # `batch_size` chunks from row 0 -- see
+                # `src/ffi/svar2_stream_engine.rs`'s `slice_current`/
+                # `CurrentWindow`), so the Python drive must NEST over super-batches
+                # the same way the "sync" branch above does, not step `batch_size`
+                # continuously over a window's full `n_rows` (that desyncs whenever
+                # a window spans >1 super-batch and `super_batch_rows` doesn't
+                # divide `batch_size` -- whole-branch-review Critical, see
+                # `test_svar2_engine_nested_super_batch_matches_written`).
+                # `sb_rows` must equal what `build_engine` passed the engine
+                # (`int(self._super_batch_rows)`, unmodified) for the two to agree.
+                # Only the isinstance check + backend type + `build_engine` call
+                # differ from the SVAR1 "engine" branch above (SVAR2-shaped job
+                # tuples, no offsets CSR / Svar1Store). Not yet the default
+                # (`_Svar2Backend._default_strategy` stays "sync"; Task 4 decides
+                # any flip) -- this is a test-only seam (`_with_strategy`) until then.
                 assert isinstance(self._backend, _Svar2Backend), (
                     '"svar2_engine" prefetch strategy requires the SVAR2 backend'
                 )
                 backend = self._backend
+                sb_rows = backend._super_batch_rows
                 plan_jobs: list[tuple[int, NDArray[np.intp], int, int]] = []
                 for r_idx, s_idx in self._plan():
-                    contig_idx = int(self._regions[r_idx[0], 0])
+                    contig_idx, _contig = backend._contig_of(r_idx)
                     plan_jobs.append(
                         (contig_idx, r_idx, int(s_idx[0]), int(s_idx[-1]) + 1)
                     )
@@ -542,23 +554,25 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
                     n_rows = len(flat_r)
-                    for lo in range(0, n_rows, batch_size):
-                        hi = min(lo + batch_size, n_rows)
-                        nxt = engine.next_batch()
-                        if nxt is None:
-                            raise RuntimeError(
-                                "Svar2StreamEngine exhausted before the plan did"
+                    for sb_lo in range(0, n_rows, sb_rows):
+                        sb_hi = min(sb_lo + sb_rows, n_rows)
+                        for lo in range(sb_lo, sb_hi, batch_size):
+                            hi = min(lo + batch_size, sb_hi)
+                            nxt = engine.next_batch()
+                            if nxt is None:
+                                raise RuntimeError(
+                                    "Svar2StreamEngine exhausted before the plan did"
+                                )
+                            data, offsets = nxt
+                            yield (
+                                Ragged.from_offsets(
+                                    np.asarray(data).view("S1"),
+                                    (hi - lo, backend.ploidy, None),
+                                    np.asarray(offsets, np.int64),
+                                ),
+                                flat_r[lo:hi],
+                                flat_s[lo:hi],
                             )
-                        data, offsets = nxt
-                        yield (
-                            Ragged.from_offsets(
-                                np.asarray(data).view("S1"),
-                                (hi - lo, backend.ploidy, None),
-                                np.asarray(offsets, np.int64),
-                            ),
-                            flat_r[lo:hi],
-                            flat_s[lo:hi],
-                        )
                 if engine.next_batch() is not None:
                     raise RuntimeError(
                         "Svar2StreamEngine had extra batches beyond the plan"

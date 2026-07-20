@@ -94,3 +94,53 @@ def test_fill_super_batch_matches_sync_path(svar2_multicontig_fixture):
         ref_rag = _sync_reference(backend, r_idx, s_idx, window, 0, n_rows)
         np.testing.assert_array_equal(np.asarray(data).view("S1"), ref_rag.data)
         np.testing.assert_array_equal(np.asarray(offsets, np.int64), ref_rag.offsets)
+
+
+def test_svar2_engine_nested_super_batch_matches_written(svar2_multicontig_fixture):
+    """Whole-branch review Critical: `"svar2_engine"`'s drive loop used to step
+    `batch_size` CONTINUOUSLY over a window's full `n_rows`, but the Rust
+    `Svar2StreamEngine` resets its batch boundaries at every super-batch (it
+    splits each window into `ceil(n_rows / super_batch_rows)` jobs and drains
+    each independently in `batch_size` chunks from row 0 -- see
+    `src/ffi/svar2_stream_engine.rs`'s `slice_current`/`CurrentWindow`). When a
+    window spans >1 super-batch AND `super_batch_rows` doesn't divide
+    `batch_size`, each super-batch emits a short tail batch mid-window and the
+    Python continuous loop desyncs against the engine's actual batch grain.
+
+    No existing parity test caught this because `svar2_multicontig_fixture`'s
+    windows all fit in ONE super-batch at the real default
+    (`SUPERBATCH_TARGET_ROWS=4096`). Force a tiny `_super_batch_rows=5` (5 does
+    not divide `batch_size=3`, and the fixture's 6-region-per-contig x
+    3-sample windows give `n_rows=18 > 5`, so a window spans multiple
+    super-batches) to reproduce the uncovered combination, then assert
+    byte-identical parity against the WRITTEN dataset for every cell -- same
+    strength as `test_svar2_engine_matches_written` in
+    `test_streaming_parity_svar2.py`."""
+    fx = svar2_multicontig_fixture
+    written = gvl.Dataset.open(fx.dataset_path, reference=fx.reference_path).with_seqs(
+        "haplotypes"
+    )
+    base = gvl.StreamingDataset(
+        fx.bed, reference=fx.reference_path, variants=fx.svar2_path
+    ).with_seqs("haplotypes")
+    sds = _with_strategy(base, "svar2_engine")
+    assert isinstance(sds._backend, _Svar2Backend)
+    # Set BEFORE iterating: `build_engine` (engine construction) and the drive
+    # loop both read `backend._super_batch_rows` off the same attribute, so a
+    # single override before `to_iter` keeps the engine and the Python nesting
+    # in agreement.
+    object.__setattr__(sds._backend, "_super_batch_rows", 5)
+
+    seen = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=3, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp = written[r, s]
+            for p in range(sds.ploidy):
+                np.testing.assert_array_equal(
+                    np.asarray(data[i][p]),
+                    np.asarray(exp[p]),
+                    err_msg=f"mismatch at region={r} sample={s} ploid={p}",
+                )
+            seen += 1
+    assert seen == fx.bed.height * sds.n_samples
