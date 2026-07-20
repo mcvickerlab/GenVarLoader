@@ -43,6 +43,11 @@ pub struct DecodedWindow {
     /// leak the previous window's stale value). See `pgen.rs`'s and `vcf.rs`'s
     /// `WindowFiller::fill` for the two current settings.
     pub var_base: i64,
+    /// Per-variant dataset-global id, parallel to `v_starts` (i.e. `global_v_idxs[i]`
+    /// is the global id of the variant at window-local column `i`). Copied verbatim
+    /// from `chunk.global_idx` by `fill_decoded_window`; consumed by a later task
+    /// (issue #305) to remap annotation ids. Not yet read by any consumer.
+    pub global_v_idxs: Vec<i32>,
 }
 
 /// Fill `slot` (reusing its allocations) from a window's `DenseChunk`. The static table
@@ -65,6 +70,8 @@ pub fn fill_decoded_window(
     slot.alt_offsets.clear();
     slot.alt_offsets
         .extend(chunk.alt_offsets.iter().map(|&o| o as i64));
+    slot.global_v_idxs.clear();
+    slot.global_v_idxs.extend_from_slice(&chunk.global_idx);
 
     // Word-level two-pass counting-sort transpose. Instead of calling get_bit once per
     // (v,s,p) cell (V*S*P reads), walk the packed `words` in flat v-major order — this is
@@ -140,6 +147,7 @@ mod tests {
         DenseChunk {
             chunk_id: 0,
             pos: vec![10, 20],
+            global_idx: vec![5, 8],
             ilens: vec![0, 0],
             alt: vec![b'A', b'C'],
             alt_offsets: vec![0, 1, 2],
@@ -167,6 +175,7 @@ mod tests {
         // CSR over 4 haps: hap0=[0], hap1=[], hap2=[0,1], hap3=[1]
         assert_eq!(slot.geno_offsets, vec![0, 1, 1, 3, 4]);
         assert_eq!(slot.geno_v_idxs, vec![0, 0, 1, 1]);
+        assert_eq!(slot.global_v_idxs, vec![5, 8]);
     }
 
     #[test]
@@ -178,6 +187,7 @@ mod tests {
         let chunk = DenseChunk {
             chunk_id: 0,
             pos: vec![],
+            global_idx: Vec::new(),
             ilens: vec![],
             alt: vec![],
             alt_offsets: vec![0],
@@ -208,6 +218,7 @@ mod tests {
         let chunk = DenseChunk {
             chunk_id: 0,
             pos: vec![42],
+            global_idx: vec![17],
             ilens: vec![0],
             alt: vec![b'T'],
             alt_offsets: vec![0, 1],
@@ -275,6 +286,7 @@ mod tests {
         let chunk = DenseChunk {
             chunk_id: 0,
             pos: (0..n_var as u32).collect(),
+            global_idx: (0..n_var as i32).collect(),
             ilens: vec![0; n_var],
             alt: vec![b'A'; n_var],
             alt_offsets: (0..=n_var as u32).collect(),
