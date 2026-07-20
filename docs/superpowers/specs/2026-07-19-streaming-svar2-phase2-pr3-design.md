@@ -1,7 +1,10 @@
 # Streaming SVAR2 backend — Phase 2 PR 3 (read↔reconstruct pipeline engine) — design
 
 **Date:** 2026-07-19
-**Status:** design (pending spec review)
+**Status:** ✅ implemented — `Svar2StreamEngine` landed behind `_prefetch_strategy="svar2_engine"`.
+Cold-cache A/B (500 and 2000 samples, best-of-3) did not clear the non-overlapping-ranges ship bar
+(§"Gating") — `_Svar2Backend._default_strategy` stays `"sync"`; the engine ships off-by-default.
+See `docs/roadmaps/streaming-dataset.md` → Plans (spec A), PR-3 row, for the raw numbers.
 **Issue:** [#278](https://github.com/mcvickerlab/GenVarLoader/issues/278) — spec B of the write-free
 `StreamingDataset` effort. **Target branch:** `streaming` (stacks on the merged PR-2 work on
 `278-svar2-streaming-backend`), not `main`.
