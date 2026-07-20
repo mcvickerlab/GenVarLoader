@@ -16,6 +16,7 @@ GenVarLoader provides a fast, memory efficient data structure for training seque
 - Generate tracks up to 450 times faster than reading a BigWig
 - **Supports indels** and re-aligns tracks to haplotypes that have them
 - Extensible to new file formats: drop a feature request! Currently supports VCF, PGEN, BigWig, and [genoray](https://github.com/mcvickerlab/genoray)'s sparse `.svar`/`.svar2` variant stores
+- **Write-free streaming:** `gvl.StreamingDataset` reads haplotypes straight from a VCF/BCF, PGEN (biallelic only), or `.svar` store — no `gvl.write()` step, no on-disk dataset (see the [FAQ](https://genvarloader.readthedocs.io/en/latest/faq.html))
 
 Documentation is available [here](https://genvarloader.readthedocs.io/). See our [preprint](https://www.biorxiv.org/content/10.1101/2025.01.15.633240) for benchmarking and implementation details.
 
@@ -26,6 +27,8 @@ pip install genvarloader
 ```
 
 A PyTorch dependency is **not** included since it may require [special instructions](https://pytorch.org/get-started/locally/). GenVarLoader parallelizes its data-loading hot paths in Rust (rayon) out of the box, with no extra dependencies required; you can tune the worker count with the `GVL_NUM_THREADS` environment variable (see the [FAQ](https://genvarloader.readthedocs.io/en/latest/faq.html)).
+
+The wheel statically links htslib (via [genoray](https://github.com/mcvickerlab/genoray)'s Rust core) to read VCF/BCF directly for both `gvl.write` and `gvl.StreamingDataset` — no separate htslib install is required. Streaming PGEN requires a `plink2`-produced `.pgen`/`.pvar`/`.psam` file-set built from bcftools-normalized (left-aligned, biallelic-split) input — e.g. `bcftools norm -m - normed.vcf.gz | bcftools norm -f ref.fa -Ob -o normed.bcf` then `plink2 --bcf normed.bcf --make-pgen --out normed`; multiallelic PGEN is rejected at construction.
 
 ## Contributing
 

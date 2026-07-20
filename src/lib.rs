@@ -4,6 +4,7 @@ pub mod genotypes;
 pub mod intervals;
 pub mod ragged;
 pub mod reconstruct;
+pub mod record_stream;
 pub mod reference;
 pub mod reverse;
 pub mod stream;
@@ -27,6 +28,7 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<svar1::store::Svar1Store>()?;
     m.add_class::<ffi::stream_engine::Svar1StreamEngine>()?;
     m.add_class::<ffi::svar2_stream_engine::Svar2StreamEngine>()?;
+    m.add_class::<record_stream::engine::RecordStreamEngine>()?;
     m.add_function(wrap_pyfunction!(ragged::ragged_to_padded, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::intervals_to_tracks, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::get_diffs_sparse, m)?)?;
@@ -58,6 +60,12 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ffi::svar2_fill_super_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar1_prefetch_runs, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::svar1_csr_entries_touched, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::transpose_word_reads, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::transpose_word_reads_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::pgen_variants_decoded, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::pgen_variants_decoded_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::vcf_sample_resolutions, m)?)?;
+    m.add_function(wrap_pyfunction!(ffi::vcf_sample_resolutions_reset, m)?)?;
     m.add_function(wrap_pyfunction!(ffi::reconstruct_haplotypes_from_svar2, m)?)?;
     m.add_function(wrap_pyfunction!(
         ffi::reconstruct_haplotypes_from_svar2_readbound,

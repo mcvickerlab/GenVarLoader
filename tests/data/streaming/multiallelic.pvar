@@ -1,0 +1,4 @@
+##FILTER=<ID=PASS,Description="All filters passed">
+##contig=<ID=chr1,length=1000>
+#CHROM	POS	ID	REF	ALT	FILTER
+chr1	11	.	A	G,T	PASS

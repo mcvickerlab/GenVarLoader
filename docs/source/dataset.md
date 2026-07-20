@@ -175,13 +175,37 @@ dummy-fill details.
 
 Everything above describes [`Dataset`](api.md#genvarloader.Dataset), which reads from an on-disk
 directory produced by [`gvl.write()`](api.md#genvarloader.write). [`gvl.StreamingDataset`](api.md#genvarloader.StreamingDataset)
-skips that step: it reconstructs haplotype batches directly from a live `.svar` (SparseVar) store,
-with no `gvl.write()` call and no `.gvl` directory on disk.
+skips that step: it reconstructs haplotype batches directly from a live variant source, with no
+`gvl.write()` call and no `.gvl` directory on disk. `variants=` accepts a `.svar`
+(SparseVar/SVAR1) store, a VCF/BCF path (`.vcf`, `.vcf.gz`/`.vcf.bgz`, `.bcf`; indexed, normalized the same
+way `gvl.write` requires — see [write.md](write.md)), or a PGEN file-set (`.pgen` with sibling
+`.pvar`/`.psam`, same trio `gvl.write` expects; **biallelic only**). All three read paths go through
+a shared Rust `RecordStreamEngine`, with VCF/BCF decoded window-by-window via genoray's Rust
+`VcfRecordSource → ChunkAssembler → DenseChunk` pipeline and PGEN via `PgenRecordSource →
+ChunkAssembler → DenseChunk`. **Streaming VCF/BCF makes htslib a hard runtime
+requirement** (statically linked into gvl's wheel via genoray's `conversion` feature; no separate
+install step).
+
+For the VCF/BCF path, that normalization requirement is **not enforced**: genoray's
+`ChunkAssembler` applies atomization (biallelic split) automatically on read, but does not
+perform left-alignment or REF/FASTA check-ref, and does not validate the input at all —
+un-normalized or non-left-aligned records are silently accepted (no error) and will break
+byte-identical parity. Pre-normalize with `bcftools norm` as described in [write.md](write.md)
+before streaming. The `.svar` path is unaffected — it reads from a store validated at build time.
+
+The PGEN path is the opposite case: **multiallelic PGEN is validated and rejected**, loudly, at
+construction time (before any genotype decode) — `PgenWindowFiller` requires biallelic (split)
+input because it omits pgenlib's `allele_idx_offsets`, which is only correct for biallelic data.
+Build a PGEN file-set with `bcftools norm` (as `gvl.write` requires) followed by
+`plink2 --make-pgen`; a multiallelic ALT anywhere in the `.pvar` raises immediately rather than
+silently misdecoding genotypes.
 
 ```python
 sds = gvl.StreamingDataset(
     "rois.bed", reference="ref.fa", variants="normed.svar", max_mem="512MB"
 ).with_seqs("haplotypes")
+# or: variants="normed.vcf.gz" / "normed.bcf" -- reads VCF/BCF directly, no .svar needed
+# or: variants="normed.pgen" -- reads a plink2 file-set directly (biallelic only)
 
 for data, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
     ...  # data: Ragged[S1], shape (batch, ploidy, ~length)
@@ -200,11 +224,11 @@ one `batch_size` slice at a time, so output is never materialized for a whole wi
 at once. Together, peak memory is bounded by `max_mem` (offsets) + `batch_size`
 (output), regardless of how many samples or regions the dataset has.
 
-Haplotype output is byte-identical to `gvl.write(...)` followed by `Dataset.open(...)[r, s]`
-(at `jitter=0`). It trades that write step for a slower per-epoch read, since every window
-re-reads the live store instead of hitting a pre-indexed dataset — prefer a written `Dataset`
-for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
-rather not pay for the write.
+Haplotype (and `with_seqs("annotated")`) output is byte-identical to `gvl.write(...)` followed by
+`Dataset.open(...)[r, s]` (at `jitter=0`). It trades that write step for a slower per-epoch read,
+since every window re-reads the live store instead of hitting a pre-indexed dataset — prefer a
+written `Dataset` for repeated-epoch training, and `StreamingDataset` for one-shot/inference work
+or when you'd rather not pay for the write.
 
 **Parallelism lives inside Rust, not in worker processes.** For a `.svar2` source, each
 read window's haplotypes are reconstructed in coarse *super-batches* dispatched across
@@ -216,10 +240,53 @@ super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iterat
 stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
 with each batch identify every row.
 
-`StreamingDataset` is currently more limited than `Dataset`: `.svar` and `.svar2` variant
-sources only (VCF/PGEN raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
-only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use
-`sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
-`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the
-variant store's native column order. See the `genvarloader` skill for the
+### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`
+
+`StreamingDataset` supports the following read-time knobs (issue
+[#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
+`Dataset` methods. These Wave A knobs are wired for the **SVAR1, VCF, and PGEN** backends;
+the `.svar2` backend does not yet support them (see the `.svar2` note below):
+
+- **`with_len(length: int | "ragged")`** — `"ragged"` (the default) yields each hap's actual
+  length; a positive `int` yields exactly that many bases per hap. Unlike `Dataset.with_len`,
+  `"variable"` is **not** accepted — `to_iter` always yields `Ragged` (there is no `ArrayDataset`
+  analog for a streaming source), so pad the ragged output yourself if you need a dense array.
+  Fixed-length output is byte-identical to `Dataset.with_len(L)` at `jitter=0`.
+- **`with_settings(*, jitter=, rng=, deterministic=)`** — mirrors the relevant subset of
+  `Dataset.with_settings` (same parameter names, note `rng` rather than `seed`). `jitter` is a
+  non-negative int: each region's read window is translated by an offset drawn from
+  `Uniform[-jitter, jitter]` (window size unchanged), clamped so the translated start stays
+  `>= 0` (the translated end may run past the contig end, N-padded). `rng` (a seed int or
+  `numpy.random.Generator`) seeds those draws — one `Generator` is created per `to_iter()` call
+  and drawn from once per region in sweep order, so a fixed `rng` reproduces the same translated
+  windows across calls and runs. **`jitter>0` is a reproducible, rng-seeded *augmentation* — not
+  byte-parity** with a written `Dataset`; only `jitter=0` (the default) is parity-gated.
+  `jitter>0` currently requires the default engine prefetch mode (combining it with `readahead`
+  raises). `deterministic` is reserved for per-hap within-window sub-shifts on fixed-length
+  output; that path is a **documented Wave A deferral** (needs a Rust engine API addition) and
+  currently has no observable effect.
+- **`with_seqs("haplotypes" | "annotated")`** — `"annotated"` returns `RaggedAnnotatedHaps`
+  (haplotypes plus per-position `var_idxs`/`ref_coords`), byte-identical to
+  `Dataset.with_seqs("annotated")` at `jitter=0`. **Limitation (issue
+  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305)):** SVAR1 `var_idxs` are always
+  dataset-global; for the VCF/PGEN record backends, `var_idxs` are dataset-global only for
+  whole-contig or from-contig-start windows — a narrowed/partial-prefix window (or any window
+  after the first contig in a multi-contig sweep) currently reports window-local `var_idxs`
+  (`var_base=0`) instead of the dataset-global index. Fix deferred.
+
+`"variants"`/`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and `var_fields`
+are **not yet implemented** for `StreamingDataset` — that's Wave B (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs` raises
+`NotImplementedError` for any kind other than `"haplotypes"`/`"annotated"`.
+
+The **`.svar2` backend** does not yet support these Wave A knobs. It is currently
+**haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
+`with_len(<int>)`, or `with_seqs("annotated")` raises `NotImplementedError` (SVAR2 Wave A support
+is a known follow-up).
+
+`StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
+and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises
+`TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch). `sample_idxs` index into
+`sds.samples` (lexicographically-sorted sample names, matching `gvl.write()`), not the variant
+source's native column order. See the `genvarloader` skill for the
 full list of what's not yet wired.

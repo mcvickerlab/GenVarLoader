@@ -23,8 +23,8 @@ seqpro-core = "0.1"
 # genoray crates are pulled straight from GitHub (no crates.io publish). Cargo finds
 # each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
 # to pull newer genoray code; both crates must share the same rev (one clone, one repo).
-svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "e07477e687c913f9605fc79ea251f1bb3b177aa9" }
-genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "e07477e687c913f9605fc79ea251f1bb3b177aa9", package = "genoray", default-features = false, features = ["conversion"] }
+svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "1d756adc8324198781f75610eb465c8c0ac4772f" }
+genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "1d756adc8324198781f75610eb465c8c0ac4772f", package = "genoray", default-features = false, features = ["conversion"] }
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -46,6 +46,18 @@ tempfile = "3"
 # Version/features matched to genoray_core's own choice (see its Cargo.toml) so the
 # already-resolved Cargo.lock entry is reused, not a second htslib build.
 rust-htslib = { version = "1.0", default-features = false, features = ["libdeflate"] }
+
+# `auto-initialize` only affects test/bench targets (dev-dependency feature
+# unification is per-target under the edition-2021 default resolver), so it does not
+# leak into the `extension-module` release build maturin produces. Needed by
+# `record_stream::pgen`'s tests, which construct a real `pgenlib.PgenReader` — outside
+# an extension module loaded by a running Python process, pyo3 has no interpreter to
+# attach to unless one is embedded here. Run with
+# `LD_LIBRARY_PATH=$PWD/.pixi/envs/dev/lib` so the test binary can dynamically load
+# libpython.
+[dev-dependencies.pyo3]
+version = "0.29"
+features = ["auto-initialize"]
 
 # Perf call-graph attribution only (`perf report --children`). Inherits release
 # codegen and adds line tables + frame pointers. NEVER the gate artifact — all

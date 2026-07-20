@@ -42,7 +42,12 @@ def _engine_jobs_for_contig(sds, keep_contig: int):
     return jobs
 
 
-def _assert_only_touched_sliced(backend, jobs, keep_contig: int, monkeypatch):
+def _assert_only_touched_sliced(
+    backend, jobs, keep_contig: int, monkeypatch, build_engine_extra=()
+):
+    # `build_engine_extra` carries the record-style backends' extra positional args
+    # (`output_length`, `annotated` -- issue #277 Wave A); the SVAR2 backend's
+    # `build_engine` takes none, so it passes an empty tuple.
     n_contigs = len(list(backend._contigs))
     assert n_contigs >= 2, "need >1 contig to prove the untouched one is skipped"
 
@@ -57,7 +62,7 @@ def _assert_only_touched_sliced(backend, jobs, keep_contig: int, monkeypatch):
         return real(self, i, *args, **kwargs)
 
     monkeypatch.setattr(ref_cls, "_contig_slice", spy)
-    backend.build_engine(jobs, batch_size=4)
+    backend.build_engine(jobs, 4, *build_engine_extra)
 
     assert set(sliced) == {keep_contig}, (
         f"build_engine sliced contigs {sorted(set(sliced))}, expected only "
@@ -94,4 +99,9 @@ def test_svar1_build_engine_materializes_only_touched_contigs(
     keep = 0
     jobs = _engine_jobs_for_contig(sds, keep)
     assert jobs, "fixture must yield at least one window on the kept contig"
-    _assert_only_touched_sliced(backend, jobs, keep, monkeypatch)
+    # `_Svar1Backend.build_engine` takes Wave A args (`output_length=-1` ragged,
+    # `annotated=False`); the ref-materialization behavior under test is independent
+    # of them.
+    _assert_only_touched_sliced(
+        backend, jobs, keep, monkeypatch, build_engine_extra=(-1, False)
+    )

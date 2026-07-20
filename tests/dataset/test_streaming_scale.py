@@ -152,8 +152,8 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
     was replaced with this one. See the module docstring for the same lesson learned
     about the prior `ru_maxrss` scale guard.)
 
-    `_Svar1Backend.generate_batch(r_idx, s_idx, o_starts, o_stops, lo, hi)` allocates
-    its output for exactly the `hi - lo` rows sliced IN -- the batch rows are chosen
+    `_Svar1Backend.generate_batch(r_idx, s_idx, o_starts, o_stops, lo, hi, output_length)`
+    allocates its output for exactly the `hi - lo` rows sliced IN -- the batch rows are chosen
     before generation, not after. So the returned `Ragged`'s total byte count IS the
     backend's internal peak output allocation for that call. At a fixed `batch_size`,
     that byte count depends only on the batch's rows (region lengths x ploidy), never
@@ -243,7 +243,9 @@ def test_generate_batch_output_is_flat_in_cohort_size(tmp_path):
         o_starts, o_stops = backend.read_window(r_idx, s_idx)
         batch_size = 4
         assert batch_size <= len(r_idx) * len(s_idx)
-        data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, batch_size)
+        data = backend.generate_batch(
+            r_idx, s_idx, o_starts, o_stops, 0, batch_size, -1
+        )
         return int(data.data.nbytes)
 
     bytes_50 = batch_output_bytes(50)
@@ -613,6 +615,117 @@ def test_svar2_engine_output_is_flat_in_cohort_size(tmp_path):
     )
 
 
+def test_pgen_variants_decoded_scales_with_window_not_contig(
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 4 (issue #276) gate for the PGEN backend's `PgenWindowFiller::fill`
+    narrowing (`src/record_stream/pgen.rs`): decoded-variant count must scale
+    with the WINDOW, not `n_windows * contig_prefix` (the pre-Task-4 coarse
+    worst case, where every window re-decoded the whole per-contig `.pvar`
+    prefix from its start).
+
+    Reuses `vcf_snp_ins_del_multi_regions` (the same 3-disjoint-region bed
+    Task 8's PGEN parity test splits `pgen_snp_ins_del_multi`'s single contig
+    into -- see conftest.py) with `max_mem` shrunk so `_plan` yields one window
+    PER REGION (`window_regions == 1`) instead of merging all 3 rows into a
+    single window. Forcing >=2 windows is what makes "decoded scales with the
+    window, not the contig" a meaningful assertion rather than a vacuous
+    single-window check.
+    """
+    from genvarloader.genvarloader import (
+        pgen_variants_decoded,
+        pgen_variants_decoded_reset,
+    )
+
+    f = pgen_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # cell_bytes = ploidy(2) * 16 = 32; n_slots = 2 -> 64 B/cell-slot. max_mem=200
+    # gives max_cells = 200 // 64 = 3, so window_samples = min(3 samples, 3) = 3
+    # (whole cohort fits) and window_regions = min(64, 3 // 3) = 1 -- one window
+    # per bed row instead of all 3 merged.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.pgen), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    pvar_path = Path(f.pgen).with_suffix(".pvar")
+    with pvar_path.open() as fh:
+        pvar_variants = sum(1 for line in fh if not line.startswith("#"))
+
+    pgen_variants_decoded_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    decoded = pgen_variants_decoded()
+
+    coarse_worst_case = n_windows * pvar_variants
+    assert decoded < coarse_worst_case, (
+        f"decoded {decoded} >= coarse worst case {coarse_worst_case} "
+        f"(n_windows={n_windows}, pvar_variants={pvar_variants}); "
+        "PgenWindowFiller's var_start/var_end narrowing regressed"
+    )
+
+
+def test_transpose_word_reads_below_cell_count(
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 5 (issue #276) gate for the shared genotype transpose
+    (`fill_decoded_window` in `src/record_stream/transpose.rs`): the word-level
+    two-pass counting-sort rewrite must read `chunk.genos.words` a small,
+    fixed number of times per window (two passes: count + fill) rather than
+    calling `get_bit` once per (variant, sample, ploid) cell.
+
+    Drives a PGEN-backed `StreamingDataset` (the transpose counter only fires
+    on the VCF/PGEN record backends, not SVAR1) over the same multi-region bed
+    Task 4's `test_pgen_variants_decoded_scales_with_window_not_contig` uses,
+    so multiple windows exercise the transpose repeatedly. `pgen_variants_decoded`
+    (reset alongside `transpose_word_reads`) reports `Σ window (var_end - var_start)`
+    -- i.e. exactly `Σ window n_var`, the same per-window variant count
+    `fill_decoded_window` transposes -- so `decoded * n_samples * ploidy` is the
+    EXACT naive per-cell `get_bit` count the old hap-major scan would have done
+    across every window in this run; `transpose_word_reads()` must land far
+    below it.
+    """
+    from genvarloader.genvarloader import (
+        pgen_variants_decoded,
+        pgen_variants_decoded_reset,
+        transpose_word_reads,
+        transpose_word_reads_reset,
+    )
+
+    f = pgen_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # Same max_mem as Task 4's test: forces >=2 windows so the gate isn't vacuous.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.pgen), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    pgen_variants_decoded_reset()
+    transpose_word_reads_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    decoded = pgen_variants_decoded()
+    reads = transpose_word_reads()
+
+    naive_cell_reads = decoded * f.n_samples * f.ploidy
+    print(
+        f"[transpose-word-reads-gate] word_reads={reads} "
+        f"naive_cell_reads={naive_cell_reads} (decoded={decoded}, "
+        f"n_samples={f.n_samples}, ploidy={f.ploidy})"
+    )
+
+    assert reads > 0, "counter is not wired"
+    assert reads < naive_cell_reads, (
+        f"transpose did {reads} word reads >= the naive per-cell get_bit count "
+        f"{naive_cell_reads} -- word-level two-pass transpose regressed to a "
+        "per-cell scan"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
@@ -640,3 +753,55 @@ def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
                 np.testing.assert_array_equal(
                     np.asarray(data[i][h]), np.asarray(expected[h])
                 )
+
+
+def test_vcf_sample_resolutions_scales_with_vcfs_not_windows(
+    vcf_snp_ins_del_multi, vcf_snp_ins_del_multi_regions
+):
+    """Task 6 phase C (issue #276) gate for `VcfWindowFiller` (`src/record_stream/vcf.rs`):
+    sample-NAME resolution (`VcfRecordSource::resolve_sample_indices`, an
+    O(k requested x n header samples) walk) must happen ONCE, at `VcfWindowFiller::new`
+    construction time -- not once per window. Before this change, `fill` re-resolved
+    sample indices by name on every call via `VcfRecordSource::new`; profiling showed
+    that walk was 74.6% of VCF producer time.
+
+    Reuses `vcf_snp_ins_del_multi` + `vcf_snp_ins_del_multi_regions` (the same
+    3-region bed Task 4's PGEN gate uses) with `max_mem` shrunk so `_plan` yields
+    one window PER REGION (`window_regions == 1`) instead of merging all 3 rows
+    into a single window -- forcing >=2 windows is what makes "resolutions stay
+    flat across windows" a meaningful assertion rather than a vacuous
+    single-window check.
+    """
+    from genvarloader.genvarloader import (
+        vcf_sample_resolutions,
+        vcf_sample_resolutions_reset,
+    )
+
+    f = vcf_snp_ins_del_multi
+    regions = vcf_snp_ins_del_multi_regions
+    # cell_bytes = ploidy(2) * 16 = 32; n_slots = 2 -> 64 B/cell-slot. max_mem=200
+    # gives max_cells = 200 // 64 = 3, so window_samples = min(3 samples, 3) = 3
+    # (whole cohort fits) and window_regions = min(64, 3 // 3) = 1 -- one window
+    # per bed row instead of all 3 merged.
+    sds = gvl.StreamingDataset(
+        regions, reference=str(f.fasta), variants=str(f.vcf), max_mem=200
+    ).with_seqs("haplotypes")
+
+    n_windows = sum(1 for _ in sds._plan())
+    assert n_windows > 1, "test requires >=2 windows to be a meaningful gate"
+
+    vcf_sample_resolutions_reset()
+    for _ in sds.to_iter(batch_size=4):
+        pass
+    resolutions = vcf_sample_resolutions()
+
+    print(
+        f"[vcf-sample-resolutions-gate] resolutions={resolutions} n_windows={n_windows}"
+    )
+
+    assert resolutions > 0, "counter is not wired"
+    assert resolutions < n_windows, (
+        f"sample-name resolutions ({resolutions}) did not stay below n_windows "
+        f"({n_windows}) -- VcfWindowFiller is re-resolving sample names per "
+        "window instead of reusing indices resolved once at construction"
+    )

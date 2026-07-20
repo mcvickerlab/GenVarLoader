@@ -35,7 +35,7 @@ def _assert_streamed_matches_written(backend, written) -> None:
     n_rows = len(r_idx) * len(s_idx)
 
     o_starts, o_stops = backend.read_window(r_idx, s_idx)
-    data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, n_rows)
+    data = backend.generate_batch(r_idx, s_idx, o_starts, o_stops, 0, n_rows, -1)
     assert len(data) == backend.n_samples
 
     for s in range(backend.n_samples):
