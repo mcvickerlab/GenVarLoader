@@ -971,8 +971,11 @@ pub fn svar1_prefetch_runs<'py>(
 /// `(n_rows, 2)`, already expanded per (region, sample). Output is `n_rows`-bounded —
 /// the #284 fix. Sparse input IS the store's `variant_idxs` mmap (zero copy). `ref_` /
 /// `ref_offsets` are the ACTIVE contig's slice (`ref_offsets = [0, contig_len]`), since
-/// the per-row `regions` this builds carry `contig_idx = 0`. Ragged output only,
-/// jitter=0.
+/// the per-row `regions` this builds carry `contig_idx = 0`. `output_length` selects
+/// ragged (`-1`, per-hap actual length) vs fixed-length (`>=0`) output; `shifts`
+/// (`None` => zeros) supplies per-(query, hap) jitter shifts for fixed-length output
+/// (issue #277 Wave A) -- mirrors `reconstruct_haplotypes_fused`'s length/shift
+/// handling exactly.
 ///
 /// This function does not touch Python and takes no GIL token; callers own the
 /// `into_pyarray` marshaling. It is infallible (all inputs are pre-validated by the
@@ -991,6 +994,8 @@ pub(crate) fn generate_batch_core(
     ref_: ndarray::ArrayView1<u8>,
     ref_offsets: ndarray::ArrayView1<i64>,
     pad_char: u8,
+    output_length: i64, // -1 = ragged (per-hap actual length), >=0 = fixed
+    shifts: Option<ndarray::ArrayView2<i32>>, // None => zeros (deterministic / jitter=0)
     parallel: bool,
 ) -> (Array1<u8>, Array1<i64>) {
     use crate::genotypes;
@@ -1005,7 +1010,14 @@ pub(crate) fn generate_batch_core(
         regions_arr[[bi, 1]] = region_bounds_b[[bi, 0]];
         regions_arr[[bi, 2]] = region_bounds_b[[bi, 1]];
     }
-    let shifts_arr = Array2::<i32>::zeros((batch, ploidy)); // jitter=0
+    let shifts_owned;
+    let shifts_view = match shifts {
+        Some(s) => s,
+        None => {
+            shifts_owned = Array2::<i32>::zeros((batch, ploidy));
+            shifts_owned.view()
+        }
+    };
 
     // Local identity map over THIS batch's rows: batch row bi, hap p -> local CSR row
     // bi*ploidy + p, indexing o_starts_b/o_stops_b (which are already the batch slice).
@@ -1044,9 +1056,14 @@ pub(crate) fn generate_batch_core(
         for k in 0..n_work {
             let query = k / ploidy;
             let hap = k % ploidy;
-            let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
-            let diff = diffs[[query, hap]] as i64;
-            acc += (ref_len + diff).max(0);
+            let per: i64 = if output_length >= 0 {
+                output_length
+            } else {
+                let ref_len = (regions_arr[[query, 2]] - regions_arr[[query, 1]]) as i64;
+                let diff = diffs[[query, hap]] as i64;
+                (ref_len + diff).max(0)
+            };
+            acc += per;
             out_offsets_vec[k + 1] = acc;
         }
     }
@@ -1058,7 +1075,7 @@ pub(crate) fn generate_batch_core(
         out_data.view_mut(),
         out_offsets_vec.view(),
         regions_arr.view(),
-        shifts_arr.view(),
+        shifts_view,
         geno_offset_idx.view(),
         o_starts_a,
         o_stops_a,
@@ -1084,7 +1101,10 @@ pub(crate) fn generate_batch_core(
 /// CSR-row offsets for exactly this batch (length `n_rows * ploidy`, ABSOLUTE indices
 /// into `variant_idxs`); `region_bounds_b` is `(n_rows, 2)`, already expanded per
 /// (region, sample). Output is `n_rows`-bounded — the #284 fix. `geno_v_idxs` is the
-/// shared `variant_idxs` mmap (zero copy). Ragged output only, jitter=0.
+/// shared `variant_idxs` mmap (zero copy). `output_length=-1` yields ragged (per-hap
+/// actual length) output; `>=0` yields fixed-length output (issue #277 Wave A). No
+/// shifts/jitter support here (always zeros) -- this standalone wrapper is only used
+/// by `_Svar1Backend`'s readahead ("Design C") path, which does not support jitter.
 ///
 /// Thin FFI wrapper over [`generate_batch_core`] (which the streaming engine also uses).
 #[pyfunction]
@@ -1102,6 +1122,7 @@ pub fn svar1_generate_batch<'py>(
     ref_: PyReadonlyArray1<u8>,
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
+    output_length: i64,
     parallel: bool,
 ) -> PyResult<(Bound<'py, PyArray1<u8>>, Bound<'py, PyArray1<i64>>)> {
     require_contiguous_1d(&ref_, "ref_")?;
@@ -1142,6 +1163,8 @@ pub fn svar1_generate_batch<'py>(
             ref_a,
             ref_offsets_a,
             pad_char,
+            output_length,
+            None, // shifts -- SVAR1's standalone wrapper does not support jitter/shifts
             parallel,
         )
     });

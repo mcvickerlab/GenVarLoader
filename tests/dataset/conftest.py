@@ -833,3 +833,41 @@ def pgen_multi_contig(
         sample_names=vcf_multi_contig.sample_names,
         regions=vcf_multi_contig.regions,
     )
+
+
+@pytest.fixture
+def streaming_case(request, tmp_path_factory):
+    """Shared factory fixture mapping a backend name to
+    ``(regions, reference, variants, written)`` for the streaming Wave A
+    output-mode tests (issue #277, Tasks 2/3/4/5). ``written`` is a plain
+    ``gvl.Dataset.open(...)`` -- NO output mode applied -- so each test can
+    layer its own ``.with_len``/``.with_seqs``/etc. on both `written` and a
+    freshly constructed `StreamingDataset` for the same inputs.
+
+    Backed by three real, already-committed SNP+INS+DEL/3-sample fixtures (one
+    per backend): `svar1_multicontig_fixture` (pre-written dataset dir reused
+    directly), `vcf_snp_ins_del_multi` and `pgen_snp_ins_del_multi` (written
+    lazily here into a fresh `tmp_path_factory` dir, since those fixtures only
+    carry the source VCF/PGEN, not a pre-written `gvl.Dataset`).
+    """
+
+    def _case(backend: str):
+        if backend == "svar1":
+            f = request.getfixturevalue("svar1_multicontig_fixture")
+            written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+            return f.bed, f.reference_path, f.svar_path, written
+        elif backend == "vcf":
+            f = request.getfixturevalue("vcf_snp_ins_del_multi")
+            out = tmp_path_factory.mktemp("sc_vcf") / "ds"
+            gvl.write(out, f.regions, variants=str(f.vcf), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return f.regions, str(f.fasta), str(f.vcf), written
+        elif backend == "pgen":
+            f = request.getfixturevalue("pgen_snp_ins_del_multi")
+            out = tmp_path_factory.mktemp("sc_pgen") / "ds"
+            gvl.write(out, f.regions, variants=str(f.pgen), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return f.regions, str(f.fasta), str(f.pgen), written
+        raise ValueError(f"streaming_case: unknown backend {backend!r}")
+
+    return _case

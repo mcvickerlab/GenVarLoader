@@ -350,6 +350,14 @@ class StreamingDataset:
         slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
         if self._backend is not None:
+            # Resolve the effective fixed/ragged length ONCE: -1 = ragged (per-hap
+            # actual length, the pre-Wave-A default), >=0 = fixed (issue #277
+            # `with_len(L)`). Threaded through both prefetch-strategy branches below;
+            # the Ragged output shaping further down is UNCHANGED -- offsets from the
+            # engine/generate_batch already encode the fixed length when >=0.
+            _out_len = (
+                -1 if self._output_length == "ragged" else int(self._output_length)
+            )
             if self._prefetch_strategy == "engine":
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
@@ -377,7 +385,7 @@ class StreamingDataset:
                     )
                     for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                 ]
-                engine = self._backend.build_engine(engine_jobs, batch_size)
+                engine = self._backend.build_engine(engine_jobs, batch_size, _out_len)
                 del engine_jobs
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
                     n_s = s_hi - s_lo
@@ -453,7 +461,7 @@ class StreamingDataset:
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
                         data = self._backend.generate_batch(
-                            r_idx, s_idx, cur[0], cur[1], lo, hi
+                            r_idx, s_idx, cur[0], cur[1], lo, hi, _out_len
                         )
                         yield data, flat_r[lo:hi], flat_s[lo:hi]
                     cur = nxt
@@ -816,11 +824,15 @@ class _Svar1Backend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
         `(contig_idx, region_starts, region_ends, s_lo, s_hi)`, in the SAME order
-        `_iter_batches` will drive `.next_batch()`.
+        `_iter_batches` will drive `.next_batch()`. `output_length` is `-1` for ragged
+        (per-hap actual length, pre-Wave-A behavior) or a fixed length >= 1 (issue #277
+        Wave A `with_len`); forwarded straight to the engine constructor's trailing
+        `output_length` parameter.
 
         Cohort-independent job residency (issue #284 / final-review Finding 1): the
         full public->physical sample map `self._phys_sample_idx` crosses ONCE (length
@@ -884,6 +896,7 @@ class _Svar1Backend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
         )
 
     def read_window(
@@ -935,11 +948,14 @@ class _Svar1Backend:
         o_stops: NDArray[np.int64],
         lo: int,
         hi: int,
+        output_length: int,
     ) -> Ragged:
         """Generate haplotypes for window rows [lo:hi] (C-order (region, sample)).
         Output is (hi-lo)-bounded -- NEVER the whole window (issue #284). `o_starts`/
         `o_stops` are the whole window's offsets (from `read_window`); this slices the
         CSR rows [lo*ploidy : hi*ploidy] and the matching per-row region bounds.
+        `output_length` is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A),
+        forwarded straight to `svar1_generate_batch`.
         """
         from ..genvarloader import svar1_generate_batch
 
@@ -979,6 +995,7 @@ class _Svar1Backend:
             ref_bytes,
             ref_offsets,
             self._ref.pad_char,
+            output_length,
             True,
         )
         n_rows = hi - lo
@@ -1051,6 +1068,7 @@ class _VcfBackend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1060,7 +1078,9 @@ class _VcfBackend:
         `_Svar1Backend.build_engine`'s job-array unpacking exactly, minus the
         SVAR1-only store/physical-sample-map arguments (a VCF job's
         `[s_lo, s_hi)` indexes straight into `sample_names`, no public->
-        physical indirection).
+        physical indirection). `output_length` is `-1` for ragged or a fixed
+        length >= 1 (issue #277 Wave A `with_len`), forwarded straight to the
+        engine constructor's trailing `output_length` parameter.
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1100,6 +1120,7 @@ class _VcfBackend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
         )
 
 
@@ -1177,6 +1198,7 @@ class _PgenBackend:
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
+        output_length: int,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -1184,7 +1206,8 @@ class _PgenBackend:
         one entry per WINDOW, `(contig_idx, region_starts, region_ends, s_lo,
         s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
         mirrors `_VcfBackend.build_engine` exactly, minus the VCF-only
-        `vcf_path` naming (here it's the resolved `.pgen` path).
+        `vcf_path` naming (here it's the resolved `.pgen` path). `output_length`
+        is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A `with_len`).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1222,4 +1245,5 @@ class _PgenBackend:
             self._ref.pad_char,
             True,
             batch_size,
+            output_length,
         )

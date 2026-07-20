@@ -120,6 +120,9 @@ struct Svar1Backend {
     alt_offsets: Array1<i64>,
     pad_char: u8,
     parallel: bool,
+    /// -1 = ragged (per-hap actual length, pre-#277 behavior), >=0 = fixed length
+    /// (issue #277 Wave A `with_len`). Forwarded verbatim to `generate_batch_core`.
+    output_length: i64,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -204,6 +207,8 @@ impl EngineBackend for Svar1Backend {
             ref_view,
             ref_offsets.view(),
             self.pad_char,
+            self.output_length,
+            None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
             self.parallel,
         ))
     }
@@ -232,6 +237,7 @@ impl Svar1StreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -247,6 +253,7 @@ impl Svar1StreamEngine {
             alt_offsets,
             pad_char,
             parallel,
+            output_length,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -281,7 +288,7 @@ impl Svar1StreamEngine {
         contig_ref_bytes, phys_sample_idx,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets,
-        pad_char, parallel, batch_size,
+        pad_char, parallel, batch_size, output_length,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -308,6 +315,7 @@ impl Svar1StreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
@@ -398,6 +406,7 @@ impl Svar1StreamEngine {
             pad_char,
             parallel,
             batch_size,
+            output_length,
         ))
     }
 
@@ -508,6 +517,8 @@ mod tests {
             ndarray::ArrayView1::from(f.ref_bytes.as_slice()),
             ref_offsets.view(),
             b'N',
+            -1, // ragged
+            None,
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -528,6 +539,7 @@ mod tests {
             b'N',
             false,
             batch_size,
+            -1, // ragged
         )
     }
 
@@ -678,6 +690,7 @@ mod tests {
             b'N',
             false,
             8,
+            -1, // ragged
         );
 
         match engine.next_batch_core() {
@@ -818,6 +831,7 @@ mod tests {
             b'N',
             false,
             1000,
+            -1, // ragged
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -852,6 +866,8 @@ mod tests {
                 ndarray::ArrayView1::from(ref_bytes),
                 ref_offsets.view(),
                 b'N',
+                -1, // ragged
+                None,
                 false,
             );
             (data.to_vec(), offs.to_vec())
@@ -935,6 +951,7 @@ mod tests {
             b'N',
             false,
             1000,
+            -1, // ragged
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();

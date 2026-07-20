@@ -34,6 +34,7 @@ def test_record_stream_engine_pgen_yields_then_none(streaming_pgen_fixture):
         ord("N"),
         False,
         32,
+        -1,  # output_length: ragged
     )
 
     batches = []

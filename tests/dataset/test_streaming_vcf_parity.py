@@ -69,6 +69,7 @@ def test_vcf_streamed_variant_table_matches_written(vcf_snp_ins_del_multi, tmp_p
         ord("N"),
         False,
         32,
+        -1,  # output_length: ragged (unused by debug_decode_window, no generation here)
     )
     v_starts, ilens, alt_alleles, alt_offsets = eng.debug_decode_window(
         0, [0], [contig_len], 0, f.n_samples

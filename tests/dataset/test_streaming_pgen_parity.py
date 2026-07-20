@@ -63,6 +63,7 @@ def test_pgen_streamed_variant_table_matches_written(pgen_snp_ins_del_multi, tmp
         ord("N"),
         False,
         32,
+        -1,  # output_length: ragged (unused by debug_decode_window, no generation here)
     )
     v_starts, ilens, alt_alleles, alt_offsets = eng.debug_decode_window(
         0, [0], [contig_len], 0, f.n_samples

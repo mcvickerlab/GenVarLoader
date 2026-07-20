@@ -86,6 +86,9 @@ struct RecordBackend {
     ploidy: usize,
     pad_char: u8,
     parallel: bool,
+    /// -1 = ragged (per-hap actual length, pre-#277 behavior), >=0 = fixed length
+    /// (issue #277 Wave A `with_len`). Forwarded verbatim to `generate_batch_core`.
+    output_length: i64,
 }
 
 impl RecordBackend {
@@ -201,6 +204,8 @@ impl EngineBackend for RecordBackend {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             self.pad_char,
+            self.output_length,
+            None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
             self.parallel,
         ))
     }
@@ -227,6 +232,7 @@ impl RecordStreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
     ) -> Self {
         let backend = RecordBackend {
             filler,
@@ -236,6 +242,7 @@ impl RecordStreamEngine {
             ploidy,
             pad_char,
             parallel,
+            output_length,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -274,7 +281,7 @@ impl RecordStreamEngine {
         source_kind, vcf_path, sample_names, ploidy,
         contig_names, contig_ref_bytes,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
-        fasta_path, pad_char, parallel, batch_size,
+        fasta_path, pad_char, parallel, batch_size, output_length,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -293,6 +300,7 @@ impl RecordStreamEngine {
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
+        output_length: i64,
     ) -> PyResult<Self> {
         let n_contigs = contig_names.len();
         if contig_ref_bytes.len() != n_contigs {
@@ -361,6 +369,7 @@ impl RecordStreamEngine {
                     pad_char,
                     parallel,
                     batch_size,
+                    output_length,
                 ))
             }
             "pgen" => {
@@ -393,6 +402,7 @@ impl RecordStreamEngine {
                     pad_char,
                     parallel,
                     batch_size,
+                    output_length,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
@@ -599,6 +609,8 @@ mod tests {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             b'N',
+            -1, // ragged
+            None,
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -623,6 +635,7 @@ mod tests {
             b'N',
             false,
             1000, // batch_size larger than any window -> one batch per window
+            -1,   // ragged
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -652,6 +665,7 @@ mod tests {
             b'N',
             false,
             8,
+            -1, // ragged
         );
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
@@ -679,6 +693,7 @@ mod tests {
             b'N',
             false,
             8,
+            -1, // ragged
         );
 
         match engine.next_batch_core() {
@@ -764,6 +779,8 @@ mod tests {
             ndarray::ArrayView1::from(c.ref_bytes.as_slice()),
             ref_offsets.view(),
             b'N',
+            -1, // ragged
+            None,
             false,
         );
         let expected = (exp_data.to_vec(), exp_offs.to_vec());
@@ -786,6 +803,7 @@ mod tests {
             b'N',
             false,
             1000, // one batch for the whole 4-row window
+            -1,   // ragged
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
