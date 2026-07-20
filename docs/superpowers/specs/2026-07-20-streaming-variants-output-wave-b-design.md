@@ -7,9 +7,10 @@
 [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305) — record-backend `var_base` for narrowed/multi-contig windows
 **Folds in:** [#202](https://github.com/mcvickerlab/GenVarLoader/issues/202) — `with_seqs("variants")` not clipped to the region window ·
 [#231](https://github.com/mcvickerlab/GenVarLoader/issues/231) — custom per-call FORMAT/INFO `var_fields`
-**Follows:** Wave A [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)
-(branch `spec/277-output-mode-wave-a`) — `with_len` + jitter + `with_seqs("annotated")`
-**Target branch:** `streaming` (stacked on `spec/277-output-mode-wave-a`)
+**Follows:** Wave A [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) — `with_len` +
+jitter + `with_seqs("annotated")` — **merged into `streaming`** via PR
+[#308](https://github.com/mcvickerlab/GenVarLoader/pull/308) (2026-07-20)
+**Target branch:** `streaming` (Wave A already merged; every Wave B PR targets `streaming` directly)
 **Backends:** SVAR1 + VCF + PGEN (the backends merged into `streaming`). SVAR2 ([#298](https://github.com/mcvickerlab/GenVarLoader/issues/298)) inherits the generic code when it merges.
 
 ## Summary
@@ -137,12 +138,11 @@ contig). The haplotype/annotated path does clip correctly (`regions=req.regions,
 (PR-B1) applies the identical clip natively (its haplotype path already clips per-row via the `rb`
 region bounds in `generate_batch_core`). Closes #202.
 
-**Branch/ordering.** The written-path fix is an independent pre-existing bug; it targets `main` and
-benefits all users immediately. `streaming` merges `main` (the roadmap already prescribes periodic
-`main → streaming` merges) **before** PR-B1's variants-parity test runs, so parity is asserted
-against the corrected oracle. If cross-branch timing proves awkward at plan-time, the fallback is to
-land the written-path clip directly on `streaming` with the rest of Wave B; either way both paths
-clip.
+**Branch/ordering.** The written-path fix targets **`streaming`** with the rest of Wave B (decided:
+keep all Wave B on one branch to avoid cross-branch merge-timing coupling with the parity tests).
+It lands before PR-B1 so PR-B1's variants-parity is asserted against the corrected oracle. The fix
+flows to `main` at the streaming milestone merge, closing #202 for all users then; it also stands
+alone, so it can be cherry-picked to `main` earlier if desired.
 
 ### PR-B1 — streaming variants output (`RaggedVariants`), default fields, region-clipped
 
@@ -212,8 +212,9 @@ per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touchi
   CSR + static table already match the kernel's inputs.
 - **REF via reference-slice**, not a genoray `DenseChunk` change — avoids a cross-repo dependency;
   parity is the gate.
-- **Open at plan-time**: whether PR-A stacks directly on `spec/277-output-mode-wave-a` or waits for
-  Wave A to merge to `streaming` first. Not blocking the spec.
+- **Branch (resolved)**: Wave A is merged into `streaming` (PR #308), so **every Wave B PR —
+  including PR-A and the PR-B0 #202 fix — targets `streaming` directly.** No stacking on the (now
+  deleted) `spec/277-output-mode-wave-a` branch, and no `main`-vs-`streaming` split for #202.
 
 ## Testing / parity plan
 
@@ -236,8 +237,8 @@ per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touchi
 
 | PR | Scope | Depends on | Parallel? |
 |----|-------|-----------|-----------|
-| **PR-A** | #305 `var_base` (VCF+PGEN) + `skip_count` + VCF per-contig table + multi-contig fixtures | Wave A | — foundation |
-| **PR-B0** | #202 written-path region clip (target `main`) | — | ✅ independent of PR-A |
+| **PR-A** | #305 `var_base` (VCF+PGEN) + `skip_count` + VCF per-contig table + multi-contig fixtures | Wave A (merged, #308) | — foundation |
+| **PR-B0** | #202 written-path region clip (targets `streaming`) | — | ✅ independent of PR-A |
 | **PR-B1** | streaming `with_seqs("variants")`, default fields, region-clipped, reuse assemble kernel | PR-A, PR-B0 | serial base for B2–B4 |
 | **PR-B2** | `min_af`/`max_af` (AF channel) | PR-B1 | ✅ vs B3 |
 | **PR-B3** | `var_fields` dosage + custom FORMAT/INFO (#231) | PR-B1 | ✅ vs B2 |
