@@ -3,11 +3,87 @@ read-bound FFI, and self-consistent across drain boundaries."""
 
 from __future__ import annotations
 
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import numpy as np
+import polars as pl
+import pytest
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
+
+# Core-utilization fixture: SNP-only, wide enough (rows * ploidy >> num_threads) that
+# a single core-saturating super-batch under GVL_FORCE_PARALLEL actually engages
+# multiple cores, not just clears the size gate. See
+# test_super_batch_engages_multiple_cores below.
+_CU_N_VARIANTS = 200
+_CU_N_SAMPLES = 100
+_CU_CONTIG_LEN = 4000
+
+
+@dataclass(frozen=True)
+class _Svar2ScaleFixture:
+    bed: pl.DataFrame
+    reference_path: Path
+    svar2_path: Path
+
+
+@pytest.fixture(scope="module")
+def svar2_scale_fixture(tmp_path_factory) -> _Svar2ScaleFixture:
+    """Self-contained SVAR2 store: chr1 reference + a SNP-only VCF (200 variants x 100
+    samples, random 0|1 genotypes), converted with `no_reference=True,
+    skip_out_of_scope=True` (mirrors `test_streaming_scale.py`'s
+    `test_svar2_generate_batch_output_is_flat_in_cohort_size` builder, replicated here
+    so this module doesn't depend on a helper nested inside another task's test
+    function)."""
+    from genoray import SparseVar2
+
+    d = tmp_path_factory.mktemp("svar2_core_util")
+    ref = d / "ref.fa"
+    rng = np.random.default_rng(1)
+    seq = "".join(rng.choice(list("ACGT"), _CU_CONTIG_LEN))
+    ref.write_text(f">chr1\n{seq}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    lines = [
+        "##fileformat=VCFv4.2",
+        f"##contig=<ID=chr1,length={_CU_CONTIG_LEN}>",
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+        + "\t".join(f"S{i}" for i in range(_CU_N_SAMPLES)),
+    ]
+    positions = np.sort(
+        rng.choice(np.arange(2, _CU_CONTIG_LEN - 2), _CU_N_VARIANTS, replace=False)
+    )
+    for pos in positions:
+        # SNP-only (REF=A/ALT=G): no indels, so haplotype reconstruction stays cheap
+        # per-row and the fixture's cost scales predictably with rows * ploidy.
+        gts = "\t".join(
+            f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(_CU_N_SAMPLES)
+        )
+        lines.append(f"chr1\t{pos}\t.\tA\tG\t.\t.\t.\tGT\t{gts}")
+    vcf.write_text("\n".join(lines) + "\n")
+
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    svar2 = d / "store.svar2"
+    SparseVar2.from_vcf(
+        svar2, bcf, no_reference=True, skip_out_of_scope=True, overwrite=True
+    )
+
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1"] * 4,
+            "chromStart": [0, 100, 200, 300],
+            "chromEnd": [100, 200, 300, 400],
+        }
+    )
+    return _Svar2ScaleFixture(bed=bed, reference_path=ref, svar2_path=svar2)
 
 
 def _plan_windows(sds):
@@ -116,3 +192,39 @@ def test_super_batch_fill_drain_matches_per_batch_ffi(
         ref = np.concatenate(ref_parts) if ref_parts else np.empty(0, "S1")
 
         np.testing.assert_array_equal(got, ref)
+
+
+def test_super_batch_engages_multiple_cores(svar2_scale_fixture, monkeypatch) -> None:
+    """With a core-saturating super-batch, cpu_secs/wall rises materially above the
+    single-core (~1x) PR-1 baseline. GVL_FORCE_PARALLEL removes the size gate so the
+    modest-size fixture still dispatches rayon; the signal is threads engaged, not
+    speed."""
+    import time
+
+    import genvarloader as gvl
+
+    monkeypatch.setenv("GVL_FORCE_PARALLEL", "1")
+    fx = svar2_scale_fixture
+    sds = gvl.StreamingDataset(
+        fx.bed, reference=fx.reference_path, variants=fx.svar2_path
+    ).with_seqs("haplotypes")
+
+    for _ in sds.to_iter(batch_size=8):  # warm import/JIT of the rust path
+        pass
+
+    cpu0, wall0 = time.process_time(), time.perf_counter()
+    n = 0
+    for data, _, _ in sds.to_iter(batch_size=8):
+        n += 1
+    cpu1, wall1 = time.process_time(), time.perf_counter()
+
+    wall = wall1 - wall0
+    cpu = cpu1 - cpu0
+    ratio = cpu / wall if wall > 0 else 0.0
+    print(
+        f"[svar2 core-util] cpu={cpu:.3f}s wall={wall:.3f}s ratio={ratio:.2f} batches={n}"
+    )
+    assert ratio > 1.3, (
+        f"super-batch reconstruct did not engage multiple cores (cpu/wall={ratio:.2f}); "
+        "expected >1.3 with GVL_FORCE_PARALLEL"
+    )
