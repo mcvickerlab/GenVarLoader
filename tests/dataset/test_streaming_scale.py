@@ -376,6 +376,120 @@ def test_svar2_generate_batch_output_is_flat_in_cohort_size(tmp_path):
     )
 
 
+def test_svar2_super_batch_buffer_is_flat_in_cohort_size(tmp_path):
+    """The super-batch reconstruct buffer's byte count is IDENTICAL between a 50- and a
+    400-sample cohort at a fixed super-batch size (cohort-independent, #284), while the
+    read window covers the whole cohort. Generalizes the per-batch flatness gate above:
+    that test proves `_drain`'s output is flat in cohort size for a fixed `batch_size`;
+    this one proves the recycled `Svar2ReconBuf` itself -- what `_fill_super_batch`
+    actually fills -- never scales with the cohort, only with the fixed super-batch
+    row count (`_super_batch_rows`). Clone of the builder in
+    `test_svar2_generate_batch_output_is_flat_in_cohort_size` above.
+
+    Correctness note: rows are C-order (region, sample), so row = region_i * n_samples
+    + sample_j. With `_super_batch_rows` forced to 16 and n_samples >= 50, the first 16
+    window rows are always region 0, samples 0..15 in BOTH cohorts -- same underlying
+    genotypes regardless of how many samples follow them in the window. So a
+    fixed-16-row super-batch fill must produce identical buffer bytes across cohorts;
+    if it doesn't, the buffer is retaining/copying something sized by the whole window
+    rather than just the filled super-batch rows.
+    """
+    import subprocess
+
+    import numpy as np
+    import polars as pl
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._streaming import _Svar2Backend
+    from genvarloader.genvarloader import Svar2ReconBuf
+
+    def build(n_samples: int):
+        d = tmp_path / f"sb_n{n_samples}"
+        d.mkdir()
+        ref = d / "ref.fa"
+        rng = np.random.default_rng(1)
+        seq = "".join(rng.choice(list("ACGT"), 4000))
+        ref.write_text(f">chr1\n{seq}\n")
+        subprocess.run(["samtools", "faidx", str(ref)], check=True)
+        vcf = d / "in.vcf"
+        lines = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=4000>",
+            '##FORMAT=<ID=GT,Number=1,Type=String,Description="GT">',
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t"
+            + "\t".join(f"S{i}" for i in range(n_samples)),
+        ]
+        pos = np.sort(rng.choice(np.arange(2, 3998), 200, replace=False))
+        for p in pos:
+            # SNP-only (REF=A/ALT=G, no indels): haplotype length == region length
+            # regardless of genotype, so buffer bytes are deterministic across
+            # cohorts of different size.
+            gts = "\t".join(
+                f"{rng.integers(0, 2)}|{rng.integers(0, 2)}" for _ in range(n_samples)
+            )
+            lines.append(f"chr1\t{p}\t.\tA\tG\t.\t.\t.\tGT\t{gts}")
+        vcf.write_text("\n".join(lines) + "\n")
+        bcf = d / "in.bcf"
+        subprocess.run(
+            ["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True
+        )
+        subprocess.run(["bcftools", "index", str(bcf)], check=True)
+        svar2 = d / "store.svar2"
+        SparseVar2.from_vcf(
+            svar2, bcf, no_reference=True, skip_out_of_scope=True, overwrite=True
+        )
+        return svar2, ref
+
+    def measure(n_samples: int) -> int:
+        svar2, ref = build(n_samples)
+        bed = pl.DataFrame(
+            {
+                "chrom": ["chr1"] * 4,
+                "chromStart": [0, 100, 200, 300],
+                "chromEnd": [100, 200, 300, 400],
+            }
+        )
+        sds = gvl.StreamingDataset(bed, reference=ref, variants=svar2).with_seqs(
+            "haplotypes"
+        )
+        backend = sds._backend
+        assert isinstance(backend, _Svar2Backend), (
+            "test requires the real SVAR2 backend, not _Svar1Backend or the "
+            "whole-window test seam"
+        )
+        # Force a small FIXED super-batch so it cannot silently track the cohort.
+        backend._super_batch_rows = 16
+
+        r_idx, s_idx = next(iter(sds._plan()))
+        assert len(s_idx) == n_samples, (
+            f"expected the window to cover the whole cohort ({n_samples} samples), "
+            f"got {len(s_idx)} -- test no longer proves what it claims"
+        )
+
+        window = backend.read_window(r_idx, s_idx)  # SVAR2: opaque bundle
+        n_rows = len(r_idx) * len(s_idx)
+        buf = Svar2ReconBuf(backend.ploidy)
+        backend._fill_super_batch(
+            r_idx, s_idx, window, 0, min(16, n_rows), buf, parallel=False
+        )
+        return int(buf.total_bytes)
+
+    bytes_50 = measure(50)
+    bytes_400 = measure(400)
+    print(f"[svar2 super-batch flatness] n=50 {bytes_50}B n=400 {bytes_400}B")
+
+    assert bytes_50 > 0, "counter is not wired (super-batch fill produced no bytes)"
+    # A whole-window regression (issue #284) would size the buffer by the cohort
+    # (len(s_idx) == n_samples); a truly fixed super-batch fills the same 16 rows --
+    # same region, same samples 0..15 -- regardless of how many more samples follow
+    # in the window, so the buffer's byte count must be EXACTLY identical.
+    assert bytes_50 == bytes_400, (
+        f"super-batch buffer scaled with cohort size (50->{bytes_50}B, "
+        f"400->{bytes_400}B); the super-batch must be a fixed chunk of window rows, "
+        "cohort-independent (#284)"
+    )
+
+
 def test_scale_parity_still_byte_identical(scale_fixture, tmp_path):
     """The scale fixture must ALSO satisfy the parity oracle -- a fast wrong answer
     is not progress."""
