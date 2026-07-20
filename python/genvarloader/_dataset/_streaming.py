@@ -420,6 +420,11 @@ class StreamingDataset:
             _out_len = (
                 -1 if self._output_length == "ragged" else int(self._output_length)
             )
+            # Wave A (#277) Task 4: whether to request AnnotatedHaps (var_idxs +
+            # ref_coords) alongside haplotypes. Resolved ONCE here (not per window) and
+            # threaded through `build_engine`/the engine constructor -- the engine only
+            # allocates/computes the two annotation arrays when this is `True`.
+            _annotated = self._seq_kind is RaggedAnnotatedHaps
             if self._prefetch_strategy == "engine":
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
@@ -471,8 +476,21 @@ class StreamingDataset:
                         )
                         for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                     ]
-                engine = self._backend.build_engine(engine_jobs, batch_size, _out_len)
+                engine = self._backend.build_engine(
+                    engine_jobs, batch_size, _out_len, _annotated
+                )
                 del engine_jobs
+                # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
+                # `(data, annot_v_idxs, annot_ref_pos, offsets)` from the engine and
+                # packs a `RaggedAnnotatedHaps`; haplotype output is unchanged (2-tuple,
+                # `RaggedSeqs`-shaped). Both share the SAME `offsets` layout (every
+                # array is one entry per output position), so all three `Ragged`s below
+                # are built from one `Ragged.from_offsets` call each over that offsets
+                # array -- mirrors the written path's `_FlatAnnotatedHaps.to_padded()`
+                # packing (`_flat.py`).
+                next_batch = (
+                    engine.next_batch_annotated if _annotated else engine.next_batch
+                )
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
                     n_s = s_hi - s_lo
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
@@ -480,26 +498,39 @@ class StreamingDataset:
                     n_rows = len(flat_r)
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
-                        nxt = engine.next_batch()
+                        nxt = next_batch()
                         if nxt is None:
                             raise RuntimeError(
-                                "Svar1StreamEngine exhausted before the plan did"
+                                "streaming engine exhausted before the plan did"
                             )
-                        data, offsets = nxt
-                        yield (
-                            Ragged.from_offsets(
+                        if _annotated:
+                            data, annot_v, annot_pos, offsets = nxt
+                            shape = (hi - lo, self._backend.ploidy, None)
+                            offsets = np.asarray(offsets, np.int64)
+                            out = RaggedAnnotatedHaps(
+                                Ragged.from_offsets(
+                                    np.asarray(data).view("S1"), shape, offsets
+                                ),
+                                Ragged.from_offsets(
+                                    np.asarray(annot_v), shape, offsets
+                                ),
+                                Ragged.from_offsets(
+                                    np.asarray(annot_pos), shape, offsets
+                                ),
+                            )
+                        else:
+                            data, offsets = nxt
+                            out = Ragged.from_offsets(
                                 np.asarray(data).view("S1"),
                                 (hi - lo, self._backend.ploidy, None),
                                 np.asarray(offsets, np.int64),
-                            ),
-                            flat_r[lo:hi],
-                            flat_s[lo:hi],
-                        )
+                            )
+                        yield (out, flat_r[lo:hi], flat_s[lo:hi])
                 # `-O`-safe (Minor 3): a bare `assert` is stripped under `python -O`,
                 # silently dropping this end-of-plan invariant.
-                if engine.next_batch() is not None:
+                if next_batch() is not None:
                     raise RuntimeError(
-                        "Svar1StreamEngine had extra batches beyond the plan"
+                        "streaming engine had extra batches beyond the plan"
                     )
             elif self._prefetch_strategy == "readahead":
                 # Design C (issue #283): single-thread read-ahead-one-window drive.
@@ -523,6 +554,19 @@ class StreamingDataset:
                         "internally and cannot accept translated bounds. Use the "
                         'default `_prefetch_strategy="engine"` (do not set jitter '
                         'with "readahead").'
+                    )
+                # Annotated output (issue #277 Wave A Task 4) is likewise only wired
+                # through the default "engine" path: `_Svar1Backend.generate_batch`
+                # (the readahead seam) has no annotated variant, and this experimental
+                # toggle is out of scope for that addition. Fail fast rather than
+                # silently ignoring `with_seqs("annotated")`.
+                if _annotated:
+                    raise NotImplementedError(
+                        'StreamingDataset with_seqs("annotated") is only supported '
+                        'with the default "engine" prefetch strategy; the '
+                        'experimental "readahead" toggle has no annotated variant. '
+                        'Use the default `_prefetch_strategy="engine"` (do not '
+                        'combine with_seqs("annotated") with "readahead").'
                     )
 
                 from ..genvarloader import svar1_prefetch_runs
@@ -988,6 +1032,7 @@ class _Svar1Backend:
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
         output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -995,7 +1040,10 @@ class _Svar1Backend:
         `_iter_batches` will drive `.next_batch()`. `output_length` is `-1` for ragged
         (per-hap actual length, pre-Wave-A behavior) or a fixed length >= 1 (issue #277
         Wave A `with_len`); forwarded straight to the engine constructor's trailing
-        `output_length` parameter.
+        `output_length` parameter. `annotated` (issue #277 Wave A Task 4) selects
+        whether the engine computes `annot_v_idxs`/`annot_ref_pos` -- SVAR1's
+        `geno_v_idxs` is already dataset-global, so the Rust side needs no `var_base`
+        (see `stream_engine.rs`'s `Svar1Backend.annotated` doc comment).
 
         Cohort-independent job residency (issue #284 / final-review Finding 1): the
         full public->physical sample map `self._phys_sample_idx` crosses ONCE (length
@@ -1060,6 +1108,7 @@ class _Svar1Backend:
             True,
             batch_size,
             output_length,
+            annotated,
         )
 
     def read_window(
@@ -1232,6 +1281,7 @@ class _VcfBackend:
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
         output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1243,7 +1293,13 @@ class _VcfBackend:
         `[s_lo, s_hi)` indexes straight into `sample_names`, no public->
         physical indirection). `output_length` is `-1` for ragged or a fixed
         length >= 1 (issue #277 Wave A `with_len`), forwarded straight to the
-        engine constructor's trailing `output_length` parameter.
+        engine constructor's trailing `output_length` parameter. `annotated`
+        (issue #277 Wave A Task 4) selects whether the engine computes
+        `annot_v_idxs`/`annot_ref_pos`; `VcfWindowFiller` maps window-local
+        variant ids to dataset-global ones via `var_base = 0` -- CORRECT for
+        every current single-contig/whole-contig fixture but a KNOWN GAP for a
+        window that doesn't start at global variant 0 (see `vcf.rs`'s
+        `WindowFiller::fill` doc comment and GitHub issue #305).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1284,6 +1340,7 @@ class _VcfBackend:
             True,
             batch_size,
             output_length,
+            annotated,
         )
 
 
@@ -1362,6 +1419,7 @@ class _PgenBackend:
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
         output_length: int,
+        annotated: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -1371,6 +1429,12 @@ class _PgenBackend:
         mirrors `_VcfBackend.build_engine` exactly, minus the VCF-only
         `vcf_path` naming (here it's the resolved `.pgen` path). `output_length`
         is `-1` for ragged or a fixed length >= 1 (issue #277 Wave A `with_len`).
+        `annotated` (issue #277 Wave A Task 4) selects whether the engine
+        computes `annot_v_idxs`/`annot_ref_pos`; `PgenWindowFiller` maps
+        window-local variant ids to dataset-global ones via the pre-scanned
+        `.pvar` per-contig position table's `var_start` (see `pgen.rs`'s
+        `WindowFiller::fill`) -- exact for every window, unlike VCF's `var_base
+        = 0` approximation (see `_VcfBackend.build_engine`'s doc comment).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1409,4 +1473,5 @@ class _PgenBackend:
             True,
             batch_size,
             output_length,
+            annotated,
         )

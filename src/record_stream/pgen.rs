@@ -592,6 +592,12 @@ impl WindowFiller for PgenWindowFiller {
         };
         debug_assert!(var_start >= contig_lo && var_end <= contig_hi);
         VARIANTS_DECODED.fetch_add(var_end.saturating_sub(var_start), Ordering::Relaxed);
+        // `var_start` is this window's global variant-id base (issue #277 Wave A Task
+        // 4, annotated output): `contig_lo + start_local` is already 0-based-global
+        // (computed above), so a window-local `geno_v_idxs` entry `local` maps to the
+        // global id `var_base + local`. Must be set on every call — see the
+        // `DecodedWindow::var_base` doc comment on why (recycled slot).
+        slot.var_base = var_start as i64;
 
         let reader = Python::attach(|py| self.reader.clone_ref(py));
         let source = PgenRecordSource::new(

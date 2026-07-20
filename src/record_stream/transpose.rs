@@ -34,6 +34,15 @@ pub struct DecodedWindow {
     pub alt_offsets: Vec<i64>,
     pub geno_v_idxs: Vec<i32>,
     pub geno_offsets: Vec<i64>,
+    /// Dataset-GLOBAL variant index of this window's local column 0 — i.e. the value
+    /// to add to a window-local `geno_v_idxs` entry to recover its global id (issue
+    /// #277 Wave A Task 4, annotated output). `fill_decoded_window` never sets this
+    /// (it only fills the static/CSR tables); each `WindowFiller::fill` MUST set it
+    /// explicitly every call (this struct's slot is RECYCLED between windows by the
+    /// producer/consumer engine, not re-`Default`-ed, so a filler that forgets would
+    /// leak the previous window's stale value). See `pgen.rs`'s and `vcf.rs`'s
+    /// `WindowFiller::fill` for the two current settings.
+    pub var_base: i64,
 }
 
 /// Fill `slot` (reusing its allocations) from a window's `DenseChunk`. The static table

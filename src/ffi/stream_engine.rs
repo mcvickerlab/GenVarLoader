@@ -123,6 +123,13 @@ struct Svar1Backend {
     /// -1 = ragged (per-hap actual length, pre-#277 behavior), >=0 = fixed length
     /// (issue #277 Wave A `with_len`). Forwarded verbatim to `generate_batch_core`.
     output_length: i64,
+    /// Issue #277 Wave A Task 4: when `true`, `generate` requests the two annotation
+    /// outputs (`annot_v_idxs`/`annot_ref_pos`) from `generate_batch_core`, with
+    /// `var_base = 0` — SVAR1's `store.geno_v_idxs()` is already dataset-GLOBAL
+    /// (see the module doc's "GLOBAL variant-scale tables" note), so no offset is
+    /// needed, even across contigs. `false` (default) preserves pre-Task-4 behavior
+    /// exactly (no extra allocation/work).
+    annotated: bool,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -167,7 +174,7 @@ impl EngineBackend for Svar1Backend {
         slot: &FilledWindow,
         row_lo: usize,
         row_hi: usize,
-    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
+    ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)> {
         let ploidy = self.store.ploidy();
         let job = &self.jobs[job_idx];
         let c = &self.contigs[job.contig_idx];
@@ -209,6 +216,8 @@ impl EngineBackend for Svar1Backend {
             self.pad_char,
             self.output_length,
             None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
+            self.annotated,
+            0, // var_base -- SVAR1's geno_v_idxs is already dataset-global (no offset)
             self.parallel,
         ))
     }
@@ -238,6 +247,7 @@ impl Svar1StreamEngine {
         parallel: bool,
         batch_size: usize,
         output_length: i64,
+        annotated: bool,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -254,6 +264,7 @@ impl Svar1StreamEngine {
             pad_char,
             parallel,
             output_length,
+            annotated,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -263,7 +274,10 @@ impl Svar1StreamEngine {
     /// Test-only accessor mirroring the pyclass's `next_batch`, minus the numpy
     /// marshaling — used directly by the `#[cfg(test)]` module below.
     #[cfg(test)]
-    fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
+    fn next_batch_core(
+        &self,
+    ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
+    {
         self.core.next_batch_core()
     }
 }
@@ -288,7 +302,7 @@ impl Svar1StreamEngine {
         contig_ref_bytes, phys_sample_idx,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets,
-        pad_char, parallel, batch_size, output_length,
+        pad_char, parallel, batch_size, output_length, annotated=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -316,6 +330,7 @@ impl Svar1StreamEngine {
         parallel: bool,
         batch_size: usize,
         output_length: i64,
+        annotated: bool,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
@@ -407,6 +422,7 @@ impl Svar1StreamEngine {
             parallel,
             batch_size,
             output_length,
+            annotated,
         ))
     }
 
@@ -421,8 +437,44 @@ impl Svar1StreamEngine {
         let out = py.detach(|| self.core.next_batch_core());
         match out {
             None => Ok(None),
-            Some(Ok((data, offsets))) => {
+            Some(Ok((data, _annot_v, _annot_pos, offsets))) => {
                 Ok(Some((data.into_pyarray(py), offsets.into_pyarray(py))))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Annotated counterpart of `next_batch` (issue #277 Wave A Task 4): returns
+    /// `(data, annot_v_idxs, annot_ref_pos, offsets)`, or `None` when the plan is
+    /// exhausted. Only valid when the engine was constructed with `annotated=true` —
+    /// otherwise this raises `RuntimeError` (a caller bug, not a data condition;
+    /// `StreamingDataset._iter_batches` never calls this unless `annotated` was
+    /// passed to `build_engine`).
+    fn next_batch_annotated<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<
+        Option<(
+            Bound<'py, PyArray1<u8>>,
+            Bound<'py, PyArray1<i32>>,
+            Bound<'py, PyArray1<i32>>,
+            Bound<'py, PyArray1<i64>>,
+        )>,
+    > {
+        let out = py.detach(|| self.core.next_batch_core());
+        match out {
+            None => Ok(None),
+            Some(Ok((data, Some(annot_v), Some(annot_pos), offsets))) => Ok(Some((
+                data.into_pyarray(py),
+                annot_v.into_pyarray(py),
+                annot_pos.into_pyarray(py),
+                offsets.into_pyarray(py),
+            ))),
+            Some(Ok((_, None, _, _))) | Some(Ok((_, _, None, _))) => {
+                Err(PyRuntimeError::new_err(
+                    "Svar1StreamEngine.next_batch_annotated() called on an engine \
+                     constructed with annotated=false",
+                ))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
@@ -504,7 +556,7 @@ mod tests {
             rb[[bi, 1]] = regions[ri].1 as i32;
         }
         let ref_offsets = Array1::from(vec![0i64, f.ref_bytes.len() as i64]);
-        let (data, offs) = crate::ffi::generate_batch_core(
+        let (data, _annot_v, _annot_pos, offs) = crate::ffi::generate_batch_core(
             store.geno_v_idxs(),
             store.ploidy(),
             &w.o_starts,
@@ -519,6 +571,8 @@ mod tests {
             b'N',
             -1, // ragged
             None,
+            false, // annotated
+            0,     // var_base
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -539,7 +593,8 @@ mod tests {
             b'N',
             false,
             batch_size,
-            -1, // ragged
+            -1,    // ragged
+            false, // annotated
         )
     }
 
@@ -569,7 +624,7 @@ mod tests {
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error");
+            let (d, _av, _ap, o) = r.expect("no producer error");
             batches.push((d.to_vec(), o.to_vec()));
         }
         assert_eq!(batches.len(), 2, "one batch per window, in plan order");
@@ -615,7 +670,7 @@ mod tests {
 
         let mut all: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error");
+            let (d, _av, _ap, o) = r.expect("no producer error");
             all.push((d.to_vec(), o.to_vec()));
         }
         // Each window has 1 region * 2 samples = 2 rows -> 2 batches; 2 windows -> 4.
@@ -690,7 +745,8 @@ mod tests {
             b'N',
             false,
             8,
-            -1, // ragged
+            -1,    // ragged
+            false, // annotated
         );
 
         match engine.next_batch_core() {
@@ -831,12 +887,13 @@ mod tests {
             b'N',
             false,
             1000,
-            -1, // ragged
+            -1,    // ragged
+            false, // annotated
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error");
+            let (d, _av, _ap, o) = r.expect("no producer error");
             batches.push((d.to_vec(), o.to_vec()));
         }
         assert_eq!(batches.len(), 2, "one batch per window");
@@ -853,7 +910,7 @@ mod tests {
             rb[[0, 0]] = 0;
             rb[[0, 1]] = 10;
             let ref_offsets = Array1::from(vec![0i64, ref_bytes.len() as i64]);
-            let (data, offs) = crate::ffi::generate_batch_core(
+            let (data, _annot_v, _annot_pos, offs) = crate::ffi::generate_batch_core(
                 s.geno_v_idxs(),
                 s.ploidy(),
                 &w.o_starts,
@@ -868,6 +925,8 @@ mod tests {
                 b'N',
                 -1, // ragged
                 None,
+                false, // annotated
+                0,     // var_base
                 false,
             );
             (data.to_vec(), offs.to_vec())
@@ -951,12 +1010,13 @@ mod tests {
             b'N',
             false,
             1000,
-            -1, // ragged
+            -1,    // ragged
+            false, // annotated
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
         while let Some(r) = engine.next_batch_core() {
-            let (d, o) = r.expect("no producer error");
+            let (d, _av, _ap, o) = r.expect("no producer error");
             batches.push((d.to_vec(), o.to_vec()));
         }
         assert_eq!(

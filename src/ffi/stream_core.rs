@@ -62,13 +62,17 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
     fn n_batch_rows(&self, job_idx: usize, slot: &Self::Slot) -> usize;
 
     /// CONSUMER thread: generate batch rows `[row_lo, row_hi)` from the filled slot.
+    /// The two `Option<Array1<i32>>` are the annotation outputs (issue #277 Wave A
+    /// Task 4, `annot_v_idxs`/`annot_ref_pos`) — `Some` iff the backend was
+    /// constructed with `annotated: true`, `None` otherwise (pre-Task-4 behavior,
+    /// zero extra allocation).
     fn generate(
         &self,
         job_idx: usize,
         slot: &Self::Slot,
         row_lo: usize,
         row_hi: usize,
-    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)>;
+    ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>;
 }
 
 /// The window the consumer is currently draining, batch by batch.
@@ -221,7 +225,10 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// Drains the current window batch-by-batch; when a window is spent it is recycled to
     /// the producer and the next prefetched window is `recv`'d. On channel close the
     /// producer is joined and classified before returning.
-    pub(crate) fn next_batch_core(&self) -> Option<anyhow::Result<(Array1<u8>, Array1<i64>)>> {
+    pub(crate) fn next_batch_core(
+        &self,
+    ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
+    {
         // Recover from a poisoned lock rather than propagating panic-on-panic.
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -294,7 +301,7 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     fn generate_from_current(
         &self,
         state: &mut EngineState<B::Slot>,
-    ) -> anyhow::Result<(Array1<u8>, Array1<i64>)> {
+    ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)> {
         // Advance the cursor first (mutable borrow), then reborrow immutably to read.
         let (row_lo, row_hi, job_idx) = {
             let cur = state
