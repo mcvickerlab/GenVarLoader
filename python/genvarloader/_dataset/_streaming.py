@@ -919,6 +919,14 @@ class _Svar1Backend:
         v_starts_c: list[NDArray[np.uint32]] = []
         v_ends_c: list[NDArray[np.uint32]] = []
         contig_ref_bytes: list[NDArray[np.uint8]] = []
+        # Materialize reference bytes ONLY for contigs some job touches (#307): the
+        # engine indexes `contig_refs[job.contig_idx]`, so untouched contigs are never
+        # read. Materializing every store contig would pull the whole reference into
+        # Python (and again into the Rust engine), breaking the cohort-independent
+        # bounded-memory story on the reference axis for whole-genome references.
+        # Untouched contigs get an empty placeholder to keep the per-contig arrays
+        # index-aligned (the engine requires equal per-contig lengths).
+        touched_contigs = {int(j[0]) for j in jobs}
         for i, c in enumerate(contig_names):
             cs, nl, mv = self._contig_meta[c]
             vs_c, ve_c = self._contig_arrays[c]
@@ -927,7 +935,10 @@ class _Svar1Backend:
             max_v_lens.append(mv)
             v_starts_c.append(vs_c)
             v_ends_c.append(ve_c)
-            ref_bytes_i, _ref_off = self._ref._contig_slice(i)
+            if i in touched_contigs:
+                ref_bytes_i, _ref_off = self._ref._contig_slice(i)
+            else:
+                ref_bytes_i = np.empty(0, np.uint8)
             contig_ref_bytes.append(ref_bytes_i)
 
         job_contig_idx = [int(j[0]) for j in jobs]
@@ -1156,8 +1167,15 @@ class _Svar2Backend:
         from ..genvarloader import Svar2StreamEngine
 
         contig_names = list(self._contigs)
+        # Materialize reference bytes ONLY for contigs some job touches (#307): the
+        # engine indexes `contig_refs[job.contig_idx]`, so untouched contigs are never
+        # read. Empty placeholder keeps the list index-aligned with `contig_names`
+        # (the engine requires equal lengths) without pulling the whole reference.
+        touched_contigs = {int(j[0]) for j in jobs}
         contig_ref_bytes = [
             np.asarray(self._ref._contig_slice(i)[0], np.uint8).tobytes()
+            if i in touched_contigs
+            else b""
             for i in range(len(contig_names))
         ]
         job_contig_idx = [int(j[0]) for j in jobs]
