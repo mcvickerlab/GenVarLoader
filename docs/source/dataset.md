@@ -206,6 +206,16 @@ re-reads the live store instead of hitting a pre-indexed dataset — prefer a wr
 for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
 rather not pay for the write.
 
+**Parallelism lives inside Rust, not in worker processes.** For a `.svar2` source, each
+read window's haplotypes are reconstructed in coarse *super-batches* dispatched across
+cores by a GIL-free Rust kernel — so a single `StreamingDataset` iterator saturates the
+machine on its own. `num_workers > 0` is therefore **not** the scaling path (and
+`to_dataloader(num_workers>0)` raises): sharding across worker processes would only add
+per-worker RAM, IPC, and idle-core overhead on top of work Rust already parallelizes. The
+super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iteration order
+stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
+with each batch identify every row.
+
 `StreamingDataset` is currently more limited than `Dataset`: `.svar` and `.svar2` variant
 sources only (VCF/PGEN raise `NotImplementedError`), `with_seqs("haplotypes")` only, `jitter=0`
 only, ragged output only, and **iterable-only** — `sds[r, s]` raises `TypeError`; use

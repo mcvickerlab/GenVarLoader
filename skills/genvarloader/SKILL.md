@@ -390,7 +390,19 @@ via `read_window`, then reconstructs haplotypes one `batch_size` slice at a time
 `generate_batch` -- output is never materialized for a whole window at once (issue
 #284). Peak memory is therefore `max_mem` (offsets) + `batch_size` (output), neither
 of which scales with cohort size. `_window_regions`/`_window_samples` (derived from
-`max_mem`) and `_max_mem_bytes` are internal, not user-set directly.
+`max_mem`) and `_max_mem_bytes` are internal, not user-set directly. (The SVAR2 backend
+`_Svar2Backend` follows the same contract, but drives generation through a recycled
+`Svar2ReconBuf` — reconstruct a coarse super-batch of window rows with
+`_fill_super_batch`, then `_drain` `batch_size` slices out of it — rather than SVAR1's
+per-batch `generate_batch`; each drained batch is still `(hi-lo)`-bounded.)
+
+**Parallelism is internal to Rust, not `num_workers`.** For a `.svar2` source, the
+super-batch (`_super_batch_rows`, the rayon dispatch grain, sized to a measured knee and
+capped by `max_mem`) is reconstructed across all cores by a GIL-free Rust kernel
+(`svar2_reconstruct_super_batch`), gated by `should_parallelize` so tiny tails stay
+serial. A single iterator saturates the machine; `num_workers > 0` is **not** the
+scaling path — worker-process sharding would only add per-worker RAM, IPC, and idle-core
+overhead. Iteration order is deterministic regardless of core count.
 
 **Current scope (this plan) — everything else raises rather than silently mis-computing:**
 - Variant source: `.svar` (SparseVar/SVAR1) and `.svar2` (SVAR2). VCF and PGEN inputs raise `NotImplementedError`.
