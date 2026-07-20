@@ -91,8 +91,9 @@ struct RecordBackend {
     output_length: i64,
     /// Issue #277 Wave A Task 4: when `true`, `generate` requests the two annotation
     /// outputs (`annot_v_idxs`/`annot_ref_pos`) from `generate_batch_core`, mapped to
-    /// dataset-GLOBAL ids via the filled slot's `var_base`. `false` (default)
-    /// preserves pre-Task-4 behavior exactly (no extra allocation/work).
+    /// dataset-GLOBAL ids via a per-variant gather through the filled slot's
+    /// `global_v_idxs` (issue #305; see `remap_annot_local_to_global`). `false`
+    /// (default) preserves pre-Task-4 behavior exactly (no extra allocation/work).
     annotated: bool,
 }
 
@@ -212,7 +213,7 @@ impl EngineBackend for RecordBackend {
             self.output_length,
             None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
             self.annotated,
-            slot.var_base,
+            Some(ndarray::ArrayView1::from(slot.global_v_idxs.as_slice())),
             self.parallel,
         ))
     }
@@ -665,7 +666,7 @@ mod tests {
             -1, // ragged
             None,
             false, // annotated
-            0,     // var_base
+            None,  // global_v_idxs
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -840,7 +841,7 @@ mod tests {
             -1, // ragged
             None,
             false, // annotated
-            0,     // var_base
+            None,  // global_v_idxs
             false,
         );
         let expected = (exp_data.to_vec(), exp_offs.to_vec());

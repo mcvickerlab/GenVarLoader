@@ -1055,12 +1055,20 @@ pub fn svar1_prefetch_runs<'py>(
 /// `annotated` selects whether the two annotation outputs (`annot_v_idxs`/
 /// `annot_ref_pos`, issue #277 Wave A Task 4) are computed at all — when `false` the
 /// kernel is called with `None, None` for them (zero extra allocation/work), matching
-/// pre-Task-4 behavior exactly. When `true`, `var_base` is added to every non-negative
-/// entry of the emitted `annot_v_idxs` AFTER reconstruction — the kernel itself always
-/// writes window-LOCAL variant column ids (`geno_v_idxs`' own indexing space); callers
-/// whose `geno_v_idxs` is window-local (VCF/PGEN record-stream windows) pass their
-/// window's global variant-id base here so the emitted ids are dataset-GLOBAL. SVAR1's
-/// `geno_v_idxs` is already dataset-global, so it passes `var_base = 0` (a no-op add).
+/// pre-Task-4 behavior exactly. When `true`, the emitted `annot_v_idxs` are remapped
+/// from window-LOCAL variant column ids (`geno_v_idxs`' own indexing space) to
+/// dataset-GLOBAL ids AFTER reconstruction, by a per-variant GATHER through
+/// `global_v_idxs` (see [`remap_annot_local_to_global`]): `annot_v[i]` becomes
+/// `global_v_idxs[annot_v[i]]`, preserving the `-1` no-variant sentinel — and, per
+/// variant, skipping the gather (leaving the local id as-is) if THAT variant's own
+/// global id is not yet known (`global_v_idxs[local] == -1`; today only VCF, whose
+/// genoray-level global id support is separate follow-on work, issue #305 Phase 3).
+/// A scalar offset is NOT sufficient here — the region-overlap filter can drop
+/// interior variants, so a window's kept variants are not necessarily a contiguous
+/// run of global ids. Callers whose `geno_v_idxs` is window-local (VCF/PGEN
+/// record-stream windows) pass `Some(global_v_idxs)` (the window's local-column ->
+/// global-id map). SVAR1's `geno_v_idxs` is already dataset-global, so it passes
+/// `None` (no remap needed).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn generate_batch_core(
     geno_v_idxs: &[i32],
@@ -1078,7 +1086,7 @@ pub(crate) fn generate_batch_core(
     output_length: i64, // -1 = ragged (per-hap actual length), >=0 = fixed
     shifts: Option<ndarray::ArrayView2<i32>>, // None => zeros (deterministic / jitter=0)
     annotated: bool, // issue #277 Wave A Task 4: emit annot_v_idxs/annot_ref_pos
-    var_base: i64,   // added to non-negative annot_v_idxs entries when annotated
+    global_v_idxs: Option<ndarray::ArrayView1<i32>>, // Some => remap window-local annot ids to global
     parallel: bool,
 ) -> (Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>) {
     use crate::genotypes;
@@ -1181,17 +1189,46 @@ pub(crate) fn generate_batch_core(
         parallel,
     );
 
-    if var_base != 0 {
+    // Remap window-LOCAL annotation column ids to dataset-GLOBAL ids by gather.
+    // `-1` (no-variant sentinel) is preserved. SVAR1 passes None (its ids are already global).
+    if let Some(gv) = global_v_idxs {
         if let Some(av) = annot_v.as_mut() {
-            for x in av.iter_mut() {
-                if *x >= 0 {
-                    *x += var_base as i32;
-                }
-            }
+            remap_annot_local_to_global(av, gv);
         }
     }
 
     (out_data, annot_v, annot_pos, out_offsets_vec)
+}
+
+/// Remap window-LOCAL annotation column ids (indices into a window's own
+/// `geno_v_idxs`/`global_v_idxs`) to dataset-GLOBAL variant ids, in place, by a
+/// per-element gather through `global_v_idxs` (window-local column -> dataset-global
+/// id, issue #305). The `-1` no-variant sentinel in `annot_v` is left untouched. This
+/// is NOT a scalar offset: the region-overlap filter can exclude interior variants
+/// from a window, so kept global ids are not necessarily contiguous.
+///
+/// `global_v_idxs[local] == -1` means THAT variant's dataset-global id is not (yet)
+/// known — today this is VCF's genoray-level default (`RawRecord::global_idx` is
+/// hard-coded `-1`; real VCF global ids are Phase 3 / issue #305 follow-on work, not
+/// yet landed), never PGEN's (its `.pvar`-row-derived ids are always `>= 0`) or
+/// SVAR1's (which never calls this — its `geno_v_idxs` are already global, so callers
+/// pass `None`). Remapping through a `-1` entry would silently turn a real annotated
+/// variant into the no-variant sentinel, which is a worse regression than leaving the
+/// window-local id as a best-effort passthrough (byte-identical to the pre-gather
+/// scalar-offset no-op, the retired `var_base=0`, for VCF's currently-tested
+/// whole-contig fixtures) — so an unknown global id is skipped, not gathered.
+pub(crate) fn remap_annot_local_to_global(
+    annot_v: &mut ndarray::Array1<i32>,
+    global_v_idxs: ndarray::ArrayView1<i32>,
+) {
+    for x in annot_v.iter_mut() {
+        if *x >= 0 {
+            let g = global_v_idxs[*x as usize]; // window-local col -> dataset-global id
+            if g >= 0 {
+                *x = g;
+            } // else: global id not yet known for this variant (VCF Phase 3 gap) — leave local id as-is
+        }
+    }
 }
 
 /// Generate haplotypes for ONE batch of window rows. `o_starts_b`/`o_stops_b` are the
@@ -1263,7 +1300,7 @@ pub fn svar1_generate_batch<'py>(
             output_length,
             None, // shifts -- SVAR1's standalone wrapper does not support jitter/shifts
             false, // annotated -- the readahead-only wrapper does not support annotated output
-            0,     // var_base -- unused when annotated=false
+            None,  // global_v_idxs -- SVAR1 geno_v_idxs already dataset-global
             parallel,
         )
     });
@@ -3279,6 +3316,28 @@ mod tests {
         assert_eq!(&bytes, b"CGT");
         assert_eq!(vidx, vec![7, 6, 5]);
         assert_eq!(rpos, vec![102, 101, 100]);
+    }
+
+    // ── remap_annot_local_to_global — window-local annot ids -> dataset-global (#304/#305) ──
+
+    #[test]
+    fn remap_annot_local_to_global_gathers_and_preserves_sentinel() {
+        // window-local annot ids [0, 1, -1, 0] with global map [0, 2]
+        // must become [0, 2, -1, 0] (never 1 — the interior-excluded id).
+        let mut annot = ndarray::Array1::from(vec![0i32, 1, -1, 0]);
+        let gmap = ndarray::Array1::from(vec![0i32, 2]);
+        crate::ffi::remap_annot_local_to_global(&mut annot, gmap.view());
+        assert_eq!(annot.to_vec(), vec![0, 2, -1, 0]);
+    }
+
+    #[test]
+    fn remap_annot_local_to_global_leaves_local_when_global_unknown() {
+        // global map all -1 (VCF's genoray default until Phase 3): every real
+        // local annot id must be LEFT AS-IS (not corrupted to -1), sentinel preserved.
+        let mut annot = ndarray::Array1::from(vec![0i32, 1, -1]);
+        let gmap = ndarray::Array1::from(vec![-1i32, -1]);
+        crate::ffi::remap_annot_local_to_global(&mut annot, gmap.view());
+        assert_eq!(annot.to_vec(), vec![0, 1, -1]);
     }
 
     // ── guard tests — check_disjoint_bounds_within (Finding 1, PR #273 review) ──

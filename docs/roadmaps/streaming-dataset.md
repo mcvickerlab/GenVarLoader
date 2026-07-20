@@ -530,9 +530,21 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   folded in — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277), plan
   `docs/superpowers/plans/2026-07-19-streaming-output-mode-breadth-wave-a.md`. `"variants"`/
   `"variant-windows"`/`min_af`/`max_af`/`var_fields` are **Wave B**, tracked separately as
-  issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304). Annotated `var_idxs`
-  global-numbering for narrowed/multi-contig VCF/PGEN windows is deferred to issue
-  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305).
+  issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).
+- ✅ **Per-variant global variant ids (Phase 2: PGEN + SVAR1) — issue
+  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305).** Spec:
+  `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`; plan:
+  `docs/superpowers/plans/2026-07-20-streaming-global-variant-ids.md`. The scalar `var_base`
+  (`var_base + local`) could only express a contiguous offset, which is wrong across a
+  region-overlap gap or an interior-excluded variant. Fixed by carrying a per-variant
+  dataset-global id on `DenseChunk`/`DecodedWindow.global_v_idxs`, gathered onto
+  `annot_v_idxs` by `remap_annot_local_to_global` (genoray bump to
+  `d-laub/genoray` rev `3a44e14`, [genoray PR #134](https://github.com/d-laub/genoray/pull/134),
+  this branch). SVAR1 was already global (no-op); **PGEN now correct** via the `.pvar` row
+  index, including narrowed-window and interior-exclusion gaps (regression-locked). **VCF
+  remains window-local** — genoray's VCF reader hard-codes `global_idx = -1` — real VCF
+  global ids are **Phase 3**, not yet landed. `var_base` itself has been fully retired
+  (Task 2.5 close-out).
 
 ## Sequencing
 

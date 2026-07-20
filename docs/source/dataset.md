@@ -268,11 +268,12 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
 - **`with_seqs("haplotypes" | "annotated")`** — `"annotated"` returns `RaggedAnnotatedHaps`
   (haplotypes plus per-position `var_idxs`/`ref_coords`), byte-identical to
   `Dataset.with_seqs("annotated")` at `jitter=0`. **Limitation (issue
-  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305)):** SVAR1 `var_idxs` are always
-  dataset-global; for the VCF/PGEN record backends, `var_idxs` are dataset-global only for
-  whole-contig or from-contig-start windows — a narrowed/partial-prefix window (or any window
-  after the first contig in a multi-contig sweep) currently reports window-local `var_idxs`
-  (`var_base=0`) instead of the dataset-global index. Fix deferred.
+  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305)):** SVAR1 and PGEN `var_idxs`
+  are always dataset-global (including narrowed/partial-prefix windows and windows after the
+  first contig in a multi-contig sweep); for the VCF record backend, `var_idxs` are
+  dataset-global only for whole-contig or from-contig-start windows — a narrowed/partial-prefix
+  VCF window currently reports window-local `var_idxs` instead of the dataset-global index. Fix
+  deferred to Phase 3.
 
 `"variants"`/`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and `var_fields`
 are **not yet implemented** for `StreamingDataset` — that's Wave B (issue
