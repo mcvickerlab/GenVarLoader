@@ -214,12 +214,26 @@ def test_super_batch_engages_multiple_cores(svar2_scale_fixture, monkeypatch) ->
     import os
     import time
 
+    import pytest
+
     import genvarloader as gvl
 
     if len(os.sched_getaffinity(0)) < 2:
-        import pytest
-
         pytest.skip("core-utilization gate is meaningless on a single-core node")
+
+    # Coverage instrumentation traces the Python driver loop serially, adding
+    # CPU+wall overhead around the GIL-free Rust rayon section and pinning cpu/wall
+    # near ~1.1 no matter how well the reconstruct parallelizes -- the same reason
+    # this gate is meaningless on a single-core node. Skip when a coverage session
+    # is active so the threshold is only asserted where the measurement is valid.
+    try:
+        import coverage
+    except ImportError:
+        coverage = None
+    if coverage is not None and coverage.Coverage.current() is not None:
+        pytest.skip(
+            "cpu/wall parallelism signal is invalid under coverage instrumentation"
+        )
 
     monkeypatch.setenv("GVL_FORCE_PARALLEL", "1")
     fx = svar2_scale_fixture
