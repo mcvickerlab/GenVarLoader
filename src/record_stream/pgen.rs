@@ -624,6 +624,7 @@ impl WindowFiller for PgenWindowFiller {
             job.regions.clone(),
             self.overlap,
             sample_perm,
+            /* dosage_readers */ Vec::new(),
         )?;
         let mut asm = ChunkAssembler::new(
             Box::new(source),
@@ -654,6 +655,7 @@ impl WindowFiller for PgenWindowFiller {
                 let empty = DenseChunk {
                     chunk_id: 0,
                     pos: Vec::new(),
+                    global_idx: Vec::new(),
                     ilens: Vec::new(),
                     alt: Vec::new(),
                     alt_offsets: vec![0],

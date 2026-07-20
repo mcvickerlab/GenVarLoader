@@ -215,6 +215,7 @@ impl WindowFiller for VcfWindowFiller {
                 let empty = DenseChunk {
                     chunk_id: 0,
                     pos: Vec::new(),
+                    global_idx: Vec::new(),
                     ilens: Vec::new(),
                     alt: Vec::new(),
                     alt_offsets: vec![0],
