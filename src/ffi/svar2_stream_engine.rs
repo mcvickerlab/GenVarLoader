@@ -249,7 +249,6 @@ impl Svar2StreamEngine {
                     let reader = store
                         .reader(&cref.name)
                         .ok_or_else(|| anyhow::anyhow!("contig {} not in store", cref.name))?;
-                    let phys: Vec<usize> = phys_sample_idx[job.s_lo..job.s_hi].to_vec();
 
                     let key = (job.contig_idx, job.s_lo, job.s_hi);
                     let need = cached
@@ -263,6 +262,10 @@ impl Svar2StreamEngine {
                         })
                         .unwrap_or(true);
                     if need {
+                        // Only the find-ranges cache-miss path needs the window's
+                        // physical sample indices; consecutive single-window super-batch
+                        // jobs hit the cache and must not pay this allocation (#307).
+                        let phys: Vec<usize> = phys_sample_idx[job.s_lo..job.s_hi].to_vec();
                         let region_bnd: Vec<(i32, i32)> = job
                             .regions
                             .iter()
