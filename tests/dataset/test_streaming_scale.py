@@ -349,7 +349,16 @@ def test_svar2_generate_batch_output_is_flat_in_cohort_size(tmp_path):
         window = backend.read_window(r_idx, s_idx)  # SVAR2: opaque bundle
         batch_size = 4
         assert batch_size <= len(r_idx) * len(s_idx)
-        data = backend.generate_batch(r_idx, s_idx, window, 0, batch_size)
+        # Production (Phase 2) generates via a recycled `Svar2ReconBuf`: fill exactly
+        # one batch's rows, then drain them -- mirrors the `_iter_batches` "sync"
+        # drive's per-drained-batch call, not the old single-shot `generate_batch`.
+        from genvarloader.genvarloader import Svar2ReconBuf
+
+        buf = Svar2ReconBuf(backend.ploidy)
+        backend._fill_super_batch(
+            r_idx, s_idx, window, 0, batch_size, buf, parallel=False
+        )
+        data = backend._drain(buf, 0, batch_size)
         return int(data.data.nbytes)
 
     bytes_50 = batch_output_bytes(50)

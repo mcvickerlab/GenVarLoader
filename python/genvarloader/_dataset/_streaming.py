@@ -20,6 +20,15 @@ from ._utils import bed_to_regions
 if TYPE_CHECKING:
     import torch.utils.data as td
 
+# SVAR2 reconstruct super-batch: the rayon dispatch grain. Sized to saturate cores
+# (n_work = rows*ploidy must be >> num_threads) while the output buffer stays
+# max_mem-bounded and cohort-independent (#284). This is the measured knee
+# (benchmarking/streaming/svar2_superbatch_sweep.py; recorded in
+# docs/roadmaps/streaming-dataset.md); `StreamingDataset.__init__` refines it down
+# against `max_mem_bytes` once that's computed (the backend is built before then, so
+# it can't see the real budget at construction time -- see `_Svar2Backend.__init__`).
+SUPERBATCH_TARGET_ROWS = 4096  # confirmed by the Task-5 sweep
+
 
 def _parse_max_mem(max_mem: str | int) -> int:
     """Bytes from an int or a size string like '512MB' / '1g' / '2GiB'."""
@@ -262,6 +271,18 @@ class StreamingDataset:
         object.__setattr__(self, "_max_mem_bytes", max_mem_bytes)
         object.__setattr__(self, "_window_samples", int(window_samples))
         object.__setattr__(self, "_window_regions", int(window_regions))
+        # Refine the SVAR2 backend's super-batch sizing now that `max_mem_bytes` is
+        # known -- the backend was built above (before this point) with a
+        # self-contained default (`SUPERBATCH_TARGET_ROWS`), since it can't see
+        # `max_mem` at construction time. `_Svar2Backend` is a plain (non-frozen)
+        # class, so a direct attribute assignment is fine.
+        if isinstance(_backend_obj, _Svar2Backend):
+            widths = _backend_obj._regions[:, 2] - _backend_obj._regions[:, 1]
+            mean_region_width = int(max(1, widths.mean())) if len(widths) else 1
+            bytes_per_row = _backend_obj.ploidy * mean_region_width
+            _backend_obj._super_batch_rows = max(
+                1, min(SUPERBATCH_TARGET_ROWS, max_mem_bytes // max(1, bytes_per_row))
+            )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -438,27 +459,53 @@ class StreamingDataset:
                         yield data, flat_r[lo:hi], flat_s[lo:hi]
                     cur = nxt
             elif self._prefetch_strategy == "sync":
-                # No engine, no prefetch: read each window's ranges, then generate
-                # per batch_size row slice. Output is (hi-lo)-bounded (issue #284).
-                # This is `_Svar2Backend`'s Phase 1 drive -- its window shape
-                # (`SparseVar2._find_ranges` bundle) doesn't fit the engine/readahead
-                # branches above, which are SVAR1-shaped (offsets CSR + Svar1Store).
-                # Narrow the union so calls below resolve against `_Svar2Backend`'s
-                # signatures (see the "engine" branch's comment).
+                # SVAR2 super-batch drive: read each window's ranges once, reconstruct
+                # a coarse super-batch into ONE recycled `Svar2ReconBuf` (the rayon
+                # dispatch grain -- `should_parallelize` gates it), then drain
+                # batch_size slices out of it. Output stays (hi-lo)-bounded per
+                # drained batch (#284); iteration order is deterministic (relaxed
+                # order is PR 3). This is `_Svar2Backend`'s Phase 2 drive -- its
+                # window shape (`SparseVar2._find_ranges` bundle) doesn't fit the
+                # engine/readahead branches above, which are SVAR1-shaped (offsets
+                # CSR + Svar1Store). Narrow the union so calls below resolve against
+                # `_Svar2Backend`'s signatures (see the "engine" branch's comment).
+                from .._threads import should_parallelize
+                from ..genvarloader import Svar2ReconBuf
+
                 assert isinstance(self._backend, _Svar2Backend), (
                     '"sync" prefetch strategy requires the SVAR2 backend'
                 )
                 backend = self._backend
+                buf = Svar2ReconBuf(backend.ploidy)  # one recycled buffer per iterator
+                sb_rows = backend._super_batch_rows
                 for r_idx, s_idx in self._plan():
                     window = backend.read_window(r_idx, s_idx)
                     n_s = len(s_idx)
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(s_idx, len(r_idx))
                     n_rows = len(flat_r)
-                    for lo in range(0, n_rows, batch_size):
-                        hi = min(lo + batch_size, n_rows)
-                        data = backend.generate_batch(r_idx, s_idx, window, lo, hi)
-                        yield data, flat_r[lo:hi], flat_s[lo:hi]
+                    for sb_lo in range(0, n_rows, sb_rows):
+                        sb_hi = min(sb_lo + sb_rows, n_rows)
+                        # Estimated output bytes gate `parallel` *before* the fill
+                        # (the fill IS the reconstruct, so exact total_bytes is only
+                        # known after): a tiny tail stays serial (PR-1a), a
+                        # core-saturating super-batch parallelizes (PR-2). An
+                        # overestimate only flips the decision, never correctness.
+                        backend._fill_super_batch(
+                            r_idx,
+                            s_idx,
+                            window,
+                            sb_lo,
+                            sb_hi,
+                            buf,
+                            parallel=should_parallelize(
+                                backend._est_out_bytes(r_idx, sb_hi - sb_lo)
+                            ),
+                        )
+                        for lo in range(sb_lo, sb_hi, batch_size):
+                            hi = min(lo + batch_size, sb_hi)
+                            data = backend._drain(buf, lo - sb_lo, hi - sb_lo)
+                            yield data, flat_r[lo:hi], flat_s[lo:hi]
             else:
                 raise ValueError(
                     f"StreamingDataset._prefetch_strategy={self._prefetch_strategy!r} "
@@ -952,9 +999,10 @@ class _Svar2Backend:
     window variant ranges are computed LIVE via the GIL-free Rust `svar2_read_window`
     (genoray_core::query::find_ranges, the same query gvl.write uses at write time,
     `_write.py:_write_from_svar2`) instead of slicing an on-disk `_Svar2Cache`; the
-    ranges feed the existing SVAR2 read-bound FFI
-    (`reconstruct_haplotypes_from_svar2_readbound`). Phase 1: synchronous only
-    ("sync" `_iter_batches` strategy -- no engine, no readahead).
+    ranges feed a recycled `Svar2ReconBuf` reconstructed in coarse super-batches
+    (`svar2_reconstruct_super_batch`, `_fill_super_batch`/`_drain`) so the fill is
+    multi-core (Phase 2). Still "sync" `_iter_batches` strategy -- no engine, no
+    readahead.
     """
 
     _default_strategy = "sync"
@@ -1005,6 +1053,13 @@ class _Svar2Backend:
         self._regions = bed_to_regions(
             sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
         )
+        # Self-contained default (see `SUPERBATCH_TARGET_ROWS`'s module comment): the
+        # backend is constructed before `StreamingDataset.__init__` computes
+        # `max_mem_bytes`, so it can't size against the real budget yet.
+        # `StreamingDataset.__init__` refines this down once `max_mem_bytes` is known.
+        # `_iter_batches`' super-batch drive must READ this attribute, never
+        # recompute it, so later overrides (tests, Task 5's sweep) stick.
+        self._super_batch_rows = SUPERBATCH_TARGET_ROWS
 
     def _contig_of(self, r_idx: NDArray[np.intp]) -> tuple[int, str]:
         contig_idxs = self._regions[r_idx, 0]
@@ -1064,10 +1119,9 @@ class _Svar2Backend:
         NDArray[np.int64],
     ]:
         """Gather the per-row FFI inputs (C-order (region, sample)) for rows [lo, hi)
-        of the window, mirroring `_svar2_haps.py:_gather_inputs`. Pure extraction of
-        the per-row gather formerly inlined in `generate_batch` -- shared by both the
-        per-batch FFI path (`_reconstruct_batch_reference`) and the super-batch fill
-        (`_fill_super_batch`).
+        of the window, mirroring `_svar2_haps.py:_gather_inputs`. Shared by the
+        super-batch fill (`_fill_super_batch`, production) and the per-batch parity
+        reference (`tests/dataset/test_streaming_phase2_pr2.py:_per_batch_reference`).
         """
         r_idx = np.asarray(r_idx, np.intp)
         n_s = len(np.asarray(s_idx))
@@ -1172,74 +1226,12 @@ class _Svar2Backend:
             np.asarray(offsets, np.int64),
         )
 
-    def _reconstruct_batch_reference(
-        self,
-        r_idx: NDArray[np.intp],
-        s_idx: NDArray[np.intp],
-        window: dict[str, object],
-        lo: int,
-        hi: int,
-    ) -> Ragged:
-        """TEMPORARY parity reference (Phase-2 PR 2): the *old* `generate_batch` body,
-        kept unchanged so the super-batch fill+drain path can be checked byte-identical
-        against it. Task 3 removes this once the sync/async drive is switched over to
-        `_fill_super_batch`/`_drain`.
-        """
-        from ..genvarloader import reconstruct_haplotypes_from_svar2_readbound
-
-        P = self.ploidy
-        (
-            region_starts,
-            orig_samples,
-            vk_snp,
-            vk_indel,
-            dense_snp,
-            dense_indel,
-            region_bounds,
-            shifts,
-            ref_,
-            ref_offsets,
-        ) = self._gather_rows(r_idx, s_idx, window, lo, hi)
-        contig_idx = cast(int, window["contig_idx"])
-        contig = self._contigs[contig_idx]
-        m = hi - lo
-
-        data, offsets = reconstruct_haplotypes_from_svar2_readbound(
-            self._store,
-            contig,
-            region_starts,
-            orig_samples,
-            vk_snp,
-            vk_indel,
-            dense_snp,
-            dense_indel,
-            region_bounds,
-            shifts,
-            ref_,
-            ref_offsets,
-            np.uint8(self._ref.pad_char),
-            np.int64(-1),  # ragged output (no fixed output_length)
-            False,  # parallel: streaming per-batch reconstruct is tiny (~batch_size*ploidy
-            #        haplotypes); the 96-thread rayon fork/join costs more than it saves
-            #        here (measured 1.2-1.8x faster serial). The written-Dataset path
-            #        (_svar2_haps.py) instead gates on should_parallelize(), which
-            #        parallelizes for its typically-large getitem chunks.
-            False,  # filter_exonic (splicing out of scope)
-        )
-        return Ragged.from_offsets(
-            np.asarray(data).view("S1"), (m, P, None), np.asarray(offsets, np.int64)
-        )
-
-    def generate_batch(
-        self,
-        r_idx: NDArray[np.intp],
-        s_idx: NDArray[np.intp],
-        window: dict[str, object],
-        lo: int,
-        hi: int,
-    ) -> Ragged:
-        """Reconstruct C-order (region, sample) rows [lo, hi) of the window. Output is
-        (hi-lo)-bounded (issue #284). Builds the same 7-arg tuple as
-        `_svar2_haps.py:_gather_inputs`, then calls the SVAR2 read-bound FFI.
-        """
-        return self._reconstruct_batch_reference(r_idx, s_idx, window, lo, hi)
+    def _est_out_bytes(self, r_idx: NDArray[np.intp], n_rows: int) -> int:
+        """Estimate reconstructed super-batch bytes (~ rows*ploidy*mean_region_width)
+        to gate `should_parallelize` *before* the fill -- the fill IS the reconstruct,
+        so the buffer's exact `total_bytes` is only known after. An overestimate is
+        harmless (it only flips the parallel decision, never correctness)."""
+        r_idx = np.asarray(r_idx, np.intp)
+        widths = self._regions[r_idx, 2] - self._regions[r_idx, 1]
+        mean_width = int(max(1, widths.mean())) if len(widths) else 1
+        return int(n_rows) * self.ploidy * mean_width
