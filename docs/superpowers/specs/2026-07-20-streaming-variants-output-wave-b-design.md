@@ -73,7 +73,8 @@ backend.
   (`vcf.rs`) and `PgenWindowFiller` (`pgen.rs`); the producer/consumer engine recycles the
   `DecodedWindow` slot between windows (every filler MUST set `var_base` on every call).
 - `generate_batch_core` (`src/ffi/mod.rs:994`) adds `var_base` to every non-negative
-  `annot_v_idxs` entry after reconstruction (the annotated path).
+  `annot_v_idxs` entry after reconstruction (the annotated path). **PR-A retires this scalar
+  `var_base` in favor of a per-variant `global_v_idxs` array — see the PR-A correctness note.**
 
 The written variants oracle (branch `main`):
 
@@ -87,43 +88,62 @@ The written variants oracle (branch `main`):
 
 ## Design
 
-### PR-A (#305) — correct dataset-global variant ids for the record backends
+### PR-A (#305) — per-variant dataset-global variant ids for the record backends
 
-**Problem.** `RecordBackend::generate` emits global ids as `var_base + local`. Both
-`VcfWindowFiller::fill` and `PgenWindowFiller::fill` currently hard-code `slot.var_base = 0`
-(`vcf.rs:170`, `pgen.rs:614`). #305's body is **stale**: it describes PGEN as already correct from
-`var_start`, but Wave A commit `0b98174b` *reverted* PGEN to `0` ("was buggy PGEN var_start"),
-so #305 covers **both** backends.
+> **Design corrected during plan-writing** (2026-07-20). The original approach — a scalar
+> `var_base` added to window-local ids (`var_base + local`) — is **fundamentally insufficient**,
+> and #305's body (a `var_start`-based base) is doubly wrong. A cross-repo genoray change replaces
+> it. See the correctness note below.
 
-**Why `var_start` alone is wrong.** `var_start` (PGEN) / the window's first candidate (VCF) is a
-**padded, over-inclusive** search lower bound. The `PgenRecordSource`/`VcfRecordSource` then run a
-precise anchor-trimmed `extent_overlaps` filter that can drop a **leading prefix** of padded-in
-candidates whose trimmed extent doesn't reach `win_start`. When it drops `skip_count` of them, the
-window's local column 0 is global id `var_start + skip_count`, not `var_start`.
+**The real defect: the kept set is non-contiguous.** `OverlapMode::Variant` filters on variant
+**extent** (POS + ref_consumed), applied per record in genoray's `vcf_reader.rs:535-554`
+(`extent_overlaps`). A window can therefore **exclude an interior variant behind a spanning
+deletion** — e.g. regions `[(110,115)]`, variants DEL@100 (extent→120, kept), SNP@105 (extent 106,
+**dropped**), SNP@112 (extent 113, kept): the survivors are global ids `{0, 2}`, not `{0, 1}`.
+Same-POS mixed-extent ties (cf. the SVAR1 max-ends tie bug) are a second source of interior
+exclusion. genoray's own SVAR2 query path proves this: `spine.rs` test
+`test_gather_keys_excludes_interior_non_overlap_behind_spanning_deletion` asserts exactly
+`[kr(100,0), kr(112,2)]`.
 
-**Why `var_base + local` is still valid.** The dropped candidates are always a *contiguous leading
-prefix* of the candidate range: candidates are position-sorted, and the window is a suffix-overlap,
-so anything not overlapping `[win_start, …)` sorts before it (even a long spanning DEL is anchored
-at a POS before the window). No interior candidate is dropped, so the kept set is a **contiguous
-global range** starting at `var_start + skip_count`, and a single additive base recovers every id.
+The record-stream `DenseChunk` (`genoray types.rs:137-179`) then **renumbers survivors to dense
+local indices `0..n` and carries no per-variant global id** — the gap is destroyed inside genoray.
+A scalar `var_base` can only reconstruct a **contiguous** range `{base, base+1, …}`, which
+mismatches the written oracle's gapped `{base, base+2, …}` (the write path stores true global ids
+with gaps: `_var_ranges.py` `with_row_index` over the atomized per-contig table + the same
+extent-overlap join). **No value of `var_base` fixes this** — the fix must carry per-variant global
+ids. (SVAR1 and the SVAR2 query path already do, via `pack_vk_src`; only the VCF/PGEN record-stream
+path is affected.)
 
-**Fix.**
+**This is a latent bug in already-merged Wave A.** `with_seqs("annotated")` on VCF/PGEN emits
+`annot_v_idxs` via `var_base + local` (`generate_batch_core`, `ffi/mod.rs:994`), so it is silently
+**wrong for any window containing a spanning deletion or same-POS tie** — even single-contig at
+window 0, not just the multi-contig/narrowed case the code comment ("KNOWN GAP", `vcf.rs:153-170`)
+acknowledges. PR-A fixes annotated too.
 
-- The record source reports `skip_count` (the number of leading candidates its precise filter
-  dropped) — a gvl-internal addition to `Pgen/VcfRecordSource`, **no genoray change**.
-- `PgenWindowFiller::fill`: `slot.var_base = var_start + skip_count` (`var_start` is already global
-  via the `.pvar` prescan's `contig_ranges`/`contig_pos`, `pgen.rs:407-410`).
-- `VcfWindowFiller`: it has no per-contig index today. Add a **per-contig cumulative
-  variant-count table** built once at `VcfWindowFiller::new` (a lightweight header/index pass,
-  mirroring PGEN's `.pvar` prescan and how `sample_indices` is already resolved once at
-  construction rather than per-window). This yields `contig_global_lo`; then
-  `slot.var_base = contig_global_lo + within_contig_offset + skip_count`.
+**Fix (decision: genoray emits global ids).** Mirror the SVAR2 `pack_vk_src` pattern:
 
-**Tests.** A multi-contig VCF **annotated-output** parity fixture (mirrors
-`svar1_multicontig_fixture`, which already proves SVAR1's `var_base = 0` global-ids path is correct
-for multi-contig) plus the analogous PGEN case. This unblocks correct multi-contig / narrowed
-`annot_v_idxs` for the **annotated** output already shipped in Wave A, and provides the global-id
-foundation the variants surface (PR-B1) needs. Closes #305.
+- **genoray PR** — add a per-variant global-id column to `DenseChunk` (e.g. `global_idx: Vec<i32>`,
+  one per surviving variant, in chunk order), populated by the record source through
+  atomization/exclusion so each survivor carries its **true dataset-global** id:
+  - **PGEN** is index-addressed (`PgenRecordSource` scans a global `[var_start, var_end)` range),
+    so a survivor's id is `var_start + scan_offset` — cheap and tie-safe, no position matching.
+  - **VCF** is tabix position-addressed; the source needs a **per-contig variant base** (the
+    cumulative atom count before the fetch region). genoray adds a per-contig variant index built
+    once at source construction (it has no cheap `contig_ranges`-equivalent today) so the running
+    within-contig atom index + that base gives the global id.
+  - Merge to genoray `main`; bump gvl's git `rev` (genoray is a first-party dep reached by rev
+    bump — CLAUDE.md → Development Notes; the roadmap's other genoray prerequisites set precedent).
+- **gvl PR-A** — bump the rev; add `global_v_idxs: Vec<i32>` to `DecodedWindow`; populate it in
+  `fill_decoded_window` from `chunk.global_idx`; **retire the scalar `var_base`** — `generate`
+  emits `annot_v_idxs` (and, in PR-B1, variants `v_idxs`) directly from `global_v_idxs[local]`,
+  not `var_base + local`. The `generate_batch_core` `var_base` add-back is removed/zeroed.
+
+**Tests.** Parity fixtures that specifically exercise **interior exclusion** (a spanning deletion
+that drops an interior variant; a same-POS SNP+DEL mixed-extent tie) plus **multi-contig** and
+**narrowed/partial-prefix** windows, on **both VCF and PGEN**, asserting `annot_v_idxs` are the
+exact gapped global ids the written `Dataset` produces. Mirrors `svar1_multicontig_fixture` and adds
+the interior-exclusion case (which SVAR1 already handles correctly and the record path currently
+does not). Closes #305; provides the global-id foundation PR-B1 needs.
 
 ### PR-B0 (#202) — clip variants to the region window (both paths)
 
@@ -148,12 +168,13 @@ alone, so it can be cherry-picked to `main` earlier if desired.
 
 The default `var_fields = ["alt", "ilen", "start"]` needs **no REF and no AF** — all three come
 from channels `DecodedWindow` already carries (`v_starts`/`ilens`/`alt`/`alt_offsets`) plus the
-per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touching the decode.
+per-hap CSR and the per-variant `global_v_idxs` (PR-A). So the first variants PR ships without
+touching the decode.
 
 - **New consumer path** in `RecordBackend` (and the SVAR1 backend): for the `[row_lo, row_hi)`
   slice, gather each `(region, sample, ploid)`'s window-local `v_idxs` from the per-hap CSR
   (`geno_offsets`/`geno_v_idxs`), **clip to the region window** (PR-B0 semantics), map local→global
-  via `var_base`, and feed the **existing** `assemble_variant_buffers_u8/i32` kernel plus the
+  via `global_v_idxs[local]` (PR-A), and feed the **existing** `assemble_variant_buffers_u8/i32` kernel plus the
   `gather_*`/`fill_empty_*` helpers. This is the DRY win: the written and streaming variants paths
   share one Rust assembly kernel; the only difference is where the per-hap variant lists come from
   (streaming's window-local CSR vs the written per-cell sparse set).
@@ -212,6 +233,11 @@ per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touchi
   CSR + static table already match the kernel's inputs.
 - **REF via reference-slice**, not a genoray `DenseChunk` change — avoids a cross-repo dependency;
   parity is the gate.
+- **Global ids → genoray emits them** (chosen, corrected 2026-07-20). Interior exclusion makes the
+  kept set non-contiguous, so the scalar `var_base` is unfixable; genoray's `DenseChunk` gains a
+  per-variant global-id column (SVAR2 `pack_vk_src` pattern), consumed via `DecodedWindow.global_v_idxs`.
+  This is a cross-repo genoray PR + rev bump — the one place Wave B deliberately touches genoray
+  (REF stays in-repo via reference-slice). It also fixes the latent Wave A annotated bug.
 - **Branch (resolved)**: Wave A is merged into `streaming` (PR #308), so **every Wave B PR —
   including PR-A and the PR-B0 #202 fix — targets `streaming` directly.** No stacking on the (now
   deleted) `spec/277-output-mode-wave-a` branch, and no `main`-vs-`streaming` split for #202.
@@ -221,15 +247,21 @@ per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touchi
 - **Parity oracle**: byte-identical vs `gvl.write()` + `Dataset[r, s]` under the matching
   `with_seqs(...)` / `min_af` / `max_af` / `var_fields`, on the **corrected** (#202-clipped) written
   path. One parity fixture per knob, on **SVAR1 + VCF + PGEN**.
-- **Multi-contig / narrowed windows** (the #305 gap): a multi-contig VCF (and PGEN) fixture where
-  the window does not start at global variant 0, asserting global `v_idxs` / `annot_v_idxs` are
-  exact. Mirrors `svar1_multicontig_fixture`.
+- **Interior exclusion (the #305 crux)**: a window with a spanning deletion that drops an interior
+  variant, and a same-POS SNP+DEL mixed-extent tie, on **both VCF and PGEN**, asserting
+  `annot_v_idxs` (and PR-B1 `v_idxs`) are the exact **gapped** global ids the written `Dataset`
+  produces — the case a scalar `var_base` cannot express.
+- **Multi-contig / narrowed windows**: a fixture where the window does not start at global variant 0,
+  asserting global ids are exact. Mirrors `svar1_multicontig_fixture`.
 - **AF-missing guard**: setting `min_af`/`max_af` without a cached `AF` column raises the same error
   as the written path.
 - **Empty groups**: `(region, sample, ploid)` cells with no in-window variant produce the written
   path's dummy fills (`DummyVariant`, `_flat_variants.py:37`).
-- **Rust unit tests**: `var_base = var_start + skip_count` under a synthetic leading-skip window;
-  the per-contig VCF count table; the variants consumer's local→global mapping and region clip.
+- **genoray-side tests**: the `DenseChunk.global_idx` column is correct under interior exclusion for
+  both the index-addressed (PGEN) and position-addressed (VCF) record sources (genoray PR's own
+  suite, mirroring the existing `spine.rs` interior-exclusion test).
+- **gvl Rust unit tests**: `fill_decoded_window` copies `global_idx → global_v_idxs`; `generate`
+  emits `global_v_idxs[local]` (not `var_base + local`); the variants consumer's region clip.
 - **Rebuild note** (CLAUDE.md): `maturin develop --release` before pytest after any `src/` change;
   run the full tree before pushing symbol/shared-code changes.
 
@@ -237,7 +269,8 @@ per-hap CSR and `var_base` (PR-A). So the first variants PR ships without touchi
 
 | PR | Scope | Depends on | Parallel? |
 |----|-------|-----------|-----------|
-| **PR-A** | #305 `var_base` (VCF+PGEN) + `skip_count` + VCF per-contig table + multi-contig fixtures | Wave A (merged, #308) | — foundation |
+| **genoray PR** | `DenseChunk.global_idx` per-variant global-id column (PGEN index-addressed; VCF per-contig base) + interior-exclusion tests | — | ⛔ cross-repo prerequisite for PR-A |
+| **PR-A** | #305: bump rev; `DecodedWindow.global_v_idxs`; retire scalar `var_base`; re-point annotated; interior-exclusion + multi-contig parity fixtures (fixes latent Wave A annotated bug) | genoray PR, Wave A (merged, #308) | — foundation |
 | **PR-B0** | #202 written-path region clip (targets `streaming`) | — | ✅ independent of PR-A |
 | **PR-B1** | streaming `with_seqs("variants")`, default fields, region-clipped, reuse assemble kernel | PR-A, PR-B0 | serial base for B2–B4 |
 | **PR-B2** | `min_af`/`max_af` (AF channel) | PR-B1 | ✅ vs B3 |
@@ -253,11 +286,13 @@ as each PR lands.
 
 - **REF reference-slice divergence** — mitigated by parity; genoray REF exposure is the fallback
   (PR-B4).
-- **`skip_count` reporting** — requires a small `Pgen/VcfRecordSource` API addition; if the source
-  can't cheaply report it, the filler can recompute the leading-skip from the window's precise
-  overlap predicate. Either way gvl-internal.
-- **VCF per-contig count pass cost** — one construction-time pass over the index/header; acceptable
-  (same amortization class as the `.pvar` prescan). Watch that it doesn't re-scan per window.
+- **Cross-repo genoray change** — PR-A is gated on a genoray PR (`DenseChunk.global_idx`) merging to
+  genoray `main` + a gvl rev bump. Sequence it like the roadmap's other genoray prerequisites; do
+  the genoray PR first. The VCF per-contig base inside genoray is the non-trivial part (position-
+  addressed, no existing `contig_ranges`); PGEN is cheap (index-addressed).
+- **Latent Wave A annotated bug** — merged `with_seqs("annotated")` is wrong under interior
+  exclusion today. PR-A fixes it, but until it lands the merged annotated output is unsafe for any
+  VCF/PGEN cohort with spanning deletions; call this out on the board and in #305.
 - **FORMAT dense-vs-carrier encodings** (#231) — the consumer must handle both `format_staged` and
   `format_by_carrier`; covered by per-source parity fixtures.
 - **SVAR2** — not in this wave; it inherits the generic consumer when #298 merges, but its store
