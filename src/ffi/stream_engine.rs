@@ -125,8 +125,8 @@ struct Svar1Backend {
     output_length: i64,
     /// Issue #277 Wave A Task 4: when `true`, `generate` requests the two annotation
     /// outputs (`annot_v_idxs`/`annot_ref_pos`) from `generate_batch_core`, with
-    /// `var_base = 0` — SVAR1's `store.geno_v_idxs()` is already dataset-GLOBAL
-    /// (see the module doc's "GLOBAL variant-scale tables" note), so no offset is
+    /// `global_v_idxs = None` — SVAR1's `store.geno_v_idxs()` is already dataset-GLOBAL
+    /// (see the module doc's "GLOBAL variant-scale tables" note), so no remap is
     /// needed, even across contigs. `false` (default) preserves pre-Task-4 behavior
     /// exactly (no extra allocation/work).
     annotated: bool,
@@ -217,7 +217,7 @@ impl EngineBackend for Svar1Backend {
             self.output_length,
             None, // shifts -- not yet wired for the engine path (jitter is Task 4+)
             self.annotated,
-            0, // var_base -- SVAR1's geno_v_idxs is already dataset-global (no offset)
+            None, // global_v_idxs -- SVAR1's geno_v_idxs is already dataset-global
             self.parallel,
         ))
     }
@@ -572,7 +572,7 @@ mod tests {
             -1, // ragged
             None,
             false, // annotated
-            0,     // var_base
+            None,  // global_v_idxs
             false,
         );
         (data.to_vec(), offs.to_vec())
@@ -926,7 +926,7 @@ mod tests {
                 -1, // ragged
                 None,
                 false, // annotated
-                0,     // var_base
+                None,  // global_v_idxs
                 false,
             );
             (data.to_vec(), offs.to_vec())
