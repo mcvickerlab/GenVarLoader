@@ -80,7 +80,7 @@ only** (no map-style random access).
 | `docs/superpowers/plans/2026-07-15-streaming-dataset-svar1-walking-skeleton.md` | Walking skeleton: SVAR1 → haplotypes end-to-end, parity-verified (no double-buffer) | ✅ done — PR [#274](https://github.com/mcvickerlab/GenVarLoader/pull/274) |
 | `docs/superpowers/plans/2026-07-16-streaming-svar1-window-engine.md` | **Re-scoped:** genoray ungated `svar1_query` → gvl window-granular SVAR1 reads + double-buffer engine + `to_iter` surface. Issue [#275](https://github.com/mcvickerlab/GenVarLoader/issues/275). Spec: `2026-07-16-streaming-svar1-window-engine-design.md` | 🚧 Tasks 2-4 done; Task 5's generic `StreamBackend`/`run_windows` engine done; SVAR1 wiring (issue [#283](https://github.com/mcvickerlab/GenVarLoader/issues/283)) done — 8a (Rust engine) + 8b (Python wiring, `to_iter()` now overlaps producer I/O with consumer generation) both landed; cold-cache A-vs-C measured (producer-thread engine wins 1.46×, ships as default); [#296](https://github.com/mcvickerlab/GenVarLoader/issues/296) throughput-gate observability gap fixed (`b2c5af90`) |
 | `docs/superpowers/plans/2026-07-17-streaming-vcf-pgen-backends.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | VCF backend / PGEN backend. Spec: `docs/superpowers/specs/2026-07-17-streaming-vcf-pgen-backends-design.md` | ✅ **done — VCF + PGEN backends both landed, single draft PR [#299](https://github.com/mcvickerlab/GenVarLoader/pull/299) into `streaming`** (all 14 tasks). Shared `RecordStreamEngine` (generic detached-producer/consumer engine core) + `DenseChunk`→`geno_v_idxs` transpose + `VcfWindowFiller`/`PgenWindowFiller`. `gvl.StreamingDataset(variants="x.vcf[.gz]"\|"x.bcf"\|"x.pgen")` reads directly and reaches byte-identical haplotype parity with `gvl.write()` + `Dataset.open()[r,s]` (haplotypes-only, `jitter=0`) for both backends; PGEN is biallelic-only (multiallelic rejected loudly at construction). Includes a `vcfixture-bulk` cohort-size benchmark harness (Task 13). Docs updated (Task 14). Still in draft pending a final whole-branch review. |
-| _TBD (Plan 5)_ — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth (annotated/variants, `with_len`, `min_af`/`max_af`, `var_fields`, jitter) | ⬜ |
+| `docs/superpowers/plans/2026-07-19-streaming-output-mode-breadth-wave-a.md` — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277) | Output-mode breadth, Wave A: `with_len` (int/ragged, no "variable"), read-time jitter (`with_settings(jitter=, rng=, deterministic=)`), `with_seqs("annotated")`. Spec: `docs/superpowers/specs/2026-07-19-streaming-output-mode-breadth-wave-a-design.md` | ✅ **done (Tasks 1-6 all landed)** — PR pending |
 | `docs/superpowers/plans/2026-07-18-streaming-vcf-pgen-optimization.md` — issue [#276](https://github.com/mcvickerlab/GenVarLoader/issues/276) | Optimization pass. Spec: `docs/superpowers/specs/2026-07-18-streaming-vcf-pgen-optimization-design.md` | ✅ **done (Tasks 1-7 all landed)** — counters (Task 1), `--compare-dataset` arm (Task 2), baseline + profile (Task 3, `docs/roadmaps/streaming-optimization-baseline.md`), PGEN `var_start`/`var_end` narrowing (Task 4), word-level transpose (Task 5), VCF sample-index reuse (Task 6), docs/gate (Task 7, see results below) |
 
 ### Optimization pass (#276) results — Task 7 (2026-07-19)
@@ -520,8 +520,13 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
       - **Smoke-validated**, not benchmarked at scale (this node is shared;
         large sweeps are out of scope for this task) — see task-13-report.md
         for the validation run and its printed counters.
-- ⬜ **Output-mode breadth + docs** — _Plan 5; docs folded in_ —
-  issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)
+- ✅ **Output-mode breadth Wave A + docs** — `with_len`, jitter, `with_seqs("annotated")`; docs
+  folded in — issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277), plan
+  `docs/superpowers/plans/2026-07-19-streaming-output-mode-breadth-wave-a.md`. `"variants"`/
+  `"variant-windows"`/`min_af`/`max_af`/`var_fields` are **Wave B**, tracked separately as
+  issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304). Annotated `var_idxs`
+  global-numbering for narrowed/multi-contig VCF/PGEN windows is deferred to issue
+  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305).
 
 ## Sequencing
 

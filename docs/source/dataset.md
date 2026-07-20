@@ -224,15 +224,52 @@ one `batch_size` slice at a time, so output is never materialized for a whole wi
 at once. Together, peak memory is bounded by `max_mem` (offsets) + `batch_size`
 (output), regardless of how many samples or regions the dataset has.
 
-Haplotype output is byte-identical to `gvl.write(...)` followed by `Dataset.open(...)[r, s]`
-(at `jitter=0`). It trades that write step for a slower per-epoch read, since every window
-re-reads the live store instead of hitting a pre-indexed dataset — prefer a written `Dataset`
-for repeated-epoch training, and `StreamingDataset` for one-shot/inference work or when you'd
-rather not pay for the write.
+Haplotype (and `with_seqs("annotated")`) output is byte-identical to `gvl.write(...)` followed by
+`Dataset.open(...)[r, s]` (at `jitter=0`). It trades that write step for a slower per-epoch read,
+since every window re-reads the live store instead of hitting a pre-indexed dataset — prefer a
+written `Dataset` for repeated-epoch training, and `StreamingDataset` for one-shot/inference work
+or when you'd rather not pay for the write.
 
-`StreamingDataset` is currently more limited than `Dataset`: `.svar`, VCF/BCF, and PGEN
-(biallelic only) variant sources (`.svar2` raises `NotImplementedError`),
-`with_seqs("haplotypes")` only, `jitter=0` only, ragged output only, and **iterable-only** —
+### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`
+
+`StreamingDataset` supports the following read-time knobs (issue
+[#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
+`Dataset` methods:
+
+- **`with_len(length: int | "ragged")`** — `"ragged"` (the default) yields each hap's actual
+  length; a positive `int` yields exactly that many bases per hap. Unlike `Dataset.with_len`,
+  `"variable"` is **not** accepted — `to_iter` always yields `Ragged` (there is no `ArrayDataset`
+  analog for a streaming source), so pad the ragged output yourself if you need a dense array.
+  Fixed-length output is byte-identical to `Dataset.with_len(L)` at `jitter=0`.
+- **`with_settings(*, jitter=, rng=, deterministic=)`** — mirrors the relevant subset of
+  `Dataset.with_settings` (same parameter names, note `rng` rather than `seed`). `jitter` is a
+  non-negative int: each region's read window is translated by an offset drawn from
+  `Uniform[-jitter, jitter]` (window size unchanged), clamped so the translated start stays
+  `>= 0` (the translated end may run past the contig end, N-padded). `rng` (a seed int or
+  `numpy.random.Generator`) seeds those draws — one `Generator` is created per `to_iter()` call
+  and drawn from once per region in sweep order, so a fixed `rng` reproduces the same translated
+  windows across calls and runs. **`jitter>0` is a reproducible, rng-seeded *augmentation* — not
+  byte-parity** with a written `Dataset`; only `jitter=0` (the default) is parity-gated.
+  `jitter>0` currently requires the default engine prefetch mode (combining it with `readahead`
+  raises). `deterministic` is reserved for per-hap within-window sub-shifts on fixed-length
+  output; that path is a **documented Wave A deferral** (needs a Rust engine API addition) and
+  currently has no observable effect.
+- **`with_seqs("haplotypes" | "annotated")`** — `"annotated"` returns `RaggedAnnotatedHaps`
+  (haplotypes plus per-position `var_idxs`/`ref_coords`), byte-identical to
+  `Dataset.with_seqs("annotated")` at `jitter=0`. **Limitation (issue
+  [#305](https://github.com/mcvickerlab/GenVarLoader/issues/305)):** SVAR1 `var_idxs` are always
+  dataset-global; for the VCF/PGEN record backends, `var_idxs` are dataset-global only for
+  whole-contig or from-contig-start windows — a narrowed/partial-prefix window (or any window
+  after the first contig in a multi-contig sweep) currently reports window-local `var_idxs`
+  (`var_base=0`) instead of the dataset-global index. Fix deferred.
+
+`"variants"`/`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and `var_fields`
+are **not yet implemented** for `StreamingDataset` — that's Wave B (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs` raises
+`NotImplementedError` for any kind other than `"haplotypes"`/`"annotated"`.
+
+`StreamingDataset` is otherwise more limited than `Dataset`: `.svar`, VCF/BCF, and PGEN
+(biallelic only) variant sources (`.svar2` raises `NotImplementedError`), and **iterable-only** —
 `sds[r, s]` raises `TypeError`; use `sds.to_iter(...)` (or `to_dataloader(...)` for torch).
 `sample_idxs` index into `sds.samples` (lexicographically-sorted sample names, matching
 `gvl.write()`), not the variant source's native column order. See the `genvarloader` skill for the
