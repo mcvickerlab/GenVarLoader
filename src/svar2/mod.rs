@@ -486,6 +486,117 @@ pub fn decode_variants_from_split(
     )
 }
 
+/// Fill `out_data`/`out_offsets` (cleared + refilled, capacity reused) with the
+/// read-bound reconstruction of `n_q = region_starts_v.len()` regions x `ploidy`
+/// haplotypes. Identical logic to the original `reconstruct_haplotypes_from_svar2_readbound`
+/// py.detach body (`src/ffi/mod.rs`); `parallel` is passed straight to the kernel. Runs
+/// GIL-free — callers wrap in `py.detach`. `out_offsets` has length `n_q*ploidy + 1`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn svar2_readbound_chain(
+    reader: &genoray_core::query::ContigReader,
+    region_starts_v: &[u32],
+    orig_samples_v: &[usize],
+    vk_snp_range_v: &[Range<usize>],
+    vk_indel_range_v: &[Range<usize>],
+    dense_snp_range_v: &[Range<usize>],
+    dense_indel_range_v: &[Range<usize>],
+    regions: numpy::ndarray::ArrayView2<i32>,
+    shifts_a: numpy::ndarray::ArrayView2<i32>,
+    ref_a: numpy::ndarray::ArrayView1<u8>,
+    ref_offsets_a: numpy::ndarray::ArrayView1<i64>,
+    pad_char: u8,
+    output_length: i64,
+    parallel: bool,
+    filter_exonic: bool,
+    out_data: &mut Vec<u8>,
+    out_offsets: &mut Vec<i64>,
+) {
+    use numpy::ndarray::{ArrayView1, ArrayView2};
+    let ploidy = shifts_a.ncols();
+    let n_q = regions.nrows();
+
+    let rb = genoray_core::query::HapRanges::new(
+        region_starts_v,
+        orig_samples_v,
+        vk_snp_range_v,
+        vk_indel_range_v,
+        dense_snp_range_v,
+        dense_indel_range_v,
+        ploidy,
+    );
+    let br = genoray_core::query::gather_haps_readbound(reader, &rb);
+    let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+    let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+    let flat = crate::svar2::split_to_flat(&br);
+    let dense_range_a = ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
+
+    let diffs = crate::svar2::hap_diffs_svar2(
+        regions,
+        ploidy,
+        &flat.vk_pos,
+        &flat.vk_key,
+        &flat.vk_off,
+        &flat.dense_pos,
+        &flat.dense_key,
+        dense_range_a,
+        &flat.dense_present,
+        &flat.dense_present_off,
+        &lut_bytes,
+        &lut_off,
+        filter_exonic,
+    );
+
+    // Offsets (prefix sum) into the reused buffer.
+    let n_work = n_q * ploidy;
+    out_offsets.clear();
+    out_offsets.resize(n_work + 1, 0);
+    let mut acc: i64 = 0;
+    out_offsets[0] = 0;
+    for k in 0..n_work {
+        let query = k / ploidy;
+        let hap = k % ploidy;
+        let len: i64 = if output_length >= 0 {
+            output_length
+        } else {
+            let ref_len = (regions[[query, 2]] - regions[[query, 1]]) as i64;
+            let diff = diffs[[query, hap]] as i64;
+            (ref_len + diff).max(0)
+        };
+        acc += len;
+        out_offsets[k + 1] = acc;
+    }
+
+    // Output buffer (reused capacity; fully overwritten by reconstruct).
+    let total = out_offsets[n_work] as usize;
+    out_data.clear();
+    out_data.resize(total, 0u8);
+
+    let out_offsets_view = ArrayView1::from(out_offsets.as_slice());
+    let out_bounds = crate::reconstruct::bounds_from_offsets(out_offsets_view);
+    let out_data_view = numpy::ndarray::ArrayViewMut1::from(out_data.as_mut_slice());
+    crate::reconstruct::reconstruct_haplotypes_from_svar2(
+        out_data_view,
+        out_bounds.view(),
+        regions,
+        shifts_a,
+        ArrayView1::from(flat.vk_pos.as_slice()),
+        ArrayView1::from(flat.vk_key.as_slice()),
+        ArrayView1::from(flat.vk_off.as_slice()),
+        ArrayView1::from(flat.dense_pos.as_slice()),
+        ArrayView1::from(flat.dense_key.as_slice()),
+        dense_range_a,
+        ArrayView1::from(flat.dense_present.as_slice()),
+        ArrayView1::from(flat.dense_present_off.as_slice()),
+        ArrayView1::from(lut_bytes.as_slice()),
+        ArrayView1::from(lut_off.as_slice()),
+        ref_a,
+        ref_offsets_a,
+        pad_char,
+        parallel,
+        filter_exonic,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
