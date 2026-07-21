@@ -41,6 +41,29 @@ def _cleanup(shms: list, producer_ref) -> None:
             pass
 
 
+def _token_alphabet_from_lut(lut: "np.ndarray", unknown_token: int) -> bytes:
+    """Recover the ordered alphabet bytes a ``token_lut`` was built from.
+
+    ``build_token_lut`` (``_flat_flanks.py``) assigns each alphabet byte's
+    position in the input alphabet as its token id (``0..len(alphabet)-1``) and
+    fills every other byte with ``unknown_token``; ``Haps`` only retains the
+    resulting LUT, not the original alphabet. This inverts that mapping by
+    sorting the non-``unknown_token`` byte values by their token id, which
+    recovers the alphabet verbatim as long as ``unknown_token`` doesn't collide
+    with a real alphabet token id (the standard usage, e.g. ``unknown_token=len(alphabet)``).
+
+    Args:
+        lut: 256-entry byte->token lookup table.
+        unknown_token: Token id assigned to bytes outside the alphabet.
+
+    Returns:
+        The reconstructed alphabet, in original order.
+    """
+    byte_vals = np.nonzero(lut != unknown_token)[0]
+    order = np.argsort(lut[byte_vals])
+    return bytes(byte_vals[order].astype(np.uint8).tolist())
+
+
 def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader flattened to (n_groups, None).
 
@@ -215,6 +238,25 @@ class _DoubleBufferedIterable:
                 schema["var_filter"] = seqs.filter
             if hasattr(seqs, "var_fields"):
                 schema["var_fields"] = list(seqs.var_fields)
+
+            window_opt = getattr(seqs, "window_opt", None)
+            if window_opt is not None:
+                schema["window_opt"] = {
+                    "flank_length": window_opt.flank_length,
+                    "token_alphabet": window_opt.token_alphabet,
+                    "unknown_token": window_opt.unknown_token,
+                    "ref": window_opt.ref,
+                    "alt": window_opt.alt,
+                }
+            elif getattr(seqs, "flank_length", None) and seqs.token_lut is not None:
+                # Plain-variants ride-along flank tokens (Config B). ``Haps``
+                # only retains the derived LUT, not the original
+                # ``token_alphabet`` it was built from, so recover it.
+                schema["flank_length"] = seqs.flank_length
+                schema["token_alphabet"] = _token_alphabet_from_lut(
+                    seqs.token_lut, seqs.unknown_token
+                )
+                schema["unknown_token"] = seqs.unknown_token
 
         ref = getattr(ds, "reference", None)
         if ref is not None:

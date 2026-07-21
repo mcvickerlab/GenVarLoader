@@ -13,7 +13,12 @@ from ._shm_layout import write_chunk
 def _apply_schema(ds, schema: dict):
     """Reapply a serializable schema dict to a freshly opened Dataset."""
     if schema.get("with_seqs", "UNSET") != "UNSET":
-        ds = ds.with_seqs(schema["with_seqs"])
+        if schema.get("window_opt") is not None:
+            from ._dataset._flat_variants import VarWindowOpt
+
+            ds = ds.with_seqs(schema["with_seqs"], VarWindowOpt(**schema["window_opt"]))
+        else:
+            ds = ds.with_seqs(schema["with_seqs"])
     if "with_tracks" in schema:
         ds = ds.with_tracks(schema["with_tracks"])
     if schema.get("output_format") == "flat":
@@ -33,6 +38,10 @@ def _apply_schema(ds, schema: dict):
         settings_kwargs["var_filter"] = schema["var_filter"]
     if schema.get("var_fields") is not None:
         settings_kwargs["var_fields"] = schema["var_fields"]
+    if schema.get("flank_length") is not None:
+        settings_kwargs["flank_length"] = schema["flank_length"]
+        settings_kwargs["token_alphabet"] = schema["token_alphabet"]
+        settings_kwargs["unknown_token"] = schema["unknown_token"]
     if settings_kwargs:
         ds = ds.with_settings(**settings_kwargs)
     return ds
