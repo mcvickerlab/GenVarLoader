@@ -500,21 +500,16 @@ def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, a
 
 @pytest.mark.slow
 def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
-    # unknown_token=len(token_alphabet) (outside the alphabet's own token range) --
-    # not unknown_token=0 as in the buffered-mode analog
-    # (test_buffered_variants_flank_tokens_matches_per_item). double_buffered's
-    # producer schema only has Haps.token_lut (a 256-entry byte->token LUT) to work
-    # with, not the original token_alphabet bytes, so it recovers the alphabet from
-    # the LUT (_token_alphabet_from_lut in _double_buffered_loader.py). That recovery
-    # is provably lossy whenever unknown_token collides with a *non-last* alphabet
-    # symbol's own token id (unknown_token=0 collides with 'A' in b"ACGT") and
-    # correctly raises rather than silently reconstructing the wrong LUT -- a
-    # pre-existing, documented limitation of that helper, not something this task
-    # touches. See _token_alphabet_from_lut's docstring for the full contract.
+    # unknown_token=0 collides with "A"'s own token id (0) in b"ACGT". This used
+    # to make double_buffered raise (the producer schema recovered token_alphabet
+    # by inverting Haps.token_lut, which is provably lossy for this collision) even
+    # though mode="buffered"/mode=None handle it fine -- a parity break for a
+    # legal, common config (0 as a natural pad/unknown id). Haps now stores
+    # token_alphabet directly, so this must pass end-to-end.
     ds = (
         file_backed_ds.with_seqs("variants")
         .with_tracks(False)
-        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=4)
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
         .with_output_format("flat")
     )
     common = dict(

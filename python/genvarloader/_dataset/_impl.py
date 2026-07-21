@@ -402,14 +402,17 @@ class Dataset:
             haps = to_evolve.get("_seqs", self._seqs)
             new_flank_len = haps.flank_length if flank_length is None else flank_length
             lut, lut_dtype = haps.token_lut, haps.token_dtype
+            alphabet = haps.token_alphabet
             if token_alphabet is not None or unknown_token is not None:
                 if token_alphabet is None or unknown_token is None:
                     raise ValueError(
                         "token_alphabet and unknown_token must be set together."
                     )
                 from ._flat_flanks import build_token_lut
+                from ._flat_variants import _normalize_token_alphabet
 
                 lut, lut_dtype = build_token_lut(token_alphabet, unknown_token)
+                alphabet = _normalize_token_alphabet(token_alphabet)
             if new_flank_len and lut is None:
                 raise ValueError(
                     "flank_length requires a token LUT; pass token_alphabet and"
@@ -423,6 +426,7 @@ class Dataset:
                 unknown_token=(
                     unknown_token if unknown_token is not None else haps.unknown_token
                 ),
+                token_alphabet=alphabet,
             )
 
         if dummy_variant is not None:
@@ -734,6 +738,7 @@ class Dataset:
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
                 unknown_token=window_opt.unknown_token,
+                token_alphabet=window_opt.token_alphabet,
             )
         if (
             kind in ("haplotypes", "annotated")

@@ -6,15 +6,10 @@ including the full round trip through both for a mixed builder chain that
 leaves a stale ``Haps.window_opt`` alongside an active flank config.
 """
 
-import pytest
-
 import genvarloader as gvl
 from genvarloader._dataset._flat_flanks import build_token_lut
 from genvarloader._dataset._flat_variants import VarWindowOpt
-from genvarloader._double_buffered_loader import (
-    _build_producer_schema,
-    _token_alphabet_from_lut,
-)
+from genvarloader._double_buffered_loader import _build_producer_schema
 from genvarloader._producer import _apply_schema
 
 
@@ -153,29 +148,50 @@ def test_build_producer_schema_mixed_chain_prefers_active_config():
     assert (rebuilt._seqs.token_lut == ds._seqs.token_lut).all()
 
 
-def test_token_alphabet_from_lut_roundtrips_for_normal_config():
-    lut, _ = build_token_lut(b"ACGT", 4)
-    assert _token_alphabet_from_lut(lut, 4) == b"ACGT"
+def test_build_producer_schema_flank_tokens_roundtrips_noncolliding_unknown_token():
+    """Config B, unknown_token outside the alphabet's own token range: must round-trip exactly."""
+    dummy = gvl.get_dummy_dataset().with_tracks(False)
+    ds = (
+        dummy.with_seqs("variants")
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=4)
+        .with_output_format("flat")
+    )
+
+    schema = _build_producer_schema(ds)
+
+    assert schema["token_alphabet"] == b"ACGT"
+    assert schema["unknown_token"] == 4
+
+    rebuilt = _apply_schema(dummy, schema)
+    assert rebuilt._seqs.flank_length == ds._seqs.flank_length
+    assert rebuilt._seqs.unknown_token == ds._seqs.unknown_token
+    assert (rebuilt._seqs.token_lut == ds._seqs.token_lut).all()
 
 
-def test_token_alphabet_from_lut_accepts_boundary_unknown_token():
-    """unknown_token == len(alphabet) - 1 collides with the last symbol's own
-    token id (e.g. "T"'s id 3 in b"ACGT"), so the recovered alphabet text
-    ("ACG") differs from the original -- but a byte assigned that token id
-    behaves identically whether treated as "in the alphabet at that position"
-    or "unknown", so the rebuilt LUT is byte-identical and this must NOT
-    raise (this is the case a naive contiguity check gets wrong).
+def test_build_producer_schema_flank_tokens_roundtrips_colliding_unknown_token():
+    """Config B, unknown_token=0 collides with "A"'s own token id (0) in b"ACGT".
+
+    This used to be recovered by inverting ``Haps.token_lut``
+    (``_token_alphabet_from_lut``), which is provably lossy for exactly this
+    collision and raised ``ValueError`` -- silently rejecting a legal,
+    common config (``unknown_token=0`` as a natural pad/unknown id) that
+    ``mode='buffered'``/``mode=None`` accept. Now that ``Haps`` stores the
+    original ``token_alphabet`` bytes directly (no LUT inversion), this must
+    round-trip exactly.
     """
-    lut, _ = build_token_lut(b"ACGT", 3)
-    alphabet = _token_alphabet_from_lut(lut, 3)
-    rebuilt_lut, _ = build_token_lut(alphabet, 3)
-    assert (rebuilt_lut == lut).all()
+    dummy = gvl.get_dummy_dataset().with_tracks(False)
+    ds = (
+        dummy.with_seqs("variants")
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
+        .with_output_format("flat")
+    )
 
+    schema = _build_producer_schema(ds)
 
-def test_token_alphabet_from_lut_raises_on_colliding_unknown_token():
-    # unknown_token=0 collides with "A"'s token id (0) in b"ACGT" in a way
-    # that loses information: both "A" and true out-of-alphabet bytes map to
-    # 0, and no alphabet reconstructed from the LUT rebuilds it faithfully.
-    lut, _ = build_token_lut(b"ACGT", 0)
-    with pytest.raises(ValueError, match="collides"):
-        _token_alphabet_from_lut(lut, 0)
+    assert schema["token_alphabet"] == b"ACGT"
+    assert schema["unknown_token"] == 0
+
+    rebuilt = _apply_schema(dummy, schema)
+    assert rebuilt._seqs.flank_length == ds._seqs.flank_length
+    assert rebuilt._seqs.unknown_token == ds._seqs.unknown_token
+    assert (rebuilt._seqs.token_lut == ds._seqs.token_lut).all()
