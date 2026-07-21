@@ -1031,4 +1031,60 @@ mod tests {
         assert_eq!(out.alt_data.as_slice().unwrap(), &[b'A']);
         assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 1]);
     }
+
+    /// Wave B PR-B1 regression (task-2 review gap): the clip test above collapses
+    /// `ri = bi/n_samples`, `si = bi%n_samples`, `h = si*ploidy+p` all to 0 (n_samples=1,
+    /// ploidy=1, one region), so it cannot catch a wrong-sample read or a flat-CSR-slice
+    /// bug. This test uses `MultiRegionFiller` (2 samples x ploidy 2, 2 SNPs at distinct
+    /// positions/regions) so each of the 8 hap-rows has a distinguishable expected outcome
+    /// if `generate_variants` reads the wrong sample's CSR slice or fails to clip to the
+    /// right region:
+    ///   bi0(r0,s0): h0(s0,p0)=[v0@5]  -> kept [v0]   h1(s0,p1)=[]        -> kept []
+    ///   bi1(r0,s1): h2(s1,p0)=[v1@15] -> clipped []  h3(s1,p1)=[v0,v1]   -> kept [v0]
+    ///   bi2(r1,s0): h0(s0,p0)=[v0@5]  -> clipped []  h1(s0,p1)=[]        -> kept []
+    ///   bi3(r1,s1): h2(s1,p0)=[v1@15] -> kept [v1]   h3(s1,p1)=[v0,v1]   -> clipped [v1]
+    /// (region0=[0,10) keeps pos5=v0; region1=[10,20) keeps pos15=v1).
+    #[test]
+    fn generate_variants_multiregion_multisample_lands_on_correct_sample() {
+        let job = RecordJob {
+            contig_idx: 0,
+            regions: vec![(0, 10), (10, 20)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let c = chr1();
+        let mut slot = DecodedWindow::default();
+        MultiRegionFiller.fill(&job, &c, &mut slot).unwrap();
+
+        let backend = RecordBackend {
+            filler: Box::new(MultiRegionFiller),
+            contigs: vec![c],
+            jobs: vec![job],
+            n_samples: 2,
+            ploidy: 2,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+        };
+
+        let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
+        let out = backend.generate_variants(0, &slot, 0, n_rows).unwrap();
+
+        assert_eq!(
+            out.row_offsets.as_slice().unwrap(),
+            &[0, 1, 1, 1, 2, 2, 2, 3, 4]
+        );
+        assert_eq!(out.start.as_slice().unwrap(), &[5, 5, 15, 15]);
+        assert_eq!(out.ilen.as_slice().unwrap(), &[0, 0, 0, 0]);
+        assert_eq!(
+            out.alt_data.as_slice().unwrap(),
+            &[b'A', b'A', b'C', b'C']
+        );
+        assert_eq!(
+            out.alt_seq_offsets.as_slice().unwrap(),
+            &[0, 1, 2, 3, 4]
+        );
+    }
 }
