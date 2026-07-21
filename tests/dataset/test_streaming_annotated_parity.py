@@ -31,7 +31,12 @@ import pytest
 
 import genvarloader as gvl
 
-BACKENDS = ["svar1", "vcf", "pgen"]
+# VCF is intentionally excluded: `with_seqs("annotated")` is a fail-fast
+# NotImplementedError for the VCF backend (its `var_idxs` are dataset-global ids
+# a VCF source cannot produce cheaply; issues #305, #311). See
+# `test_vcf_annotated_fails_fast` for the guard's coverage. SVAR1 (ids for free)
+# and PGEN (ids from the `.pvar` row index) exercise the local->global gather.
+BACKENDS = ["svar1", "pgen"]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -73,6 +78,21 @@ def test_annotated_matches_written(streaming_case, backend):
         f"backend={backend}: fixture produced no variant-carrying haplotype; "
         "the var_idxs comparison proves nothing without one"
     )
+
+
+def test_vcf_annotated_fails_fast(streaming_case):
+    """`with_seqs("annotated")` on a VCF-backed `StreamingDataset` must raise
+    `NotImplementedError` at materialization rather than emit silently-wrong
+    dataset-global `var_idxs` (issues #305, #311). VCF sources have no cheap
+    per-record global id; annotated output requires a PGEN or SVAR source.
+    """
+    regions, reference, variants, _written = streaming_case("vcf")
+    sds = gvl.StreamingDataset(
+        regions, reference=reference, variants=variants
+    ).with_seqs("annotated")
+    with pytest.raises(NotImplementedError, match="annotated.*VCF backend"):
+        # Materialization (and thus the guard) fires when iteration begins.
+        next(iter(sds.to_iter(batch_size=4)))
 
 
 _NARROWED_PGEN_REGIONS = pl.DataFrame(
