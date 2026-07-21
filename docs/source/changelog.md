@@ -70,6 +70,31 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.40.0 (2026-07-21)
+
+### Feat
+
+- **dataloader**: support variant-windows and flank tokens in mode='double_buffered'
+- **dataloader**: pass _FlatVariantWindows through the double-buffered consumer reshape
+- **dataloader**: shm kind=2 carries _FlatVariants.flank_tokens
+- **dataloader**: shm kind=4 serialization for _FlatVariantWindows
+- **dataloader**: replay VarWindowOpt and flank config in the producer schema
+- **dataloader**: support variant-windows and flank tokens in mode='buffered'
+- **dataloader**: instance-axis slicing for flat window and flank types
+- **dataloader**: byte accounting for variant-windows and variants flank_tokens
+
+### Fix
+
+- **dataloader**: propagate unphased_union to producer, Svar2 info-dtype guard + start accounting in variant-windows
+- **dataloader**: AF-filter-safe dummy_variant byte accounting + direct bound test
+- **dataloader**: store token_alphabet on Haps, drop lossy LUT inversion (restores double_buffered parity for colliding unknown_token)
+- **dataloader**: replace contiguity heuristic with round-trip verification in _token_alphabet_from_lut
+- **dataloader**: key producer-schema Config A/B on sequence_type, not stale window_opt
+- **flat-variants**: accept str/bytes/NucleotideAlphabet for with_settings(token_alphabet=...)
+
 ## v0.39.0 (2026-07-17)
 
 ### Feat
