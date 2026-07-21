@@ -209,11 +209,14 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader flattened to (n_groups, None).
 
     _FlatVariants / RaggedVariants already carry ploidy (regular_size) and are left unchanged.
+    _FlatVariantWindows is likewise a passthrough: the shm reader builds its per-slot
+    shapes directly as (b, rs, None, None), so no reshape is needed.
     """
     from seqpro.rag import Ragged
 
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
+    from ._dataset._flat_variants import _FlatVariantWindows
     from ._dataset._rag_variants import RaggedVariants
 
     def _reshape_one(arr):
@@ -249,6 +252,11 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
 
     result: list = []
     for arr in views:
+        if isinstance(arr, _FlatVariantWindows):
+            # The shm reader already builds correct (b, rs, None, None) per-slot
+            # shapes from regular_size; don't let the generic branches mangle it.
+            result.append(arr)
+            continue
         if isinstance(arr, RaggedAnnotatedHaps):
             arr = RaggedAnnotatedHaps(
                 haps=_reshape_one(arr.haps),

@@ -436,3 +436,28 @@ def test_reshape_ragged_for_chunk_leaves_raggedvariants_untouched():
     out = _reshape_ragged_for_chunk([rv], n_instances=2)[0]
     assert out is rv  # untouched
     assert out.shape == (2, 1, None)
+
+
+def test_reshape_ragged_for_chunk_passes_variant_windows():
+    """A _FlatVariantWindows (window-mode variants output) must pass through
+    _reshape_ragged_for_chunk unchanged -- the shm reader already builds correct
+    (b, rs, None, None) per-slot shapes from regular_size, so the generic
+    Ragged/_Flat ploidy-reshape branches must not touch it."""
+    import numpy as np
+    from genvarloader._flat import _Flat
+    from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
+    from genvarloader._double_buffered_loader import _reshape_ragged_for_chunk
+
+    start = _Flat(
+        np.array([1, 2], np.int32), np.array([0, 1, 2], np.int64), (2, 1, None)
+    )
+    rw = _FlatWindow(
+        np.arange(4, dtype=np.uint8),
+        np.array([0, 2, 4], np.int64),
+        np.array([0, 1, 2], np.int64),
+        (2, 1, None, None),
+    )
+    fvw = _FlatVariantWindows({"start": start}, ref_window=rw)
+    out = _reshape_ragged_for_chunk([fvw], n_instances=2)[0]
+    assert isinstance(out, _FlatVariantWindows)
+    assert out.ref_window is not None and out.ref_window.shape[0] == 2
