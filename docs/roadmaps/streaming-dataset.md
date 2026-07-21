@@ -552,7 +552,20 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
   ✅ **done** — `get_variants_flat` folded a region-overlap keep mask into the existing AF
   `keep`/`_compact_keep` block (matches `src/reconstruct/mod.rs`'s inclusion extent). Serves
-  as the byte-identical parity oracle for **PR-B1** (streaming `with_seqs("variants")`), next.
+  as the byte-identical parity oracle for **PR-B1** (streaming `with_seqs("variants")`).
+  Task 2 (**PR-B1**, `RecordBackend::generate_variants` Rust core) ✅ **done** — window
+  CSR → flat `VariantsBatch` (`alt`/`start`/`ilen`/`row_offsets`) via the shared
+  `assemble_variants_window` helper (`src/variants/mod.rs`), region-overlap-clipped
+  per `(row, ploid)` identically to `generate`'s haplotype path. Task 3 (**PR-B1**,
+  `next_batch_variants` FFI + Python wiring + VCF/PGEN parity) ✅ **done** —
+  `EngineBackend::generate_variants` (default-unsupported, `RecordBackend` overrides it;
+  the shared `advance`/`NextSlice` cursor extracted out of `next_batch_core` so
+  `next_batch_variants_core` reuses it without duplicating the producer/consumer loop),
+  `RecordStreamEngine.next_batch_variants` marshals to a `dict[str, ndarray]`
+  (`alt`/`alt_offsets`/`start`/`ilen`/`offsets`), and `StreamingDataset.with_seqs("variants")`
+  packs a `RaggedVariants` from it (mirrors `_FlatAlleles.to_ragged`/`_Flat.to_ragged`).
+  `tests/dataset/test_streaming_variants_parity.py` gates VCF + PGEN byte-identical against
+  the corrected written oracle. SVAR1 wiring is **Task 4**, next.
   **Verification caveat:** with the currently-pinned genoray rev, the described PGEN
   "contig-scoped" leak could not be reproduced end-to-end through `gvl.write()` +
   `Dataset.open()` for disjoint narrow regions (write-time `pgen.var_idxs`/`.chunk` are

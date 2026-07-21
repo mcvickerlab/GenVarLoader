@@ -32,11 +32,13 @@ use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::record_stream::pgen::PgenWindowFiller;
 use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
+use crate::variants::VariantsBatch;
 
 /// Decode job `job`'s window (on `contig`) into `slot`, reusing its allocations. VCF/PGEN
 /// implementors (Task 4/10) do the actual genoray record-stream reading + the hap-major
@@ -96,12 +98,11 @@ struct RecordBackend {
     /// (default) preserves pre-Task-4 behavior exactly (no extra allocation/work).
     annotated: bool,
     /// Wave B PR-B1 (variants-output streaming): when `true`, callers may invoke
-    /// [`RecordBackend::generate_variants`] instead of (or alongside) `generate`, to get
-    /// flat variant buffers (`VariantsBatch`) for a batch row slice rather than
-    /// reconstructed haplotype bytes. Mirrors `annotated`'s shape; not yet consumed by
-    /// `generate`/`next_batch` (Task 3 wires the Python-facing `next_batch_variants`
-    /// path). `false` (default) preserves pre-Task-2 behavior exactly.
-    #[allow(dead_code)]
+    /// [`EngineBackend::generate_variants`]'s `RecordBackend` override instead of (or
+    /// alongside) `generate`, to get flat variant buffers (`VariantsBatch`) for a batch row
+    /// slice rather than reconstructed haplotype bytes. Mirrors `annotated`'s shape; guarded
+    /// at the top of that override (bails if `false`) and surfaced to Python via
+    /// `next_batch_variants`. `false` (default) preserves pre-Task-2 behavior exactly.
     variants: bool,
 }
 
@@ -118,89 +119,6 @@ impl RecordBackend {
         self.filler.fill(job, c, &mut slot)?;
         Ok(slot)
     }
-
-    /// Wave B PR-B1: generate the `[row_lo, row_hi)` slice of this window's rows as flat
-    /// VARIANT buffers rather than reconstructed haplotype bytes — the variants-output
-    /// counterpart of `generate` (`EngineBackend::generate` above). Same row->region->CSR
-    /// mapping as `generate` (`bi = ri*n_samples + si`, per-hap CSR replicated across
-    /// regions — see that method's doc comment), but instead of feeding the per-hap runs
-    /// through `generate_batch_core`'s haplotype-reconstruction kernel, this walks each
-    /// row's `ploidy` haps directly and keeps only the window-local variants whose extent
-    /// overlaps the row's region (`src/genotypes/mod.rs:68-74`'s
-    /// `v_end = v_start - v_ilen.min(0) + 1`, keep iff `v_start < r_e && v_end > r_s` —
-    /// NOT `reconstruct::mod.rs`'s exonic containment check, which is a different
-    /// predicate despite sharing the `v_end` formula). Assumes phased ploidy: one output
-    /// row per `(row, ploid)`, so `row_offsets` has length `(row_hi-row_lo)*ploidy + 1`.
-    #[allow(dead_code)] // Wave B PR-B1: wired up by Task 3's Python-facing `next_batch_variants`.
-    fn generate_variants(
-        &self,
-        job_idx: usize,
-        slot: &DecodedWindow,
-        row_lo: usize,
-        row_hi: usize,
-    ) -> anyhow::Result<VariantsBatch> {
-        let job = &self.jobs[job_idx];
-        let n_samples = job.s_hi - job.s_lo;
-        let n_rows = row_hi - row_lo;
-
-        let mut v_idxs: Vec<i32> = Vec::new();
-        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy + 1);
-        row_offsets.push(0);
-
-        for bi in row_lo..row_hi {
-            let ri = bi / n_samples;
-            let (r_s, r_e) = job.regions[ri];
-            let si = bi % n_samples;
-            for p in 0..self.ploidy {
-                let h = si * self.ploidy + p;
-                let csr_lo = slot.geno_offsets[h] as usize;
-                let csr_hi = slot.geno_offsets[h + 1] as usize;
-                for &vidx in &slot.geno_v_idxs[csr_lo..csr_hi] {
-                    let v_start = slot.v_starts[vidx as usize] as i64;
-                    let v_ilen = slot.ilens[vidx as usize] as i64;
-                    let v_end = v_start - v_ilen.min(0) + 1;
-                    let keep = v_start < r_e as i64 && v_end > r_s as i64;
-                    if keep {
-                        v_idxs.push(vidx);
-                    }
-                }
-                row_offsets.push(v_idxs.len() as i64);
-            }
-        }
-
-        let v_idxs = Array1::from_vec(v_idxs);
-        let row_offsets = Array1::from_vec(row_offsets);
-
-        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
-            v_idxs.view(),
-            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
-            ndarray::ArrayView1::from(slot.ilens.as_slice()),
-            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
-            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
-        );
-
-        Ok(VariantsBatch {
-            alt_data,
-            alt_seq_offsets,
-            start,
-            ilen,
-            row_offsets,
-        })
-    }
-}
-
-/// Flat variant buffers for a `[row_lo, row_hi)` batch row slice (Wave B PR-B1):
-/// `alt_data`/`alt_seq_offsets` are the ragged ALT bytes (`gather_alleles`-shaped, one
-/// entry per kept variant), `start`/`ilen` are one scalar per kept variant (same order),
-/// and `row_offsets` delimits kept variants per `(row, ploid)` output row (length
-/// `n_rows*ploidy + 1` — phased ploidy, no unphased-union fold yet). No dataset-global id:
-/// variants output is self-contained (issue #313).
-pub struct VariantsBatch {
-    pub alt_data: Array1<u8>,
-    pub alt_seq_offsets: Array1<i64>,
-    pub start: Array1<i32>,
-    pub ilen: Array1<i32>,
-    pub row_offsets: Array1<i64>,
 }
 
 impl EngineBackend for RecordBackend {
@@ -308,6 +226,80 @@ impl EngineBackend for RecordBackend {
             self.parallel,
         ))
     }
+
+    /// Wave B PR-B1: generate the `[row_lo, row_hi)` slice of this window's rows as flat
+    /// VARIANT buffers rather than reconstructed haplotype bytes — the variants-output
+    /// counterpart of `generate` above. Same row->region->CSR mapping as `generate`
+    /// (`bi = ri*n_samples + si`, per-hap CSR replicated across regions — see that method's
+    /// doc comment), but instead of feeding the per-hap runs through `generate_batch_core`'s
+    /// haplotype-reconstruction kernel, this walks each row's `ploidy` haps directly and
+    /// keeps only the window-local variants whose extent overlaps the row's region
+    /// (`src/genotypes/mod.rs:68-74`'s `v_end = v_start - v_ilen.min(0) + 1`, keep iff
+    /// `v_start < r_e && v_end > r_s` — NOT `reconstruct::mod.rs`'s exonic containment
+    /// check, which is a different predicate despite sharing the `v_end` formula). Assumes
+    /// phased ploidy: one output row per `(row, ploid)`, so `row_offsets` has length
+    /// `(row_hi-row_lo)*ploidy + 1`.
+    fn generate_variants(
+        &self,
+        job_idx: usize,
+        slot: &DecodedWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<VariantsBatch> {
+        if !self.variants {
+            anyhow::bail!(
+                "RecordStreamEngine.next_batch_variants() called on an engine constructed \
+                 with variants=false"
+            );
+        }
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+
+        let mut v_idxs: Vec<i32> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy + 1);
+        row_offsets.push(0);
+
+        for bi in row_lo..row_hi {
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let si = bi % n_samples;
+            for p in 0..self.ploidy {
+                let h = si * self.ploidy + p;
+                let csr_lo = slot.geno_offsets[h] as usize;
+                let csr_hi = slot.geno_offsets[h + 1] as usize;
+                for &vidx in &slot.geno_v_idxs[csr_lo..csr_hi] {
+                    let v_start = slot.v_starts[vidx as usize] as i64;
+                    let v_ilen = slot.ilens[vidx as usize] as i64;
+                    let v_end = v_start - v_ilen.min(0) + 1;
+                    let keep = v_start < r_e as i64 && v_end > r_s as i64;
+                    if keep {
+                        v_idxs.push(vidx);
+                    }
+                }
+                row_offsets.push(v_idxs.len() as i64);
+            }
+        }
+
+        let v_idxs = Array1::from_vec(v_idxs);
+        let row_offsets = Array1::from_vec(row_offsets);
+
+        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
+            v_idxs.view(),
+            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+            ndarray::ArrayView1::from(slot.ilens.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+        );
+
+        Ok(VariantsBatch {
+            alt_data,
+            alt_seq_offsets,
+            start,
+            ilen,
+            row_offsets,
+        })
+    }
 }
 
 /// Producer/consumer record-stream engine (issue #276 task 3b). Python surface (issue
@@ -362,6 +354,14 @@ impl RecordStreamEngine {
     ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
     {
         self.core.next_batch_core()
+    }
+
+    /// Variants-output counterpart of `next_batch_core` (Wave B PR-B1): returns the next
+    /// batch's flat `VariantsBatch` buffers, or `None` when the plan is exhausted.
+    /// Delegates to the shared core; see `stream_core`'s doc comment for the
+    /// exhaustion/error/panic classification contract.
+    pub fn next_batch_variants_core(&self) -> Option<anyhow::Result<VariantsBatch>> {
+        self.core.next_batch_variants_core()
     }
 }
 
@@ -575,6 +575,33 @@ impl RecordStreamEngine {
                     "RecordStreamEngine.next_batch_annotated() called on an engine \
                      constructed with annotated=false",
                 ))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Variants-output counterpart of `next_batch` (Wave B PR-B1): returns a `dict` with
+    /// keys `alt` (u8), `alt_offsets` (i64, ragged ALT-byte boundaries), `start` (i32),
+    /// `ilen` (i32), `offsets` (i64, per-`(row, ploid)` variant-count boundaries) — or
+    /// `None` when the plan is exhausted. Only valid when the engine was constructed with
+    /// `variants=true` — otherwise this raises `RuntimeError` (a caller bug, not a data
+    /// condition; `StreamingDataset._iter_batches` never calls this unless `variants` was
+    /// passed to `build_engine`).
+    fn next_batch_variants<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let out = py.detach(|| self.next_batch_variants_core());
+        match out {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let dict = PyDict::new(py);
+                dict.set_item("alt", batch.alt_data.into_pyarray(py))?;
+                dict.set_item("alt_offsets", batch.alt_seq_offsets.into_pyarray(py))?;
+                dict.set_item("start", batch.start.into_pyarray(py))?;
+                dict.set_item("ilen", batch.ilen.into_pyarray(py))?;
+                dict.set_item("offsets", batch.row_offsets.into_pyarray(py))?;
+                Ok(Some(dict))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
