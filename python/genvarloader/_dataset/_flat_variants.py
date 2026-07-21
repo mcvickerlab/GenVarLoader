@@ -832,8 +832,10 @@ def get_variants_flat(
     # indels; for PGEN, other variants on the same contig). Clip to the same set the
     # haplotype reconstruction uses: a variant [v_start, v_end) is kept iff it overlaps
     # the region window [r_start, r_end), with v_end = v_start - min(ilen, 0) + 1
-    # (matches src/reconstruct/mod.rs). regions is None on the no-region call path
-    # (_haps.py get_variants_flat(self, idx)); skip the clip there.
+    # (v_end formula matches src/reconstruct/mod.rs:705; the two-sided overlap keep
+    # matches the skip/break logic in src/genotypes/mod.rs:68-74). regions is None
+    # on the no-region call path (_haps.py get_variants_flat(self, idx)); skip the
+    # clip there.
     if regions is not None:
         regions_arr = np.asarray(regions)
         # Per (b*ploidy) row region extents (C-order: b cells, each ploidy rows).

@@ -1,7 +1,6 @@
 """#202: written `with_seqs("variants")` must clip variants to the region window."""
 
 import numpy as np
-import polars as pl
 
 import genvarloader as gvl
 
@@ -16,22 +15,22 @@ import genvarloader as gvl
 #   region 0 [0,90)   -> contains pos 29, 69
 #   region 1 [90,170) -> contains pos 109 (extent [109,113)) and both pos-149 atoms
 #   region 2 [170,250) -> no variants
-_NARROW_REGIONS = pl.DataFrame(
-    {
-        "chrom": ["chr1", "chr1", "chr1"],
-        "chromStart": [0, 90, 170],
-        "chromEnd": [90, 170, 250],
-    }
-)
+# Use the `vcf_snp_ins_del_multi_regions` fixture: narrow disjoint regions on
+# the same contig with exactly this breakdown (it and `pgen_snp_ins_del_multi`
+# both derive from `_VCF_PARITY_REF` / the same underlying data).
 
 
-def test_written_variants_are_clipped_to_window(pgen_snp_ins_del_multi, tmp_path):
+def test_written_variants_are_clipped_to_window(
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions, tmp_path
+):
     """Every returned variant's extent overlaps its cell's region window (#202)."""
     f = pgen_snp_ins_del_multi
-    gvl.write(tmp_path / "ds", _NARROW_REGIONS, variants=str(f.pgen))
+    gvl.write(tmp_path / "ds", vcf_snp_ins_del_multi_regions, variants=str(f.pgen))
     ds = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta).with_seqs("variants")
 
-    regions = np.asarray(_NARROW_REGIONS.select(["chromStart", "chromEnd"]).to_numpy())
+    regions = np.asarray(
+        vcf_snp_ins_del_multi_regions.select(["chromStart", "chromEnd"]).to_numpy()
+    )
     n_regions, n_samples = ds.shape
 
     for r in range(n_regions):
@@ -52,10 +51,10 @@ def test_written_variants_are_clipped_to_window(pgen_snp_ins_del_multi, tmp_path
 
 
 def test_annotated_variants_are_a_subset_of_clipped_variants(
-    pgen_snp_ins_del_multi, tmp_path
+    pgen_snp_ins_del_multi, vcf_snp_ins_del_multi_regions, tmp_path
 ):
     f = pgen_snp_ins_del_multi
-    gvl.write(tmp_path / "ds", _NARROW_REGIONS, variants=str(f.pgen))
+    gvl.write(tmp_path / "ds", vcf_snp_ins_del_multi_regions, variants=str(f.pgen))
     base = gvl.Dataset.open(tmp_path / "ds", reference=f.fasta)
     ann = base.with_seqs("annotated")
     var = base.with_seqs("variants")
