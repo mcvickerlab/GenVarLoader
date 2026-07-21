@@ -156,33 +156,6 @@ def get_dataloader(
             "the loader IS the concurrency strategy"
         )
 
-    # 'variant-windows' and flat variants+flank_tokens cannot yet ride the
-    # double_buffered transport (the producer schema / shm format do not carry
-    # the VarWindowOpt or the flank tokens). buffered runs in-process and does.
-    if (
-        mode == "double_buffered"
-        and getattr(dataset, "sequence_type", None) == "variant-windows"
-    ):
-        raise ValueError(
-            "mode='double_buffered' does not support 'variant-windows' output yet: the "
-            "producer schema/shared-memory format cannot carry the VarWindowOpt. Use "
-            "mode='buffered' (in-process) or mode=None."
-        )
-    if (
-        mode == "double_buffered"
-        and getattr(dataset, "output_format", "ragged") == "flat"
-        and getattr(dataset, "sequence_type", None) == "variants"
-    ):
-        _seqs = getattr(dataset, "_seqs", None)
-        if (
-            getattr(_seqs, "flank_length", None)
-            and getattr(_seqs, "token_lut", None) is not None
-        ):
-            raise ValueError(
-                "mode='double_buffered' with output_format='flat' does not support variants "
-                "output carrying ride-along flank tokens yet; use mode='buffered' or mode=None."
-            )
-
     # When the caller passes a BatchSampler directly, use its batch_size so the
     # buffered loader re-batches at the granularity the sampler intended. This
     # mirrors the mode=None path, where the sampler governs batching too.

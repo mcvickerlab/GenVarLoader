@@ -461,3 +461,74 @@ def test_reshape_ragged_for_chunk_passes_variant_windows():
     out = _reshape_ragged_for_chunk([fvw], n_instances=2)[0]
     assert isinstance(out, _FlatVariantWindows)
     assert out.ref_window is not None and out.ref_window.shape[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# PR2: variant-windows and flank-token parity over double_buffered
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("ref,alt", [("window", "window"), ("window", "allele")])
+def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, alt):
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref,
+                alt=alt,
+            ),
+        )
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
+def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
+    # unknown_token=len(token_alphabet) (outside the alphabet's own token range) --
+    # not unknown_token=0 as in the buffered-mode analog
+    # (test_buffered_variants_flank_tokens_matches_per_item). double_buffered's
+    # producer schema only has Haps.token_lut (a 256-entry byte->token LUT) to work
+    # with, not the original token_alphabet bytes, so it recovers the alphabet from
+    # the LUT (_token_alphabet_from_lut in _double_buffered_loader.py). That recovery
+    # is provably lossy whenever unknown_token collides with a *non-last* alphabet
+    # symbol's own token id (unknown_token=0 collides with 'A' in b"ACGT") and
+    # correctly raises rather than silently reconstructing the wrong LUT -- a
+    # pre-existing, documented limitation of that helper, not something this task
+    # touches. See _token_alphabet_from_lut's docstring for the full contract.
+    ds = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=4)
+        .with_output_format("flat")
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        # Values are ragged (variable ploidy/length) across instances in this
+        # file-backed dataset, so a plain nested-list comparison is used instead of
+        # np.testing.assert_array_equal, which raises ValueError trying to build a
+        # homogeneous ndarray from a jagged nested list rather than comparing it.
+        assert (
+            b.flank_tokens.to_ragged().to_ak().to_list()
+            == d.flank_tokens.to_ragged().to_ak().to_list()
+        )
