@@ -195,3 +195,50 @@ def test_build_producer_schema_flank_tokens_roundtrips_colliding_unknown_token()
     assert rebuilt._seqs.flank_length == ds._seqs.flank_length
     assert rebuilt._seqs.unknown_token == ds._seqs.unknown_token
     assert (rebuilt._seqs.token_lut == ds._seqs.token_lut).all()
+
+
+def test_build_producer_schema_dummy_variant_roundtrips():
+    """Regression: dummy_variant must be replayed by the double_buffered producer.
+
+    ``_build_producer_schema``/``_apply_schema`` previously had no
+    ``dummy_variant`` handling at all: the producer subprocess reopened the
+    dataset and replayed every other setting, but silently dropped
+    ``dummy_variant``, so double_buffered's output diverged from
+    ``buffered``/``mode=None`` for any dataset with empty (region, sample,
+    ploid) groups -- not a crash, a silent data-correctness bug. Must
+    round-trip exactly for both ``variants`` and ``variant-windows``.
+    """
+    dummy_ds = gvl.get_dummy_dataset().with_tracks(False)
+    dv = gvl.DummyVariant(start=-1, ilen=0, dosage=0.5, ref=b"N", alt=b"NN")
+    ds = (
+        dummy_ds.with_seqs("variants")
+        .with_settings(dummy_variant=dv)
+        .with_output_format("flat")
+    )
+
+    schema = _build_producer_schema(ds)
+
+    assert schema["dummy_variant"] == {
+        "start": -1,
+        "ilen": 0,
+        "dosage": 0.5,
+        "ref": b"N",
+        "alt": b"NN",
+        "info": {},
+    }
+
+    rebuilt = _apply_schema(dummy_ds, schema)
+    assert rebuilt._seqs.dummy_variant == dv
+
+
+def test_build_producer_schema_no_dummy_variant_omits_key():
+    """No dummy_variant set -> no "dummy_variant" key (mirrors the other optional fields)."""
+    dummy_ds = gvl.get_dummy_dataset().with_tracks(False)
+    ds = dummy_ds.with_seqs("variants").with_output_format("flat")
+
+    schema = _build_producer_schema(ds)
+
+    assert "dummy_variant" not in schema
+
+    rebuilt = _apply_schema(dummy_ds, schema)
+    assert rebuilt._seqs.dummy_variant is None

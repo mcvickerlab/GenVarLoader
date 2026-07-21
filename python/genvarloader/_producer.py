@@ -42,6 +42,10 @@ def _apply_schema(ds, schema: dict):
         settings_kwargs["flank_length"] = schema["flank_length"]
         settings_kwargs["token_alphabet"] = schema["token_alphabet"]
         settings_kwargs["unknown_token"] = schema["unknown_token"]
+    if schema.get("dummy_variant") is not None:
+        from ._dataset._flat_variants import DummyVariant
+
+        settings_kwargs["dummy_variant"] = DummyVariant(**schema["dummy_variant"])
     if settings_kwargs:
         ds = ds.with_settings(**settings_kwargs)
     return ds

@@ -1457,6 +1457,57 @@ class Dataset:
                 n_allele_fields = sum(1 for f in var_fields if f in ("alt", "ref"))
                 offset_total += OFF * ploidy * len(var_fields)
                 offset_total += OFF * n_vars_total * n_allele_fields
+            # dummy-variant empty-group fill: a (region, sample, ploid) group
+            # with 0 real variants still emits one dummy row when
+            # dummy_variant is active (see Haps.dummy_variant /
+            # _FlatVariants.fill_empty_groups). n_vars_total above is the
+            # *real* on-disk count and is 0 for such groups, so it misses the
+            # dummy row's payload (and, for alt/ref, its extra inner offset
+            # entry) entirely -- undercounting the double_buffered slot.
+            dummy = getattr(haps_obj, "dummy_variant", None)
+            if dummy is not None:
+                n_empty = (n_vars_flat == 0).sum(-1).astype(np.int64)  # (n_inst,)
+                for f in var_fields:
+                    if f == "start":
+                        total += n_empty * haps_obj.variants.start.dtype.itemsize
+                    elif f == "ilen":
+                        total += n_empty * haps_obj.variants.ilen.dtype.itemsize
+                    elif f == "dosage":
+                        if haps_obj.dosages is None:
+                            continue
+                        total += n_empty * haps_obj.dosages.data.dtype.itemsize
+                    elif f == "alt":
+                        total += n_empty * len(dummy.alt)
+                    elif f == "ref":
+                        total += n_empty * len(dummy.ref)
+                    else:
+                        from ._svar2_haps import Svar2Haps
+
+                        if (
+                            isinstance(haps_obj, Svar2Haps)
+                            and f in haps_obj.store_fields
+                        ):
+                            info_dtype = haps_obj.store_fields[f].dtype
+                        else:
+                            info_dtype = haps_obj.variants.info[f].dtype
+                        total += n_empty * info_dtype.itemsize
+                if (
+                    getattr(haps_obj, "flank_length", 0)
+                    and haps_obj.token_lut is not None
+                ):
+                    dummy_L = int(haps_obj.flank_length)
+                    dummy_ft_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+                    total += n_empty * 2 * dummy_L * dummy_ft_itemsize
+                if include_offsets:
+                    # Only alt/ref inner offsets grow (+1 entry/empty group);
+                    # scalar and flank_tokens offsets are fixed-length (b*p+1)
+                    # regardless of fill, already covered above. Recomputed
+                    # (not reused from the include_offsets block above) so
+                    # this branch stands alone for the static analyzer.
+                    dummy_n_allele_fields = sum(
+                        1 for f in var_fields if f in ("alt", "ref")
+                    )
+                    offset_total += OFF * n_empty * dummy_n_allele_fields
         elif seq_kind == "variant-windows":
             if not isinstance(self._seqs, Haps):
                 raise AssertionError("variant-windows mode requires Haps")
@@ -1559,6 +1610,44 @@ class Dataset:
                 offset_total += (
                     OFF * n_vars_total * n_window_slots
                 )  # inner (per-variant) offsets
+            # dummy-variant empty-group fill (see the "variants" branch above
+            # for the full rationale): a group with 0 real variants still
+            # gets one dummy window/allele entry per window slot when
+            # dummy_variant is active. Window slots (opt.*="window") get a
+            # full 2L-flanked dummy window; bare-allele slots (opt.*="allele")
+            # get just the dummy allele's tokens.
+            dummy = getattr(haps_obj, "dummy_variant", None)
+            if dummy is not None:
+                n_empty = (n_vars_flat == 0).sum(-1).astype(np.int64)  # (n_inst,)
+                ref_dummy_tok = (
+                    (2 * L + len(dummy.ref)) if opt.ref == "window" else len(dummy.ref)
+                )
+                alt_dummy_tok = (
+                    (2 * L + len(dummy.alt)) if opt.alt == "window" else len(dummy.alt)
+                )
+                total += n_empty * (ref_dummy_tok + alt_dummy_tok) * tok_itemsize
+                for f in haps_obj.var_fields:
+                    if f in ("alt", "ref"):
+                        continue
+                    if f == "start":
+                        total += n_empty * haps_obj.variants.start.dtype.itemsize
+                    elif f == "ilen":
+                        total += n_empty * haps_obj.variants.ilen.dtype.itemsize
+                    elif f == "dosage":
+                        if haps_obj.dosages is None:
+                            continue
+                        total += n_empty * haps_obj.dosages.data.dtype.itemsize
+                    else:
+                        total += n_empty * haps_obj.variants.info[f].dtype.itemsize
+                if include_offsets:
+                    # Only the window slots' inner (per-variant) offsets grow
+                    # (+1 entry/empty group); scalar offsets are fixed-length
+                    # (b*p+1) regardless of fill, already covered above.
+                    # Recomputed (not reused from the include_offsets block
+                    # above) so this branch stands alone for the static
+                    # analyzer.
+                    dummy_n_window_slots = 2  # exactly one ref-slot + one alt-slot
+                    offset_total += OFF * n_empty * dummy_n_window_slots
         elif seq_kind is None:
             pass
         else:

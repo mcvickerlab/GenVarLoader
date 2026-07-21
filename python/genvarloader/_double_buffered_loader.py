@@ -130,6 +130,20 @@ def _build_producer_schema(ds: "Dataset") -> dict:
             schema["token_alphabet"] = seqs.token_alphabet
             schema["unknown_token"] = seqs.unknown_token
 
+        dummy_variant = getattr(seqs, "dummy_variant", None)
+        if dummy_variant is not None:
+            # Emitted as a plain field dict (not the DummyVariant object itself)
+            # to match the window_opt/flank-tokens pattern above -- the producer
+            # subprocess rebuilds it via ``DummyVariant(**schema["dummy_variant"])``.
+            schema["dummy_variant"] = {
+                "start": dummy_variant.start,
+                "ilen": dummy_variant.ilen,
+                "dosage": dummy_variant.dosage,
+                "ref": dummy_variant.ref,
+                "alt": dummy_variant.alt,
+                "info": dict(dummy_variant.info),
+            }
+
     ref = getattr(ds, "reference", None)
     if ref is not None:
         ref_path = getattr(ref, "path", None)

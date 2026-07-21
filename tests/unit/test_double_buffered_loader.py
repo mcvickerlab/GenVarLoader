@@ -527,3 +527,104 @@ def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
             b.flank_tokens.to_ragged().to_ak().to_list()
             == d.flank_tokens.to_ragged().to_ak().to_list()
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 2.6: slot-fit regression -- byte accounting must not undersize slots
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_double_buffered_variant_windows_slot_fits(file_backed_ds):
+    """Regression: variant-windows byte accounting must not undersize double_buffered slots.
+
+    Mirrors ``test_double_buffered_variants_offset_overflow_regression`` but for
+    the newer ``variant-windows`` flat output. A small ``buffer_bytes`` forces
+    tight slots; if Task 1.1's windows byte accounting under-estimates the
+    serialized footprint, the producer raises ``ProducerError (ValueError):
+    buffer is smaller than requested size``.
+    """
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    # Must not raise ProducerError (buffer too small) -- byte accounting must not undersize.
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+
+
+@pytest.mark.slow
+def test_double_buffered_dummy_variant_windows_slot_fits(file_backed_ds):
+    """Regression: dummy_variant fill must be counted in the windows byte accounting.
+
+    ``_output_bytes_per_instance`` sizes the double_buffered slot from the
+    dataset's *real* (on-disk) variant counts. When ``dummy_variant`` is set
+    and a (region, sample, ploid) group has zero real variants, the flat
+    builder inserts one dummy row (a full ``2*flank_length + len(dummy allele)``
+    token window per window slot) into that otherwise-empty group -- extra
+    bytes the accounting must include or double_buffered's fixed slot can
+    overflow under a tight buffer even though ``buffered`` mode (which never
+    serializes into a fixed slot) is unaffected. ``snap_dataset``-style
+    fixtures built from ``synthetic_case`` are known to contain empty groups
+    in the first few (region, sample) pairs (see
+    ``test_b_dummy_fill_no_empty_groups`` in
+    ``tests/dataset/test_flat_mode_equivalence.py``), so ``file_backed_ds``
+    (same underlying data) exercises the dummy-fill path without any extra
+    fixture construction.
+    """
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(dummy_variant=dv)
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
+def test_double_buffered_dummy_variant_flank_tokens_slot_fits(file_backed_ds):
+    """Regression: dummy_variant fill must be counted for flat ``variants`` + flank_tokens too.
+
+    Same accounting gap as ``test_double_buffered_dummy_variant_windows_slot_fits``,
+    but for the sibling ``variants`` branch of ``_output_bytes_per_instance``
+    (Config B: flat ``variants`` output with ride-along ``flank_tokens``). A
+    dummy-filled empty group contributes a dummy allele's worth of alt/ref
+    bytes plus a full ``2*flank_length`` token ``flank_tokens`` row that the
+    accounting must not omit.
+    """
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
+    ds = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(
+            dummy_variant=dv, flank_length=2, token_alphabet=b"ACGT", unknown_token=4
+        )
+        .with_output_format("flat")
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        assert (
+            b.flank_tokens.to_ragged().to_ak().to_list()
+            == d.flank_tokens.to_ragged().to_ak().to_list()
+        )
