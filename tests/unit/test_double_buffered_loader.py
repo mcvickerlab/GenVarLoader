@@ -536,13 +536,24 @@ def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
 
 @pytest.mark.slow
 def test_double_buffered_variant_windows_slot_fits(file_backed_ds):
-    """Regression: variant-windows byte accounting must not undersize double_buffered slots.
+    """Content-parity + no-raise check: double_buffered variant-windows vs. buffered.
 
     Mirrors ``test_double_buffered_variants_offset_overflow_regression`` but for
-    the newer ``variant-windows`` flat output. A small ``buffer_bytes`` forces
-    tight slots; if Task 1.1's windows byte accounting under-estimates the
-    serialized footprint, the producer raises ``ProducerError (ValueError):
-    buffer is smaller than requested size``.
+    the newer ``variant-windows`` flat output. Confirms ``double_buffered``
+    does not raise and its chunk count matches ``buffered`` under a
+    moderately tight ``buffer_bytes``.
+
+    This does NOT tightly pin the byte-accounting bound in
+    ``_output_bytes_per_instance``: on this small (~10 region x 3 sample)
+    fixture, the shm slot's fixed ~8KB slack (``HEADER_RESERVED`` + 4096, see
+    ``_double_buffered_loader.py``) absorbs under-estimates far larger than
+    anything this fixture can produce, so an under-count here would not
+    reliably surface as ``ProducerError``. The direct, slack-free bound check
+    lives in ``tests/unit/dataset/test_output_bytes_dummy_variant.py``
+    (compares ``_output_bytes_per_instance(..., include_offsets=True)``
+    straight against ``_shm_layout.write_chunk``'s real output, no subprocess
+    or fixed slack involved) -- that file is what actually guards the
+    byte-accounting fix.
     """
     ds = (
         file_backed_ds.with_tracks(False)
@@ -561,22 +572,25 @@ def test_double_buffered_variant_windows_slot_fits(file_backed_ds):
 
 @pytest.mark.slow
 def test_double_buffered_dummy_variant_windows_slot_fits(file_backed_ds):
-    """Regression: dummy_variant fill must be counted in the windows byte accounting.
+    """Content-parity + no-raise check: double_buffered variant-windows + dummy_variant.
 
-    ``_output_bytes_per_instance`` sizes the double_buffered slot from the
-    dataset's *real* (on-disk) variant counts. When ``dummy_variant`` is set
-    and a (region, sample, ploid) group has zero real variants, the flat
-    builder inserts one dummy row (a full ``2*flank_length + len(dummy allele)``
-    token window per window slot) into that otherwise-empty group -- extra
-    bytes the accounting must include or double_buffered's fixed slot can
-    overflow under a tight buffer even though ``buffered`` mode (which never
-    serializes into a fixed slot) is unaffected. ``snap_dataset``-style
-    fixtures built from ``synthetic_case`` are known to contain empty groups
-    in the first few (region, sample) pairs (see
-    ``test_b_dummy_fill_no_empty_groups`` in
-    ``tests/dataset/test_flat_mode_equivalence.py``), so ``file_backed_ds``
-    (same underlying data) exercises the dummy-fill path without any extra
-    fixture construction.
+    When ``dummy_variant`` is set and a (region, sample, ploid) group has
+    zero real variants, the flat builder inserts one dummy row (a full
+    ``2*flank_length + len(dummy allele)`` token window per window slot) into
+    that otherwise-empty group. This test confirms ``double_buffered``
+    doesn't raise and matches ``buffered`` element-for-element on this
+    fixture (``snap_dataset``-style fixtures built from ``synthetic_case``
+    are known to contain empty groups in the first few (region, sample)
+    pairs -- see ``test_b_dummy_fill_no_empty_groups`` in
+    ``tests/dataset/test_flat_mode_equivalence.py`` -- so ``file_backed_ds``
+    exercises the dummy-fill path without any extra fixture construction).
+
+    Like ``test_double_buffered_variant_windows_slot_fits``, this does NOT
+    tightly pin the byte-accounting bound -- the fixed shm slack absorbs
+    under-estimates on a fixture this small. See
+    ``tests/unit/dataset/test_output_bytes_dummy_variant.py`` for the direct,
+    slack-free bound check (including the AF-filter + dummy_variant
+    interaction, which this fixture's raw-empty-only groups don't exercise).
     """
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
     ds = (
@@ -601,14 +615,20 @@ def test_double_buffered_dummy_variant_windows_slot_fits(file_backed_ds):
 
 @pytest.mark.slow
 def test_double_buffered_dummy_variant_flank_tokens_slot_fits(file_backed_ds):
-    """Regression: dummy_variant fill must be counted for flat ``variants`` + flank_tokens too.
+    """Content-parity + no-raise check: double_buffered variants + flank_tokens + dummy_variant.
 
-    Same accounting gap as ``test_double_buffered_dummy_variant_windows_slot_fits``,
+    Same shape as ``test_double_buffered_dummy_variant_windows_slot_fits``,
     but for the sibling ``variants`` branch of ``_output_bytes_per_instance``
     (Config B: flat ``variants`` output with ride-along ``flank_tokens``). A
     dummy-filled empty group contributes a dummy allele's worth of alt/ref
-    bytes plus a full ``2*flank_length`` token ``flank_tokens`` row that the
-    accounting must not omit.
+    bytes plus a full ``2*flank_length`` token ``flank_tokens`` row.
+
+    As with the other slot-fit tests in this section, this checks content
+    parity + no-raise, not the byte-accounting bound itself (the fixed shm
+    slack on this fixture absorbs under-estimates too small to trip
+    ``ProducerError`` here) -- see
+    ``tests/unit/dataset/test_output_bytes_dummy_variant.py`` for the direct
+    bound check.
     """
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
     ds = (
