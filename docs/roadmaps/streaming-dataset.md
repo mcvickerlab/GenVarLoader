@@ -545,6 +545,23 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   remains window-local** — genoray's VCF reader hard-codes `global_idx = -1` — real VCF
   global ids are **Phase 3**, not yet landed. `var_base` itself has been fully retired
   (Task 2.5 close-out).
+- 🚧 **Variants-output surface, Wave B — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Plan:
+  `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
+  design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
+  Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
+  ✅ **done** — `get_variants_flat` folded a region-overlap keep mask into the existing AF
+  `keep`/`_compact_keep` block (matches `src/reconstruct/mod.rs`'s inclusion extent). Serves
+  as the byte-identical parity oracle for **PR-B1** (streaming `with_seqs("variants")`), next.
+  **Verification caveat:** with the currently-pinned genoray rev, the described PGEN
+  "contig-scoped" leak could not be reproduced end-to-end through `gvl.write()` +
+  `Dataset.open()` for disjoint narrow regions (write-time `pgen.var_idxs`/`.chunk` are
+  already position-scoped) — the added tests (`tests/dataset/test_variants_region_clip.py`)
+  are an invariant/regression guard rather than a literal pre-fix repro; the fix is still
+  correct defense-in-depth and a verified no-op on all currently-passing scenarios. Follow-up
+  filed for the still-unclipped `get_variants_flat(self, idx)` no-region call site
+  (`_haps.py:676`, reached via `with_seqs("variants").with_tracks(...)`) — issue
+  [#314](https://github.com/mcvickerlab/GenVarLoader/issues/314).
 
 ## Sequencing
 
