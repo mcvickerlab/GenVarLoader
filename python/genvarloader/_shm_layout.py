@@ -322,6 +322,26 @@ def _pack_descriptor(d: dict) -> bytes:
             )
             out += fname
 
+    if kind == 4:
+        field_descs = d["_field_descs"]
+        out += struct.pack("<B", len(field_descs))
+        for fd in field_descs:
+            fname = fd["name"]
+            out += struct.pack(
+                "<B4s7QB",
+                fd["field_kind"],
+                fd["dtype_str"],
+                fd["outer_offsets_offset"],
+                fd["outer_offsets_nbytes"],
+                fd["inner_offsets_offset"],
+                fd["inner_offsets_nbytes"],
+                fd["data_offset"],
+                fd["data_nbytes"],
+                fd["regular_size"],
+                len(fname),
+            )
+            out += fname
+
     if kind == 3:
         sub_descs = d["_sub_descs"]
         out += struct.pack("<B", len(sub_descs))
@@ -358,7 +378,7 @@ def write_chunk(
     from ._dataset._rag_variants import RaggedVariants
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
-    from ._dataset._flat_variants import _FlatVariants
+    from ._dataset._flat_variants import _FlatVariants, _FlatVariantWindows
 
     if len(arrays) > 255:
         raise ValueError("at most 255 arrays per chunk")
@@ -367,7 +387,9 @@ def write_chunk(
     cursor = HEADER_RESERVED
 
     for a in arrays:
-        if isinstance(a, _FlatVariants):
+        if isinstance(a, _FlatVariantWindows):
+            desc, cursor = _write_flat_variant_windows(buf, a, cursor)
+        elif isinstance(a, _FlatVariants):
             desc, cursor = _write_flat_variants(buf, a, cursor)
         elif isinstance(a, RaggedVariants):
             desc, cursor = _write_rag_variants(buf, a, cursor)
@@ -436,6 +458,45 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
     }
 
     if kind == 2:
+        (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
+        cursor += 1
+        field_descs = []
+        for _ in range(n_fields):
+            (field_kind,) = struct.unpack_from("<B", buf_bytes, cursor)
+            cursor += 1
+            fdtype_str = bytes(buf_bytes[cursor : cursor + 4])
+            cursor += 4
+            (
+                outer_offsets_offset,
+                outer_offsets_nbytes,
+                inner_offsets_offset_fd,
+                inner_offsets_nbytes_fd,
+                fd_data_offset,
+                fd_data_nbytes,
+                regular_size,
+            ) = struct.unpack_from("<7Q", buf_bytes, cursor)
+            cursor += 56
+            (fname_len,) = struct.unpack_from("<B", buf_bytes, cursor)
+            cursor += 1
+            fname = bytes(buf_bytes[cursor : cursor + fname_len]).decode("utf-8")
+            cursor += fname_len
+            field_descs.append(
+                {
+                    "field_kind": field_kind,
+                    "dtype_str": fdtype_str,
+                    "outer_offsets_offset": outer_offsets_offset,
+                    "outer_offsets_nbytes": outer_offsets_nbytes,
+                    "inner_offsets_offset": inner_offsets_offset_fd,
+                    "inner_offsets_nbytes": inner_offsets_nbytes_fd,
+                    "data_offset": fd_data_offset,
+                    "data_nbytes": fd_data_nbytes,
+                    "regular_size": regular_size,
+                    "name": fname,
+                }
+            )
+        d["_field_descs"] = field_descs
+
+    if kind == 4:
         (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
         cursor += 1
         field_descs = []
@@ -692,6 +753,108 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
     }, cursor
 
 
+def _write_flat_variant_windows(buf: memoryview, fvw, cursor: int) -> tuple[dict, int]:
+    """Write a _FlatVariantWindows into buf as a kind=4 block.
+
+    Reuses the kind=2 FieldDescriptor format: window slots (``ref_window``,
+    ``alt_window``, ``ref``, ``alt``) serialize like kind=2 allele fields
+    (field_kind=1: outer=var_offsets, inner=seq_offsets, data=tokens); scalar
+    ``.fields`` serialize like kind=2 numeric fields (field_kind=0).
+
+    Args:
+        buf: The memoryview of the shared-memory slot.
+        fvw: The _FlatVariantWindows to serialize.
+        cursor: Byte offset at which to begin writing the payload.
+
+    Returns:
+        Tuple of (descriptor dict, updated cursor).
+    """
+    from ._dataset._flat_variants import _WINDOW_FIELD_NAMES
+
+    field_descs: list[dict] = []
+
+    def _emit_two_level(name, data, seq_off, var_off, regular_size):
+        nonlocal cursor
+        outer = np.ascontiguousarray(var_off, np.int64)
+        inner = np.ascontiguousarray(seq_off, np.int64)
+        leaf = np.ascontiguousarray(data)
+        cursor = _align(cursor)
+        outer_off = cursor
+        np.frombuffer(buf, np.int64, outer.size, outer_off)[...] = outer
+        cursor += outer.nbytes
+        cursor = _align(cursor)
+        inner_off = cursor
+        np.frombuffer(buf, np.int64, inner.size, inner_off)[...] = inner
+        cursor += inner.nbytes
+        cursor = _align(cursor)
+        data_off = cursor
+        np.frombuffer(buf, leaf.dtype, leaf.size, data_off)[...] = leaf.ravel()
+        cursor += leaf.nbytes
+        field_descs.append(
+            {
+                "field_kind": 1,
+                "dtype_str": _dtype_to_bytes(leaf.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer.nbytes,
+                "inner_offsets_offset": inner_off,
+                "inner_offsets_nbytes": inner.nbytes,
+                "data_offset": data_off,
+                "data_nbytes": leaf.nbytes,
+                "regular_size": regular_size,
+                "name": name.encode("utf-8"),
+            }
+        )
+
+    # scalar .fields first (numeric, field_kind=0) — mirror _write_flat_variants
+    for name, f in fvw.fields.items():
+        outer = np.ascontiguousarray(f.offsets, np.int64)
+        leaf = np.ascontiguousarray(f.data)
+        cursor = _align(cursor)
+        outer_off = cursor
+        np.frombuffer(buf, np.int64, outer.size, outer_off)[...] = outer
+        cursor += outer.nbytes
+        cursor = _align(cursor)
+        data_off = cursor
+        np.frombuffer(buf, leaf.dtype, leaf.size, data_off)[...] = leaf.ravel()
+        cursor += leaf.nbytes
+        field_descs.append(
+            {
+                "field_kind": 0,
+                "dtype_str": _dtype_to_bytes(leaf.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer.nbytes,
+                "inner_offsets_offset": 0,
+                "inner_offsets_nbytes": 0,
+                "data_offset": data_off,
+                "data_nbytes": leaf.nbytes,
+                "regular_size": _flat_ploidy(f.shape),
+                "name": name.encode("utf-8"),
+            }
+        )
+
+    # present window slots (two-level, field_kind=1)
+    for slot in _WINDOW_FIELD_NAMES:
+        w = getattr(fvw, slot)
+        if w is not None:
+            _emit_two_level(
+                slot, w.data, w.seq_offsets, w.var_offsets, _flat_ploidy(w.shape)
+            )
+
+    return {
+        "kind": 4,
+        "dtype_str": b"\x00" * 4,
+        "shape": [len(field_descs)],
+        "data_offset": 0,
+        "data_nbytes": 0,
+        "offsets_offset": 0,
+        "offsets_nbytes": 0,
+        "inner_offsets_offset": 0,
+        "inner_offsets_nbytes": 0,
+        "name": b"",
+        "_field_descs": field_descs,
+    }, cursor
+
+
 def _read_rag_annotated(buf: memoryview, d: dict, copy: bool = True):
     """Reconstruct a RaggedAnnotatedHaps (kind=3) from its 3 ragged components.
 
@@ -777,6 +940,54 @@ def _read_flat_variants(buf: memoryview, d: dict, copy: bool = True):
     return _FlatVariants(fields)
 
 
+def _read_flat_variant_windows(buf: memoryview, d: dict, copy: bool = True):
+    """Reconstruct a _FlatVariantWindows from a kind=4 descriptor.
+
+    Partitions the field descriptors by name: names in ``_WINDOW_FIELD_NAMES``
+    (``ref_window``, ``alt_window``, ``ref``, ``alt``) become ``_FlatWindow``
+    slots (two-level offsets); the rest become scalar ``_Flat`` fields.
+
+    Args:
+        buf: The memoryview of the shared-memory slot.
+        d: The unpacked descriptor dict for this array (with ``_field_descs``).
+        copy: If True, returned arrays own their data instead of viewing buf.
+
+    Returns:
+        The reconstructed _FlatVariantWindows.
+    """
+    from ._flat import _Flat
+    from ._dataset._flat_variants import (
+        _FlatWindow,
+        _FlatVariantWindows,
+        _WINDOW_FIELD_NAMES,
+    )
+
+    fields: dict = {}
+    windows: dict = {}
+    for fd in d["_field_descs"]:
+        name = fd["name"]
+        leaf_dtype = _dtype_from_bytes(fd["dtype_str"])
+        rs = fd["regular_size"]
+        n_outer = fd["outer_offsets_nbytes"] // 8
+        var_off = np.frombuffer(buf, np.int64, n_outer, fd["outer_offsets_offset"])
+        leaf = np.frombuffer(
+            buf, leaf_dtype, fd["data_nbytes"] // leaf_dtype.itemsize, fd["data_offset"]
+        )
+        if copy:
+            var_off, leaf = var_off.copy(), leaf.copy()
+        n_bp = len(var_off) - 1
+        b = n_bp // rs if rs else n_bp
+        if name in _WINDOW_FIELD_NAMES:
+            n_inner = fd["inner_offsets_nbytes"] // 8
+            seq_off = np.frombuffer(buf, np.int64, n_inner, fd["inner_offsets_offset"])
+            if copy:
+                seq_off = seq_off.copy()
+            windows[name] = _FlatWindow(leaf, seq_off, var_off, (b, rs, None, None))
+        else:
+            fields[name] = _Flat(leaf, var_off, (b, rs, None))
+    return _FlatVariantWindows(fields, **windows)
+
+
 def _read_flat_annotated(buf: memoryview, d: dict, copy: bool = True):
     from ._flat import _Flat, _FlatAnnotatedHaps
 
@@ -810,12 +1021,15 @@ def read_chunk(
             (valid only while buf remains mapped and unmodified by the producer).
         flat: If True, kinds 1/2/3 reconstruct ``_Flat`` / ``_FlatVariants`` /
             ``_FlatAnnotatedHaps`` instead of the eagerly-materialized types
-            (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``).
+            (``Ragged`` / ``RaggedVariants`` / ``RaggedAnnotatedHaps``). Kind=4
+            (``_FlatVariantWindows``) has no eagerly-materialized counterpart, so
+            it always reconstructs flat regardless of this flag.
 
     Returns:
         (n_instances, [arrays...]) where arrays may be np.ndarray,
-        seqpro.rag.Ragged, RaggedVariants, _Flat, _FlatVariants, or
-        _FlatAnnotatedHaps depending on the ``flat`` flag.
+        seqpro.rag.Ragged, RaggedVariants, _Flat, _FlatVariants,
+        _FlatAnnotatedHaps, or _FlatVariantWindows depending on the ``flat``
+        flag and the array's kind.
     """
     n_inst, payload_bytes, n_arrays = _PREAMBLE.unpack_from(buf, 0)
     cursor = _PREAMBLE.size
@@ -840,6 +1054,8 @@ def read_chunk(
                     buf, d, copy=copy
                 )
             )
+        elif kind == 4:
+            views.append(_read_flat_variant_windows(buf, d, copy=copy))
         else:
             raise ValueError(f"Unknown descriptor kind {kind}")
 
