@@ -75,6 +75,30 @@ pub fn gather_alleles(
     (data, seq_offsets)
 }
 
+/// Window CSR -> flat variant buffers (issue #276 Wave B PR-B1). Shared by every
+/// streaming backend's variants-output generate path (`RecordBackend::generate_variants`
+/// for VCF/PGEN; the SVAR1 path reuses this too — see that backend's task). Takes the
+/// already-clipped, already-flat kept window-local variant indices `v_idxs` (built by the
+/// caller's per-row CSR walk + region-overlap clip — see `src/genotypes/mod.rs:68-74` for
+/// the identical `v_end = v_start - v_ilen.min(0) + 1` overlap-keep predicate this mirrors)
+/// plus the window's static table, and assembles the ragged ALT bytes (via
+/// [`gather_alleles`]) and the scalar `start`/`ilen` arrays. Matches the written path's
+/// `_assemble_variant_buffers_rust` (`_flat_variants.py`) byte-for-byte given
+/// byte-identical inputs — no dataset-global id is produced here (variants output is
+/// self-contained, per #313).
+pub fn assemble_variants_window(
+    v_idxs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+) -> (Array1<u8>, Array1<i64>, Array1<i32>, Array1<i32>) {
+    let (alt_data, alt_seq_offsets) = gather_alleles(v_idxs, alt_alleles, alt_offsets);
+    let start: Array1<i32> = v_idxs.iter().map(|&vi| v_starts[vi as usize]).collect();
+    let ilen: Array1<i32> = v_idxs.iter().map(|&vi| ilens[vi as usize]).collect();
+    (alt_data, alt_seq_offsets, start, ilen)
+}
+
 /// Reverse-complement the alleles of mask-selected `(b*p)` rows, in place.
 ///
 /// `byte_data`   contiguous allele bytes (mutated in place)
