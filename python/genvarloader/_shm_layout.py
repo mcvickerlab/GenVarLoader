@@ -317,6 +317,8 @@ def _pack_descriptor(d: dict) -> bytes:
     out += struct.pack("<B", len(name))
     out += name
 
+    # NOTE: byte-for-byte twin of the kind==4 field_descs pack block below
+    # (minus the trailing flank block, which only kind==2 has) -- keep in sync.
     if kind == 2:
         field_descs = d["_field_descs"]
         out += struct.pack("<B", len(field_descs))
@@ -352,6 +354,9 @@ def _pack_descriptor(d: dict) -> bytes:
                 flank["offsets_nbytes"],
             )
 
+    # NOTE: byte-for-byte twin of the kind==2 field_descs pack block above
+    # (minus that block's trailing flank block, which kind==2 has and kind==4
+    # does not) -- keep in sync.
     if kind == 4:
         field_descs = d["_field_descs"]
         out += struct.pack("<B", len(field_descs))
@@ -487,6 +492,8 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
         "name": name,
     }
 
+    # NOTE: byte-for-byte twin of the kind==4 field_descs unpack block below
+    # (minus the trailing flank block, which only kind==2 has) -- keep in sync.
     if kind == 2:
         (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
         cursor += 1
@@ -556,6 +563,9 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
             }
         d["_flank"] = flank
 
+    # NOTE: byte-for-byte twin of the kind==2 field_descs unpack block above
+    # (minus that block's trailing flank block, which kind==2 has and kind==4
+    # does not) -- keep in sync.
     if kind == 4:
         (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
         cursor += 1

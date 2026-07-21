@@ -242,3 +242,55 @@ def test_build_producer_schema_no_dummy_variant_omits_key():
 
     rebuilt = _apply_schema(dummy_ds, schema)
     assert rebuilt._seqs.dummy_variant is None
+
+
+def test_build_producer_schema_unphased_union_roundtrips():
+    """Regression: unphased_union must be replayed by the double_buffered producer.
+
+    ``_build_producer_schema`` previously had no ``unphased_union`` handling at
+    all: the parent process sizes shm slots from the folded ploidy-1 shape
+    (see ``Dataset.n_variants``/``ploidy`` under the flag), but the producer
+    subprocess reopened the dataset and replayed every other setting while
+    silently dropping ``unphased_union`` -- so the child decoded at the
+    on-disk ploidy and emitted mismatched rows. ``unphased_union`` is valid
+    for both "variants" and "variant-windows" output, so this is checked for
+    both.
+    """
+    dummy_ds = gvl.get_dummy_dataset().with_tracks(False)
+
+    ds = (
+        dummy_ds.with_seqs("variants")
+        .with_settings(unphased_union=True)
+        .with_output_format("flat")
+    )
+    schema = _build_producer_schema(ds)
+    assert schema["unphased_union"] is True
+    rebuilt = _apply_schema(dummy_ds, schema)
+    assert rebuilt._seqs.unphased_union is True
+
+    opt = VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+    ds_vw = (
+        dummy_ds.with_seqs("variant-windows", opt)
+        .with_settings(unphased_union=True)
+        .with_output_format("flat")
+    )
+    schema_vw = _build_producer_schema(ds_vw)
+    assert schema_vw["unphased_union"] is True
+    rebuilt_vw = _apply_schema(dummy_ds, schema_vw)
+    assert rebuilt_vw._seqs.unphased_union is True
+
+
+def test_build_producer_schema_unphased_union_default_omits_key():
+    """Default (unphased_union not opted in) -> no schema key, matching the
+    other optional-field pattern; the child's default (False) is correct
+    either way.
+    """
+    dummy_ds = gvl.get_dummy_dataset().with_tracks(False)
+    ds = dummy_ds.with_seqs("variants").with_output_format("flat")
+
+    schema = _build_producer_schema(ds)
+
+    assert "unphased_union" not in schema
+
+    rebuilt = _apply_schema(dummy_ds, schema)
+    assert rebuilt._seqs.unphased_union is False

@@ -499,6 +499,51 @@ def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, a
 
 
 @pytest.mark.slow
+def test_double_buffered_variant_windows_unphased_union_matches_buffered(
+    file_backed_ds,
+):
+    """Regression: unphased_union must be replayed across the producer boundary.
+
+    ``_build_producer_schema`` previously dropped ``unphased_union`` entirely
+    (see ``test_producer_schema.py``'s schema round-trip test for the
+    isolated version of this regression): the parent process sizes shm slots
+    from the folded ploidy-1 shape, but the producer subprocess replayed
+    every other setting while silently decoding at the on-disk ploidy --
+    a content mismatch (or ProducerError from an oversized write) that only
+    surfaces end-to-end, in mode="double_buffered", not in the in-process
+    mode="buffered" path. Mirrors
+    ``test_double_buffered_variant_windows_matches_buffered`` with
+    ``unphased_union=True`` layered on top.
+    """
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref="window",
+                alt="window",
+            ),
+        )
+        .with_settings(unphased_union=True)
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
 def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
     # unknown_token=0 collides with "A"'s own token id (0) in b"ACGT". This used
     # to make double_buffered raise (the producer schema recovered token_alphabet

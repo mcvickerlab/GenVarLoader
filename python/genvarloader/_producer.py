@@ -38,6 +38,8 @@ def _apply_schema(ds, schema: dict):
         settings_kwargs["var_filter"] = schema["var_filter"]
     if schema.get("var_fields") is not None:
         settings_kwargs["var_fields"] = schema["var_fields"]
+    if schema.get("unphased_union") is not None:
+        settings_kwargs["unphased_union"] = schema["unphased_union"]
     if schema.get("flank_length") is not None:
         settings_kwargs["flank_length"] = schema["flank_length"]
         settings_kwargs["token_alphabet"] = schema["token_alphabet"]

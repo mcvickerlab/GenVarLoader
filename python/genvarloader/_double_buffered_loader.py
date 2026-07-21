@@ -101,6 +101,15 @@ def _build_producer_schema(ds: "Dataset") -> dict:
             schema["var_filter"] = seqs.filter
         if hasattr(seqs, "var_fields"):
             schema["var_fields"] = list(seqs.var_fields)
+        if seqs.unphased_union:
+            # Folds ploidy -> 1 for "variants"/"variant-windows" output (see
+            # Dataset.with_settings' unphased_union docs). The parent process
+            # sizes the shm slot from the folded ploidy-1 shape, so the
+            # producer subprocess MUST replay this setting -- otherwise it
+            # decodes at the on-disk ploidy and emits mismatched (larger)
+            # rows, which either overflows the slot or silently diverges from
+            # mode="buffered"/mode=None output.
+            schema["unphased_union"] = True
 
         # Key Config A vs Config B on the actual output kind
         # (``ds.sequence_type``), not on ``seqs.window_opt`` truthiness:
