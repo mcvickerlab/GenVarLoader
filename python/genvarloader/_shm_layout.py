@@ -36,6 +36,20 @@ Header layout (little-endian throughout):
       u64  regular_size   (ploidy; RegularArray.size)
       u8   name_len
       char name[name_len]
+
+  After the FieldDescriptor list, kind=2 carries one optional flank_tokens
+  payload (only ever populated on the _FlatVariants flat-mode write path;
+  RaggedVariants has no flank_tokens and always writes has_flank=0):
+    u8   has_flank
+    if has_flank:
+      u8   ndim           (flank_tokens.shape length, e.g. 4 for (b, p, ~v, 2L))
+      u64  shape[ndim]    (None dims encoded as 2**64 - 1)
+      char dtype_str[4]   (leaf token dtype)
+      u64  data_offset
+      u64  data_nbytes
+      u64  offsets_offset  (variant-level offsets, length b*p + 1; NOT scaled
+                             by the trailing fixed dim)
+      u64  offsets_nbytes
 """
 
 from __future__ import annotations
@@ -228,6 +242,7 @@ def _write_rag_variants(buf: memoryview, rv, cursor: int) -> tuple[dict, int]:
         "inner_offsets_nbytes": 0,
         "name": b"",
         "_field_descs": field_descs,
+        "_flank": None,
     }, cursor
 
 
@@ -321,6 +336,21 @@ def _pack_descriptor(d: dict) -> bytes:
                 len(fname),
             )
             out += fname
+
+        flank = d.get("_flank")
+        out += struct.pack("<B", 1 if flank else 0)
+        if flank:
+            out += struct.pack("<B", len(flank["shape"]))
+            for dim in flank["shape"]:
+                out += struct.pack("<Q", (2**64 - 1) if dim is None else int(dim))
+            out += struct.pack(
+                "<4s4Q",
+                flank["dtype_str"],
+                flank["data_offset"],
+                flank["data_nbytes"],
+                flank["offsets_offset"],
+                flank["offsets_nbytes"],
+            )
 
     if kind == 4:
         field_descs = d["_field_descs"]
@@ -495,6 +525,36 @@ def _unpack_one_descriptor(buf_bytes: memoryview, cursor: int) -> tuple[dict, in
                 }
             )
         d["_field_descs"] = field_descs
+
+        (has_flank,) = struct.unpack_from("<B", buf_bytes, cursor)
+        cursor += 1
+        flank = None
+        if has_flank:
+            (flank_ndim,) = struct.unpack_from("<B", buf_bytes, cursor)
+            cursor += 1
+            flank_shape = []
+            for _ in range(flank_ndim):
+                (dim,) = struct.unpack_from("<Q", buf_bytes, cursor)
+                flank_shape.append(None if dim == 2**64 - 1 else int(dim))
+                cursor += 8
+            flank_dtype_str = bytes(buf_bytes[cursor : cursor + 4])
+            cursor += 4
+            (
+                flank_data_offset,
+                flank_data_nbytes,
+                flank_offsets_offset,
+                flank_offsets_nbytes,
+            ) = struct.unpack_from("<4Q", buf_bytes, cursor)
+            cursor += 32
+            flank = {
+                "shape": flank_shape,
+                "dtype_str": flank_dtype_str,
+                "data_offset": flank_data_offset,
+                "data_nbytes": flank_data_nbytes,
+                "offsets_offset": flank_offsets_offset,
+                "offsets_nbytes": flank_offsets_nbytes,
+            }
+        d["_flank"] = flank
 
     if kind == 4:
         (n_fields,) = struct.unpack_from("<B", buf_bytes, cursor)
@@ -681,6 +741,12 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
     Fields are written in ``fv.fields`` dict-insertion order, which mirrors the
     field order produced by ``_write_rag_variants``, so the descriptor field
     order is consistent across the flat and ragged write paths.
+
+    After the field loop, an optional ``flank_tokens`` payload is appended (see
+    module docstring): ``fv.flank_tokens`` is a ``_Flat`` with a full shape of
+    ``(b, p, None, 2*flank_len)`` -- carrying the shape explicitly (rather than
+    routing through the generic FieldDescriptor path) preserves the trailing
+    fixed ``2*flank_len`` dim, which the generic path would drop.
     """
     from ._dataset._flat_variants import _FlatAlleles
 
@@ -738,6 +804,28 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
             }
         )
 
+    flank = None
+    if fv.flank_tokens is not None:
+        ft = fv.flank_tokens
+        data = np.ascontiguousarray(ft.data)
+        off = np.ascontiguousarray(ft.offsets, np.int64)
+        cursor = _align(cursor)
+        data_off = cursor
+        np.frombuffer(buf, data.dtype, data.size, data_off)[...] = data.ravel()
+        cursor += data.nbytes
+        cursor = _align(cursor)
+        off_off = cursor
+        np.frombuffer(buf, np.int64, off.size, off_off)[...] = off
+        cursor += off.nbytes
+        flank = {
+            "shape": list(ft.shape),
+            "dtype_str": _dtype_to_bytes(data.dtype),
+            "data_offset": data_off,
+            "data_nbytes": data.nbytes,
+            "offsets_offset": off_off,
+            "offsets_nbytes": off.nbytes,
+        }
+
     return {
         "kind": 2,
         "dtype_str": b"\x00" * 4,
@@ -750,6 +838,7 @@ def _write_flat_variants(buf: memoryview, fv, cursor: int) -> tuple[dict, int]:
         "inner_offsets_nbytes": 0,
         "name": b"",
         "_field_descs": field_descs,
+        "_flank": flank,
     }, cursor
 
 
@@ -937,7 +1026,23 @@ def _read_flat_variants(buf: memoryview, d: dict, copy: bool = True):
         else:
             fields[name] = _Flat(leaf, var_off, shape)
 
-    return _FlatVariants(fields)
+    fv = _FlatVariants(fields)
+    flank = d.get("_flank")
+    if flank:
+        leaf_dtype = _dtype_from_bytes(flank["dtype_str"])
+        data = np.frombuffer(
+            buf,
+            leaf_dtype,
+            flank["data_nbytes"] // leaf_dtype.itemsize,
+            flank["data_offset"],
+        )
+        off = np.frombuffer(
+            buf, np.int64, flank["offsets_nbytes"] // 8, flank["offsets_offset"]
+        )
+        if copy:
+            data, off = data.copy(), off.copy()
+        fv.flank_tokens = _Flat(data, off, tuple(flank["shape"]))
+    return fv
 
 
 def _read_flat_variant_windows(buf: memoryview, d: dict, copy: bool = True):
