@@ -52,16 +52,142 @@ def _token_alphabet_from_lut(lut: "np.ndarray", unknown_token: int) -> bytes:
     recovers the alphabet verbatim as long as ``unknown_token`` doesn't collide
     with a real alphabet token id (the standard usage, e.g. ``unknown_token=len(alphabet)``).
 
+    A collision (``unknown_token`` chosen inside ``0..len(alphabet)-1``) is
+    detectable: the recovered token ids for the non-``unknown_token`` bytes
+    won't form a contiguous ``0..k-1`` run (one alphabet byte's token id is
+    missing because ``unknown_token`` masked it out). That case raises
+    instead of silently returning a wrong/short alphabet.
+
     Args:
         lut: 256-entry byte->token lookup table.
         unknown_token: Token id assigned to bytes outside the alphabet.
 
     Returns:
         The reconstructed alphabet, in original order.
+
+    Raises:
+        ValueError: If ``unknown_token`` collides with a real alphabet token
+            id, making the LUT->alphabet inversion ambiguous.
     """
     byte_vals = np.nonzero(lut != unknown_token)[0]
-    order = np.argsort(lut[byte_vals])
+    token_ids = lut[byte_vals]
+    order = np.argsort(token_ids)
+    sorted_ids = token_ids[order]
+    expected_ids = np.arange(len(byte_vals))
+    if not np.array_equal(sorted_ids, expected_ids):
+        raise ValueError(
+            "Cannot recover token_alphabet from token_lut: unknown_token="
+            f"{unknown_token} collides with a real alphabet token id (recovered "
+            f"token ids {sorted_ids.tolist()} are not a contiguous "
+            f"0..{max(len(byte_vals) - 1, 0)} run). Choose an unknown_token "
+            "outside the alphabet's own token range (e.g. unknown_token="
+            "len(token_alphabet))."
+        )
     return bytes(byte_vals[order].astype(np.uint8).tolist())
+
+
+def _build_producer_schema(ds: "Dataset") -> dict:
+    """Build the serializable schema dict the producer subprocess replays.
+
+    Factored out of ``_spawn_producer`` so it is a pure function of ``ds``
+    (no process spawn, no requirement that ``ds`` be file-backed), which lets
+    tests exercise the exact schema-emission logic directly and feed the
+    result straight into ``_producer._apply_schema`` for a full round trip.
+
+    Args:
+        ds: The dataset the producer subprocess should replay.
+
+    Returns:
+        A plain dict of JSON/pickle-safe primitives describing how to
+        rebuild ``ds`` from a freshly opened ``Dataset.open(ds.path)``.
+
+    Raises:
+        ValueError: If ``ds`` uses a splice or a non-default track
+            ``insertion_fill`` strategy, neither of which ``mode='double_buffered'``
+            supports.
+    """
+    from ._dataset._reconstruct import Haps
+    from ._dataset._insertion_fill import Repeat5p
+
+    if ds.is_spliced:
+        raise ValueError(
+            "mode='double_buffered' is not supported when splice_info is set; "
+            "use mode='buffered' instead."
+        )
+    tracks = ds._tracks
+    if tracks is not None and tracks.insertion_fill:
+        non_default = {
+            name: fill
+            for name, fill in tracks.insertion_fill.items()
+            if not isinstance(fill, Repeat5p)
+        }
+        if non_default:
+            raise ValueError(
+                "mode='double_buffered' is not supported when non-default insertion_fill "
+                f"strategies are set ({list(non_default)}); use mode='buffered' instead."
+            )
+
+    schema: dict = {
+        "with_seqs": ds.sequence_type,
+        "with_tracks": ds.active_tracks if ds.active_tracks else False,
+        "deterministic": ds.deterministic,
+        "rc_neg": ds.rc_neg,
+        "jitter": ds.jitter,
+        "output_format": ds.output_format,
+    }
+
+    seqs = ds._seqs
+    if isinstance(seqs, Haps):
+        if seqs.min_af is not None:
+            schema["min_af"] = seqs.min_af
+        if seqs.max_af is not None:
+            schema["max_af"] = seqs.max_af
+        if seqs.filter is not None:
+            schema["var_filter"] = seqs.filter
+        if hasattr(seqs, "var_fields"):
+            schema["var_fields"] = list(seqs.var_fields)
+
+        # Key Config A vs Config B on the actual output kind
+        # (``ds.sequence_type``), not on ``seqs.window_opt`` truthiness:
+        # ``Haps.window_opt`` is never cleared when the builder chain
+        # switches away from ``with_seqs("variant-windows", ...)`` (see
+        # ``_impl.py``'s ``with_seqs``), so a chain like
+        # ``.with_seqs("variant-windows", opt).with_seqs("variants")
+        # .with_settings(flank_length=...)`` leaves a *stale* non-None
+        # ``window_opt`` sitting alongside an *active* flank config.
+        # Branching on truthiness would silently take the Config-A branch
+        # and drop the real flank settings from the schema.
+        window_opt = getattr(seqs, "window_opt", None)
+        if ds.sequence_type == "variant-windows" and window_opt is not None:
+            schema["window_opt"] = {
+                "flank_length": window_opt.flank_length,
+                "token_alphabet": window_opt.token_alphabet,
+                "unknown_token": window_opt.unknown_token,
+                "ref": window_opt.ref,
+                "alt": window_opt.alt,
+            }
+        elif getattr(seqs, "flank_length", None) and seqs.token_lut is not None:
+            # Plain-variants ride-along flank tokens (Config B). ``Haps``
+            # only retains the derived LUT, not the original
+            # ``token_alphabet`` it was built from, so recover it.
+            schema["flank_length"] = seqs.flank_length
+            schema["token_alphabet"] = _token_alphabet_from_lut(
+                seqs.token_lut, seqs.unknown_token
+            )
+            schema["unknown_token"] = seqs.unknown_token
+
+    ref = getattr(ds, "reference", None)
+    if ref is not None:
+        ref_path = getattr(ref, "path", None)
+        if ref_path is not None:
+            schema["reference_path"] = str(ref_path)
+            # Detect whether the reference was opened as a memmap (in_memory=False).
+            # If so, tell the producer subprocess to do the same, ensuring
+            # identical data is returned for the same (r, s) indices.
+            ref_data = getattr(ref, "reference", None)
+            schema["reference_in_memory"] = not isinstance(ref_data, np.memmap)
+
+    return schema
 
 
 def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
@@ -196,78 +322,9 @@ class _DoubleBufferedIterable:
 
     def _spawn_producer(self) -> None:
         from ._producer import producer_main
-        from ._dataset._reconstruct import Haps
-        from ._dataset._insertion_fill import Repeat5p
 
         ds = self._dataset
-
-        if ds.is_spliced:
-            raise ValueError(
-                "mode='double_buffered' is not supported when splice_info is set; "
-                "use mode='buffered' instead."
-            )
-        tracks = ds._tracks
-        if tracks is not None and tracks.insertion_fill:
-            non_default = {
-                name: fill
-                for name, fill in tracks.insertion_fill.items()
-                if not isinstance(fill, Repeat5p)
-            }
-            if non_default:
-                raise ValueError(
-                    "mode='double_buffered' is not supported when non-default insertion_fill "
-                    f"strategies are set ({list(non_default)}); use mode='buffered' instead."
-                )
-
-        schema: dict = {
-            "with_seqs": ds.sequence_type,
-            "with_tracks": ds.active_tracks if ds.active_tracks else False,
-            "deterministic": ds.deterministic,
-            "rc_neg": ds.rc_neg,
-            "jitter": ds.jitter,
-            "output_format": ds.output_format,
-        }
-
-        seqs = ds._seqs
-        if isinstance(seqs, Haps):
-            if seqs.min_af is not None:
-                schema["min_af"] = seqs.min_af
-            if seqs.max_af is not None:
-                schema["max_af"] = seqs.max_af
-            if seqs.filter is not None:
-                schema["var_filter"] = seqs.filter
-            if hasattr(seqs, "var_fields"):
-                schema["var_fields"] = list(seqs.var_fields)
-
-            window_opt = getattr(seqs, "window_opt", None)
-            if window_opt is not None:
-                schema["window_opt"] = {
-                    "flank_length": window_opt.flank_length,
-                    "token_alphabet": window_opt.token_alphabet,
-                    "unknown_token": window_opt.unknown_token,
-                    "ref": window_opt.ref,
-                    "alt": window_opt.alt,
-                }
-            elif getattr(seqs, "flank_length", None) and seqs.token_lut is not None:
-                # Plain-variants ride-along flank tokens (Config B). ``Haps``
-                # only retains the derived LUT, not the original
-                # ``token_alphabet`` it was built from, so recover it.
-                schema["flank_length"] = seqs.flank_length
-                schema["token_alphabet"] = _token_alphabet_from_lut(
-                    seqs.token_lut, seqs.unknown_token
-                )
-                schema["unknown_token"] = seqs.unknown_token
-
-        ref = getattr(ds, "reference", None)
-        if ref is not None:
-            ref_path = getattr(ref, "path", None)
-            if ref_path is not None:
-                schema["reference_path"] = str(ref_path)
-                # Detect whether the reference was opened as a memmap (in_memory=False).
-                # If so, tell the producer subprocess to do the same, ensuring
-                # identical data is returned for the same (r, s) indices.
-                ref_data = getattr(ref, "reference", None)
-                schema["reference_in_memory"] = not isinstance(ref_data, np.memmap)
+        schema = _build_producer_schema(ds)
 
         ds_path = ds.path
         if not ds_path.is_dir():
