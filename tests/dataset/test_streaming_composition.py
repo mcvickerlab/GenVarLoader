@@ -25,7 +25,12 @@ import pytest
 
 import genvarloader as gvl
 
-BACKENDS = ["svar1", "vcf", "pgen"]
+# Both tests here compose `with_seqs("annotated")`, which is a fail-fast
+# NotImplementedError for the VCF backend (its `var_idxs` are dataset-global ids
+# a VCF source cannot produce cheaply; issues #305, #311). SVAR1 (ids for free)
+# and PGEN (ids from the `.pvar` row index) cover the composition; VCF is excluded.
+# See test_streaming_annotated_parity.py::test_vcf_annotated_fails_fast.
+BACKENDS = ["svar1", "pgen"]
 
 # <= the smallest region length across all three `streaming_case` backends
 # (the SVAR1 multi-contig fixture uses 20bp sliding windows; VCF/PGEN span a

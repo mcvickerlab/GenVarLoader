@@ -55,6 +55,19 @@ indices, applies AF filtering, and assembles ragged buffers via `assemble_varian
 - **dataset-global variant ids** — streaming's `geno_v_idxs` are window-**local** column indices;
   the written `v_idxs` are global. This is exactly the gap #305 closes.
 
+> **Correction (2026-07-21).** The "dataset-global variant ids" bullet does **not** apply to the
+> variants *output*. `RaggedVariants`, `_FlatVariants`, and `_FlatVariantWindows`
+> (`_rag_variants.py`, `_flat_variants.py`) expose field **values** — `alt`/`ref`/`start`/`ilen`/
+> `dosage`/`var_fields` — and **no** `v_idxs` field. The written path's `v_idxs = genos.data` is an
+> internal *gather index* into the on-disk variant table (`self.variants.info["AF"][v_idxs]`,
+> `_gather_alleles(v_idxs, ...)`); streaming reads the same fields straight off each record and never
+> gathers from a table, so variants/variant-windows are **self-contained from the records** and need
+> no global id. Within-window ordering and AF filtering fall out of reading position-sorted records
+> and each record's `INFO/AF`. Only `with_seqs("annotated")` (`AnnotatedHaps.var_idxs`, a per-position
+> provenance field) genuinely needs the dataset-global id. Wave B PR-B1 should therefore drop the
+> variants-output dependency on `global_v_idxs`; the real per-backend work is the REF/AF/dosage/FORMAT
+> extraction below. See #305 / #311 and the VCF-annotated fail-fast in `_streaming.py`.
+
 `fill_decoded_window` throws all of this away today; Wave B extracts what each knob needs, per
 backend.
 
@@ -119,6 +132,19 @@ path is affected.)
 **wrong for any window containing a spanning deletion or same-POS tie** — even single-contig at
 window 0, not just the multi-contig/narrowed case the code comment ("KNOWN GAP", `vcf.rs:153-170`)
 acknowledges. PR-A fixes annotated too.
+
+> **Status update (2026-07-21).** The **PGEN half shipped** — genoray #134 added
+> `DenseChunk.global_idx` (PGEN populated via the `.pvar` row index) and gvl PR-A consumes it
+> (`fill_decoded_window` → `DecodedWindow.global_v_idxs` → per-variant gather; `var_base` retired).
+> The **VCF half is deferred**: the per-contig variant index below needs a one-time full-source
+> record scan (VCF has no `.pvar`-equivalent), and — per the 2026-07-21 correction above — it is
+> needed **only** for `with_seqs("annotated")`, **not** for variants/variant-windows output. Rather
+> than pay the scan for a single output mode with no current use case, VCF + `annotated` is now a
+> **fail-fast `NotImplementedError`** in `_streaming.py` (closes the #311 silent-wrongness); variants
+> output proceeds for VCF with **no genoray change**. Revisit the scan only when a concrete
+> VCF-annotated streaming use case appears — the cross-contig base is then free from the CSI/TBI
+> metadata pseudo-bins (`hts_idx_get_stat`; cf. standardmodelbio/seqlab#199), leaving only the
+> within-contig offset to derive.
 
 **Fix (decision: genoray emits global ids).** Mirror the SVAR2 `pack_vk_src` pattern:
 

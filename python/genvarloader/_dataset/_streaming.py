@@ -472,6 +472,27 @@ class StreamingDataset:
                     "SVAR1/VCF/PGEN engines (issue #277). Use ragged haplotype output "
                     "with jitter=0 for .svar2 sources."
                 )
+            # `with_seqs("annotated")` emits per-position dataset-GLOBAL variant ids
+            # (`AnnotatedHaps.var_idxs`). SVAR1 carries these for free and PGEN derives
+            # them from the `.pvar` absolute row index, but a VCF source has no cheap
+            # per-record global id: genoray leaves `RawRecord.global_idx = -1` for VCF
+            # (`vcf_reader.rs`), so the local->global gather is skipped and the emitted
+            # ids are silently WRONG for any window that is multi-contig, mid-contig
+            # (narrowed), or drops an interior variant behind a spanning deletion --
+            # i.e. essentially every real training window (issues #305, #311). Rather
+            # than return silently-wrong ids, fail fast: annotated output requires a
+            # PGEN or SVAR source. Populating VCF global ids needs a one-time full-source
+            # record scan and is deferred until there is a concrete use case (#305).
+            if isinstance(self._backend, _VcfBackend) and _annotated:
+                raise NotImplementedError(
+                    'with_seqs("annotated") is not supported for the VCF backend: '
+                    "AnnotatedHaps.var_idxs are dataset-global variant ids, which a VCF "
+                    "source cannot produce without an expensive full-file scan (genoray "
+                    "leaves them unset, so they would be silently wrong for multi-contig, "
+                    "narrowed, or interior-exclusion windows; issues #305, #311). Use a "
+                    "PGEN (.pgen) or SVAR (.svar/.svar2) source for annotated output, or "
+                    'plain with_seqs("haplotypes") for the VCF backend.'
+                )
             if self._prefetch_strategy == "engine":
                 # "engine" drives the record-style backends (SVAR1, VCF, PGEN), which
                 # share the same `build_engine(jobs, batch_size, out_len, annotated)`
@@ -900,7 +921,14 @@ class StreamingDataset:
         """Select the sequence output kind. ``"haplotypes"`` (default) or
         ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
         variant indices and reference coordinates). ``"variants"`` /
-        ``"variant-windows"`` / ``"reference"`` are Wave B / later plans."""
+        ``"variant-windows"`` / ``"reference"`` are Wave B / later plans.
+
+        ``"annotated"`` is **not supported for the VCF backend** (its
+        ``var_idxs`` are dataset-global variant ids a VCF source cannot produce
+        cheaply; issues #305, #311) -- materializing such a dataset raises
+        :class:`NotImplementedError`. Use a PGEN or SVAR source for annotated
+        output.
+        """
         kind_map = {"haplotypes": RaggedSeqs, "annotated": RaggedAnnotatedHaps}
         if kind not in kind_map:
             raise NotImplementedError(

@@ -233,12 +233,25 @@ def test_vcf_streaming_matches_written_all_cells_multi_region(
 # ---------------------------------------------------------------------------
 
 
+# VCF params are xfail: `with_seqs("annotated")` is a fail-fast NotImplementedError
+# for the VCF backend (its `var_idxs` are dataset-global ids a VCF source cannot
+# produce cheaply; issues #305, #311). These fixtures + assertions are preserved as
+# a strict tripwire — the day VCF global variant ids land and the guard is removed,
+# xpass will fail the suite and flag this test for un-xfailing. PGEN params run live
+# (PGEN derives global ids from the `.pvar` row index).
+_VCF_ANNOTATED_XFAIL = pytest.mark.xfail(
+    reason='with_seqs("annotated") is fail-fast for VCF until global variant ids land (#305/#311)',
+    raises=NotImplementedError,
+    strict=True,
+)
+
+
 @pytest.mark.parametrize(
     "fixture_name",
     [
-        "vcf_same_pos_nonlex",
+        pytest.param("vcf_same_pos_nonlex", marks=_VCF_ANNOTATED_XFAIL),
         "pgen_same_pos_nonlex",
-        "vcf_same_pos_triallelic",
+        pytest.param("vcf_same_pos_triallelic", marks=_VCF_ANNOTATED_XFAIL),
         "pgen_same_pos_triallelic",
     ],
 )
@@ -248,12 +261,14 @@ def test_same_pos_var_idxs_file_order(request, fixture_name, tmp_path):
     (see `vcf_same_pos_nonlex`/`vcf_same_pos_triallelic` docstrings in
     conftest.py for the exact variant tables and genotypes).
 
-    This is expected to PASS: both the streamed `ChunkAssembler` and the
-    written oracle tie-break same-POS atoms by file order (issue #300), so
-    their `var_idxs` must agree even though a lexicographic tie-break would
-    have produced a DIFFERENT (and here, wrong) answer -- a pass on these
-    fixtures is not a coincidence the way it would be on
-    `vcf_snp_ins_del_multi`'s pos=149 pair (see module docstring).
+    PGEN params PASS: both the streamed `ChunkAssembler` and the written
+    oracle tie-break same-POS atoms by file order (issue #300), so their
+    `var_idxs` must agree even though a lexicographic tie-break would have
+    produced a DIFFERENT (and here, wrong) answer -- a pass on these fixtures
+    is not a coincidence the way it would be on `vcf_snp_ins_del_multi`'s
+    pos=149 pair (see module docstring). VCF params are xfail: annotated
+    output is fail-fast for the VCF backend until VCF global variant ids land
+    (#305/#311); the fixtures are kept as a strict tripwire.
     """
     f = request.getfixturevalue(fixture_name)
     variants = str(f.vcf) if hasattr(f, "vcf") else str(f.pgen)
