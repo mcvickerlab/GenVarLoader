@@ -1438,6 +1438,13 @@ class Dataset:
                     else:
                         info_dtype = haps_obj.variants.info[f].dtype
                     total += n_vars_total * info_dtype.itemsize
+            # ride-along flank tokens (flat output only): 2L tokens per variant.
+            if getattr(haps_obj, "flank_length", 0) and haps_obj.token_lut is not None:
+                L = int(haps_obj.flank_length)
+                ft_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+                total += n_vars_total * 2 * L * ft_itemsize
+                if include_offsets:
+                    offset_total += OFF * ploidy  # flank_tokens outer offsets
             if include_offsets:
                 # RaggedVariants (kind=2) writes, per field: outer offsets
                 # (ploidy entries/instance) and, for alt/ref allele fields,
@@ -1445,6 +1452,108 @@ class Dataset:
                 n_allele_fields = sum(1 for f in var_fields if f in ("alt", "ref"))
                 offset_total += OFF * ploidy * len(var_fields)
                 offset_total += OFF * n_vars_total * n_allele_fields
+        elif seq_kind == "variant-windows":
+            if not isinstance(self._seqs, Haps):
+                raise AssertionError("variant-windows mode requires Haps")
+            haps_obj = self._seqs
+            opt = haps_obj.window_opt
+            assert opt is not None, "variant-windows requires a VarWindowOpt"
+            L = int(opt.flank_length)
+            tok_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
+            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
+            n_vars_total = n_vars_flat.sum(-1)
+            ploidy = n_vars.shape[-1]
+            # alt bytes are always stored on disk (unlike ref); exact sum
+            # reused by both alt="window" (flank5 . alt . flank3) and
+            # alt="allele" (bare alt), same primitive the "variants" branch
+            # uses for alt/ref.
+            alt_alleles = (
+                haps_obj._allele_bytes_sum(ds_idx, "alt").reshape(-1, ploidy).sum(-1)
+            )
+            if opt.ref == "allele":
+                # bare REF allele bytes. with_seqs('variant-windows', ...)
+                # already rejects ref="allele" when self.variants.ref is
+                # None, so _allele_bytes_sum is safe to call here.
+                ref_span = (
+                    haps_obj._allele_bytes_sum(ds_idx, "ref")
+                    .reshape(-1, ploidy)
+                    .sum(-1)
+                )
+            else:
+                # ref="window" reads [start-L, end+L) from the *reference
+                # genome*, not the stored REF allele -- which may not even be
+                # present (e.g. an ALT-only Haps, like get_dummy_dataset()).
+                # Its span is derivable exactly from ilen alone: for
+                # normalized bi-allelic records len(REF) - len(ALT) == -ilen,
+                # i.e. span = 1 + max(-ilen, 0), so this doesn't need REF
+                # storage at all.
+                r_idx_grp, s_idx_grp = np.unravel_index(
+                    ds_idx, haps_obj.genotypes.shape[:2]
+                )
+                genos = haps_obj.genotypes[r_idx_grp, s_idx_grp].to_packed()
+                v_idxs = genos.data
+                grp_offsets = np.asarray(genos.offsets, np.int64)
+                if haps_obj.min_af is not None or haps_obj.max_af is not None:
+                    geno_afs = haps_obj.variants.info["AF"][v_idxs]
+                    keep = np.full(len(v_idxs), True, np.bool_)
+                    if haps_obj.min_af is not None:
+                        keep &= geno_afs >= haps_obj.min_af
+                    if haps_obj.max_af is not None:
+                        keep &= geno_afs <= haps_obj.max_af
+                    v_idxs = v_idxs[keep]
+                    keep_csum = np.concatenate(
+                        [
+                            [np.int64(0)],
+                            np.cumsum(keep.astype(np.int64), dtype=np.int64),
+                        ]
+                    )
+                    grp_offsets = keep_csum[grp_offsets]
+                ilen_sel = np.asarray(haps_obj.variants.ilen)[v_idxs].astype(np.int64)
+                span = 1 + np.maximum(-ilen_sel, 0)
+                span_csum = np.concatenate(
+                    [[np.int64(0)], np.cumsum(span, dtype=np.int64)]
+                )
+                ref_span = (
+                    (span_csum[grp_offsets[1:]] - span_csum[grp_offsets[:-1]])
+                    .reshape(-1, ploidy)
+                    .sum(-1)
+                )
+            # token count per present window slot: window slots add 2L flank
+            # tokens per variant; bare allele slots do not.
+            ref_tokens = (
+                (ref_span + n_vars_total * 2 * L) if opt.ref == "window" else ref_span
+            )
+            alt_tokens = (
+                (alt_alleles + n_vars_total * 2 * L)
+                if opt.alt == "window"
+                else alt_alleles
+            )
+            total += (ref_tokens + alt_tokens) * tok_itemsize
+            # scalar .fields (start/ilen/dosage/info) — alt/ref are NOT scalar
+            # fields here (they became window slots).
+            for f in haps_obj.var_fields:
+                if f in ("alt", "ref"):
+                    continue
+                if f == "start":
+                    total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+                elif f == "ilen":
+                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                elif f == "dosage":
+                    if haps_obj.dosages is None:
+                        continue
+                    total += n_vars_total * haps_obj.dosages.data.dtype.itemsize
+                else:
+                    total += n_vars_total * haps_obj.variants.info[f].dtype.itemsize
+            if include_offsets:
+                n_scalar = sum(
+                    1 for f in haps_obj.var_fields if f not in ("alt", "ref")
+                )
+                n_window_slots = 2  # exactly one ref-slot + one alt-slot
+                offset_total += OFF * ploidy * (n_scalar + n_window_slots)
+                offset_total += (
+                    OFF * n_vars_total * n_window_slots
+                )  # inner (per-variant) offsets
         elif seq_kind is None:
             pass
         else:
