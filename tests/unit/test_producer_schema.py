@@ -158,9 +158,24 @@ def test_token_alphabet_from_lut_roundtrips_for_normal_config():
     assert _token_alphabet_from_lut(lut, 4) == b"ACGT"
 
 
+def test_token_alphabet_from_lut_accepts_boundary_unknown_token():
+    """unknown_token == len(alphabet) - 1 collides with the last symbol's own
+    token id (e.g. "T"'s id 3 in b"ACGT"), so the recovered alphabet text
+    ("ACG") differs from the original -- but a byte assigned that token id
+    behaves identically whether treated as "in the alphabet at that position"
+    or "unknown", so the rebuilt LUT is byte-identical and this must NOT
+    raise (this is the case a naive contiguity check gets wrong).
+    """
+    lut, _ = build_token_lut(b"ACGT", 3)
+    alphabet = _token_alphabet_from_lut(lut, 3)
+    rebuilt_lut, _ = build_token_lut(alphabet, 3)
+    assert (rebuilt_lut == lut).all()
+
+
 def test_token_alphabet_from_lut_raises_on_colliding_unknown_token():
-    # unknown_token=0 collides with "A"'s token id (0) in b"ACGT", making the
-    # inversion ambiguous: both "A" and true out-of-alphabet bytes map to 0.
+    # unknown_token=0 collides with "A"'s token id (0) in b"ACGT" in a way
+    # that loses information: both "A" and true out-of-alphabet bytes map to
+    # 0, and no alphabet reconstructed from the LUT rebuilds it faithfully.
     lut, _ = build_token_lut(b"ACGT", 0)
     with pytest.raises(ValueError, match="collides"):
         _token_alphabet_from_lut(lut, 0)

@@ -42,48 +42,63 @@ def _cleanup(shms: list, producer_ref) -> None:
 
 
 def _token_alphabet_from_lut(lut: "np.ndarray", unknown_token: int) -> bytes:
-    """Recover the ordered alphabet bytes a ``token_lut`` was built from.
+    """Recover an alphabet whose ``token_lut`` matches ``lut`` byte-for-byte.
 
     ``build_token_lut`` (``_flat_flanks.py``) assigns each alphabet byte's
     position in the input alphabet as its token id (``0..len(alphabet)-1``) and
     fills every other byte with ``unknown_token``; ``Haps`` only retains the
-    resulting LUT, not the original alphabet. This inverts that mapping by
-    sorting the non-``unknown_token`` byte values by their token id, which
-    recovers the alphabet verbatim as long as ``unknown_token`` doesn't collide
-    with a real alphabet token id (the standard usage, e.g. ``unknown_token=len(alphabet)``).
+    resulting LUT, not the original alphabet. This guesses a candidate
+    alphabet by sorting the non-``unknown_token`` byte values by their token
+    id, then verifies the guess is faithful by rebuilding a LUT from it via
+    the same ``build_token_lut`` the forward path uses and comparing it to
+    ``lut`` element-wise.
 
-    A collision (``unknown_token`` chosen inside ``0..len(alphabet)-1``) is
-    detectable: the recovered token ids for the non-``unknown_token`` bytes
-    won't form a contiguous ``0..k-1`` run (one alphabet byte's token id is
-    missing because ``unknown_token`` masked it out). That case raises
-    instead of silently returning a wrong/short alphabet.
+    This round-trip check is the real contract -- correct by construction --
+    rather than a heuristic like checking the recovered token ids for
+    contiguity: a contiguity check is fooled by the boundary case
+    ``unknown_token == len(alphabet) - 1`` (colliding with the *last* real
+    symbol's own token id). There, the naive guess drops that symbol (e.g.
+    ``b"ACGT"`` with ``unknown_token=3`` guesses ``b"ACG"``), which looks
+    "wrong" as text but is actually harmless: a byte assigned that token id
+    behaves identically whether it's "in the alphabet at that position" or
+    "unknown" for classification purposes, so the rebuilt LUT is
+    byte-identical to the original and this correctly does NOT raise. A
+    genuinely lossy collision (e.g. ``unknown_token`` colliding with a
+    *non-last* symbol, like ``unknown_token=0`` for ``b"ACGT"``) rebuilds a
+    LUT that differs from the original, so this does raise.
 
     Args:
         lut: 256-entry byte->token lookup table.
         unknown_token: Token id assigned to bytes outside the alphabet.
 
     Returns:
-        The reconstructed alphabet, in original order.
+        An alphabet whose ``build_token_lut(alphabet, unknown_token)`` output
+        is byte-identical to ``lut`` (not necessarily identical, as text, to
+        whatever alphabet originally produced ``lut``).
 
     Raises:
-        ValueError: If ``unknown_token`` collides with a real alphabet token
-            id, making the LUT->alphabet inversion ambiguous.
+        ValueError: If no alphabet recovered from ``lut`` rebuilds a
+            byte-identical LUT, i.e. ``unknown_token`` collides with a real
+            alphabet token id in a way that loses information.
     """
+    from ._dataset._flat_flanks import build_token_lut
+
     byte_vals = np.nonzero(lut != unknown_token)[0]
-    token_ids = lut[byte_vals]
-    order = np.argsort(token_ids)
-    sorted_ids = token_ids[order]
-    expected_ids = np.arange(len(byte_vals))
-    if not np.array_equal(sorted_ids, expected_ids):
+    order = np.argsort(lut[byte_vals])
+    alphabet = bytes(byte_vals[order].astype(np.uint8).tolist())
+
+    rebuilt_lut, _ = build_token_lut(alphabet, unknown_token)
+    if not np.array_equal(rebuilt_lut, lut):
         raise ValueError(
             "Cannot recover token_alphabet from token_lut: unknown_token="
-            f"{unknown_token} collides with a real alphabet token id (recovered "
-            f"token ids {sorted_ids.tolist()} are not a contiguous "
-            f"0..{max(len(byte_vals) - 1, 0)} run). Choose an unknown_token "
-            "outside the alphabet's own token range (e.g. unknown_token="
-            "len(token_alphabet))."
+            f"{unknown_token} collides with a real alphabet token id such that "
+            "no alphabet reconstructed from the LUT reproduces it byte-for-byte "
+            "(rebuilding from the best guess "
+            f"{alphabet!r} yields a different token_lut). Choose an "
+            "unknown_token outside the alphabet's own token range (e.g. "
+            "unknown_token=len(token_alphabet))."
         )
-    return bytes(byte_vals[order].astype(np.uint8).tolist())
+    return alphabet
 
 
 def _build_producer_schema(ds: "Dataset") -> dict:
