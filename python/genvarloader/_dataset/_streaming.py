@@ -623,7 +623,7 @@ class StreamingDataset:
                             out = RaggedVariants(alt=alt, start=start, ilen=ilen)
                         elif _annotated:
                             data, annot_v, annot_pos, offsets = nxt
-                            shape = (hi - lo, self._backend.ploidy, None)
+                            shape = (hi - lo, backend.ploidy, None)
                             offsets = np.asarray(offsets, np.int64)
                             out = RaggedAnnotatedHaps(
                                 Ragged.from_offsets(
@@ -1321,16 +1321,12 @@ class _Svar1Backend:
         as `phys_sample_idx[s_lo..s_hi]`. Total job metadata is region-scale
         (`O(n_windows * window_regions)`), never `O(n_windows * n_samples)`.
 
-        `variants` (Wave B PR-B1, #304) is accepted for interface symmetry with the
-        VCF/PGEN backends but not yet implemented here -- `Svar1StreamEngine` has no
-        `next_batch_variants` counterpart yet, so this raises rather than silently
-        falling back to haplotype output. Wired up in a later Wave B task.
+        `variants` (Wave B PR-B1, #304) selects whether the engine's `next_batch_variants`
+        is usable: it forwards straight to the `Svar1StreamEngine` constructor's trailing
+        `variants` parameter, which gates `Svar1Backend::generate_variants` (flat
+        `alt`/`start`/`ilen` variant buffers via the shared `assemble_variants_window`
+        helper) the same way `annotated` gates `next_batch_annotated`.
         """
-        if variants:
-            raise NotImplementedError(
-                "StreamingDataset.with_seqs('variants') for the SVAR1 backend lands "
-                "in Wave B PR-B1 Task 4"
-            )
         from ..genvarloader import Svar1StreamEngine
 
         contig_names = list(self._contigs)
@@ -1397,6 +1393,7 @@ class _Svar1Backend:
             batch_size,
             output_length,
             annotated,
+            variants,
         )
 
     def read_window(

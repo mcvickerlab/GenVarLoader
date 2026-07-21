@@ -565,7 +565,17 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   (`alt`/`alt_offsets`/`start`/`ilen`/`offsets`), and `StreamingDataset.with_seqs("variants")`
   packs a `RaggedVariants` from it (mirrors `_FlatAlleles.to_ragged`/`_Flat.to_ragged`).
   `tests/dataset/test_streaming_variants_parity.py` gates VCF + PGEN byte-identical against
-  the corrected written oracle. SVAR1 wiring is **Task 4**, next.
+  the corrected written oracle. Task 4 (**PR-B1**, SVAR1 backend variants output) ✅ **done**
+  — `Svar1Backend::generate_variants` reuses the same shared `assemble_variants_window`
+  helper Task 2 introduced, adapted for SVAR1's two structural differences: the window CSR
+  (`FilledWindow.o_starts`/`o_stops`) is already region-expanded (flat `o_lo = row_lo*ploidy`
+  slice, no per-sample replication) and its variant ids are dataset-GLOBAL already (gathered
+  straight from the backend's global `v_starts`/`ilens`/`alt_alleles`/`alt_offsets`, no remap).
+  `Svar1StreamEngine.next_batch_variants` mirrors `RecordStreamEngine.next_batch_variants`'s
+  dict marshaling exactly; `_Svar1Backend.build_engine` forwards `variants` straight to the
+  constructor. `tests/dataset/test_streaming_variants_parity.py` now gates all three backends
+  (svar1/vcf/pgen) byte-identical against the written oracle, with a non-vacuous-pass guard
+  (`total_variants > 0`) folded in from Task 3 review.
   **Verification caveat:** with the currently-pinned genoray rev, the described PGEN
   "contig-scoped" leak could not be reproduced end-to-end through `gvl.write()` +
   `Dataset.open()` for disjoint narrow regions (write-time `pgen.var_idxs`/`.chunk` are
