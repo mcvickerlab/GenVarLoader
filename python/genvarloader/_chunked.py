@@ -121,9 +121,9 @@ def slice_chunk(chunk_output, batch_size: int):
     from ._types import AnnotatedHaps
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
-    from ._dataset._flat_variants import _FlatVariants
+    from ._dataset._flat_variants import _FlatVariants, _FlatVariantWindows
 
-    _FLAT_TYPES = (_Flat, _FlatAnnotatedHaps, _FlatVariants)
+    _FLAT_TYPES = (_Flat, _FlatAnnotatedHaps, _FlatVariants, _FlatVariantWindows)
 
     def _len(arr) -> int:
         """Return the outer (instance) dimension length."""

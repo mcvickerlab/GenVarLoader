@@ -49,6 +49,32 @@ if TORCH_AVAILABLE:
 _py_open = open
 
 
+def _info_field_dtype(haps_obj: Haps, f: str) -> np.dtype:
+    """Dtype of variant INFO/store field ``f``, used by ``_output_bytes_per_instance``.
+
+    ``Svar2Haps.variants`` is a dummy placeholder with an empty ``info`` dict;
+    its INFO/store field dtypes live on ``store_fields`` instead. Falls back
+    to ``variants.info[f].dtype`` for other ``Haps`` implementations (e.g.
+    ``Svar1``/VCF/PGEN-backed datasets), where ``variants.info`` is the real
+    on-disk INFO table.
+
+    Args:
+        haps_obj: The ``Haps`` reconstructor whose variant field dtype is
+            being looked up.
+        f: The variant field name (must not be one of the special-cased
+            scalar fields ``start``/``ilen``/``dosage``/``alt``/``ref``,
+            which are handled separately by callers).
+
+    Returns:
+        The numpy dtype of field ``f``.
+    """
+    from ._svar2_haps import Svar2Haps
+
+    if isinstance(haps_obj, Svar2Haps) and f in haps_obj.store_fields:
+        return haps_obj.store_fields[f].dtype
+    return haps_obj.variants.info[f].dtype
+
+
 @dataclass(slots=True, frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals.
@@ -402,14 +428,17 @@ class Dataset:
             haps = to_evolve.get("_seqs", self._seqs)
             new_flank_len = haps.flank_length if flank_length is None else flank_length
             lut, lut_dtype = haps.token_lut, haps.token_dtype
+            alphabet = haps.token_alphabet
             if token_alphabet is not None or unknown_token is not None:
                 if token_alphabet is None or unknown_token is None:
                     raise ValueError(
                         "token_alphabet and unknown_token must be set together."
                     )
                 from ._flat_flanks import build_token_lut
+                from ._flat_variants import _normalize_token_alphabet
 
                 lut, lut_dtype = build_token_lut(token_alphabet, unknown_token)
+                alphabet = _normalize_token_alphabet(token_alphabet)
             if new_flank_len and lut is None:
                 raise ValueError(
                     "flank_length requires a token LUT; pass token_alphabet and"
@@ -423,6 +452,7 @@ class Dataset:
                 unknown_token=(
                     unknown_token if unknown_token is not None else haps.unknown_token
                 ),
+                token_alphabet=alphabet,
             )
 
         if dummy_variant is not None:
@@ -734,6 +764,7 @@ class Dataset:
                 token_dtype=lut_dtype,
                 window_opt=window_opt,
                 unknown_token=window_opt.unknown_token,
+                token_alphabet=window_opt.token_alphabet,
             )
         if (
             kind in ("haplotypes", "annotated")
@@ -1412,10 +1443,26 @@ class Dataset:
             n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
             n_vars_total = n_vars_flat.sum(-1)  # over ploidy → (n_inst,)
             ploidy = n_vars.shape[-1]
+            # Real (on-disk) ploidy, NOT `ploidy` above: under unphased_union,
+            # `ploidy` is folded to 1 (see Dataset.n_variants), but
+            # _allele_bytes_sum groups by the STORED genotypes shape (always
+            # the real ploidy, unphased_union-agnostic). Reshaping its
+            # (len(ds_idx) * real_ploidy,) result with the folded `ploidy`
+            # mis-groups it (wrong element count -> ValueError) instead of
+            # summing every real haplotype's contribution into one
+            # per-instance total, which is what unphased_union's un-deduped
+            # union semantics require either way.
+            real_ploidy = haps_obj.genotypes.shape[-2]
 
+            # "start" is unconditionally emitted by the flat/ragged variant
+            # builders regardless of var_fields (see get_variants_flat's
+            # "start: ALWAYS"), so charge it independent of var_fields
+            # membership -- charging it only when "start" in var_fields
+            # under-counts for e.g. the legal var_fields=["alt"].
+            total += n_vars_total * haps_obj.variants.start.dtype.itemsize
             for f in var_fields:
                 if f == "start":
-                    total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+                    continue  # charged unconditionally above
                 elif f == "ilen":
                     total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
                 elif f == "dosage":
@@ -1424,27 +1471,272 @@ class Dataset:
                     dosage_dtype = haps_obj.dosages.data.dtype
                     total += n_vars_total * dosage_dtype.itemsize
                 elif f in ("alt", "ref"):
-                    # Allele scan: _allele_bytes_sum returns (len(ds_idx) * ploidy,).
+                    # Allele scan: _allele_bytes_sum returns (len(ds_idx) * real_ploidy,).
                     per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
-                    total += per_ploid.reshape(-1, ploidy).sum(-1)
+                    total += per_ploid.reshape(-1, real_ploidy).sum(-1)
                 else:
                     # INFO column: numeric, known dtype from on-disk schema.
-                    # Svar2Haps.variants is a dummy placeholder (info={}) --
-                    # store fields' dtypes live in the store manifest instead.
-                    from ._svar2_haps import Svar2Haps
-
-                    if isinstance(haps_obj, Svar2Haps) and f in haps_obj.store_fields:
-                        info_dtype = haps_obj.store_fields[f].dtype
-                    else:
-                        info_dtype = haps_obj.variants.info[f].dtype
+                    # _info_field_dtype guards Svar2Haps, whose .variants is a
+                    # dummy placeholder (info={}) -- store fields' dtypes live
+                    # in the store manifest instead.
+                    info_dtype = _info_field_dtype(haps_obj, f)
                     total += n_vars_total * info_dtype.itemsize
+            # ride-along flank tokens (flat output only): 2L tokens per variant.
+            if getattr(haps_obj, "flank_length", 0) and haps_obj.token_lut is not None:
+                L = int(haps_obj.flank_length)
+                ft_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+                total += n_vars_total * 2 * L * ft_itemsize
+                if include_offsets:
+                    offset_total += OFF * ploidy  # flank_tokens outer offsets
             if include_offsets:
                 # RaggedVariants (kind=2) writes, per field: outer offsets
                 # (ploidy entries/instance) and, for alt/ref allele fields,
                 # inner offsets (one entry per variant → n_vars_total/instance).
+                # "start" always has its own outer-offsets array (it is always
+                # emitted -- see the unconditional start charge above) even
+                # when absent from var_fields, so count it as an extra field
+                # with offsets in that case.
                 n_allele_fields = sum(1 for f in var_fields if f in ("alt", "ref"))
-                offset_total += OFF * ploidy * len(var_fields)
+                n_fields_with_offsets = len(var_fields) + (
+                    0 if "start" in var_fields else 1
+                )
+                offset_total += OFF * ploidy * n_fields_with_offsets
                 offset_total += OFF * n_vars_total * n_allele_fields
+            # dummy-variant fill: a (region, sample, ploid) group with 0
+            # *post-filter* variants still emits one dummy row when
+            # dummy_variant is active (see Haps.dummy_variant /
+            # _FlatVariants.fill_empty_groups). n_vars_total/n_vars_flat above
+            # are *raw on-disk* counts (self.n_variants()), not post-AF-filter
+            # counts -- min_af/max_af can zero out a group that had real
+            # on-disk variants, so "raw count == 0" is NOT a safe test for
+            # "the flat builder will dummy-fill this group". Rather than
+            # re-deriving the exact post-filter empty-group count here (a
+            # second AF-filter pass duplicating the one in
+            # Haps._allele_bytes_sum / the ref="window" span above),
+            # conservatively charge the dummy row's cost for *every*
+            # (region, sample, ploid) group -- there are exactly `ploidy` such
+            # groups per instance. This only ever over-counts (each instance
+            # gets at most `ploidy` real dummy rows, never more), stays a
+            # provable upper bound under any AF-filter config, and only
+            # applies at all when dummy_variant is opted in.
+            dummy = getattr(haps_obj, "dummy_variant", None)
+            if dummy is not None:
+                n_dummy_groups = ploidy  # upper bound on dummy rows/instance
+                # "start" dummy rows are filled unconditionally too --
+                # fill_empty_groups fills every field in _FlatVariants.fields
+                # (including "start") for each empty group -- so charge it
+                # once here, outside the var_fields loop, mirroring the
+                # real-variant charge above.
+                total += n_dummy_groups * haps_obj.variants.start.dtype.itemsize
+                for f in var_fields:
+                    if f == "start":
+                        continue  # charged unconditionally above
+                    elif f == "ilen":
+                        total += n_dummy_groups * haps_obj.variants.ilen.dtype.itemsize
+                    elif f == "dosage":
+                        if haps_obj.dosages is None:
+                            continue
+                        total += n_dummy_groups * haps_obj.dosages.data.dtype.itemsize
+                    elif f == "alt":
+                        total += n_dummy_groups * len(dummy.alt)
+                    elif f == "ref":
+                        total += n_dummy_groups * len(dummy.ref)
+                    else:
+                        info_dtype = _info_field_dtype(haps_obj, f)
+                        total += n_dummy_groups * info_dtype.itemsize
+                if (
+                    getattr(haps_obj, "flank_length", 0)
+                    and haps_obj.token_lut is not None
+                ):
+                    dummy_L = int(haps_obj.flank_length)
+                    dummy_ft_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+                    total += n_dummy_groups * 2 * dummy_L * dummy_ft_itemsize
+                if include_offsets:
+                    # Only alt/ref inner offsets grow (+1 entry/dummy group);
+                    # scalar and flank_tokens offsets are fixed-length (b*p+1)
+                    # regardless of fill, already covered above. Recomputed
+                    # (not reused from the include_offsets block above) so
+                    # this branch stands alone for the static analyzer.
+                    dummy_n_allele_fields = sum(
+                        1 for f in var_fields if f in ("alt", "ref")
+                    )
+                    offset_total += OFF * n_dummy_groups * dummy_n_allele_fields
+        elif seq_kind == "variant-windows":
+            if not isinstance(self._seqs, Haps):
+                raise AssertionError("variant-windows mode requires Haps")
+            haps_obj = self._seqs
+            opt = haps_obj.window_opt
+            assert opt is not None, "variant-windows requires a VarWindowOpt"
+            L = int(opt.flank_length)
+            tok_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
+            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
+            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
+            n_vars_total = n_vars_flat.sum(-1)
+            ploidy = n_vars.shape[-1]
+            # Real (on-disk) ploidy, NOT `ploidy` above: under unphased_union,
+            # `ploidy` is folded to 1 (see Dataset.n_variants), but
+            # _allele_bytes_sum/genotypes group by the STORED genotypes shape
+            # (always the real ploidy, unphased_union-agnostic). Reshaping
+            # with the folded `ploidy` mis-groups those results (wrong
+            # element count -> ValueError) instead of summing every real
+            # haplotype's contribution into one per-instance total, which is
+            # what unphased_union's un-deduped union semantics require either
+            # way (see the "variants" branch above for the same fix).
+            real_ploidy = haps_obj.genotypes.shape[-2]
+            # alt bytes are always stored on disk (unlike ref); exact sum
+            # reused by both alt="window" (flank5 . alt . flank3) and
+            # alt="allele" (bare alt), same primitive the "variants" branch
+            # uses for alt/ref.
+            alt_alleles = (
+                haps_obj._allele_bytes_sum(ds_idx, "alt")
+                .reshape(-1, real_ploidy)
+                .sum(-1)
+            )
+            if opt.ref == "allele":
+                # bare REF allele bytes. with_seqs('variant-windows', ...)
+                # already rejects ref="allele" when self.variants.ref is
+                # None, so _allele_bytes_sum is safe to call here.
+                ref_span = (
+                    haps_obj._allele_bytes_sum(ds_idx, "ref")
+                    .reshape(-1, real_ploidy)
+                    .sum(-1)
+                )
+            else:
+                # ref="window" reads [start-L, end+L) from the *reference
+                # genome*, not the stored REF allele -- which may not even be
+                # present (e.g. an ALT-only Haps, like get_dummy_dataset()).
+                # Its span is derivable exactly from ilen alone: for
+                # normalized bi-allelic records len(REF) - len(ALT) == -ilen,
+                # i.e. span = 1 + max(-ilen, 0), so this doesn't need REF
+                # storage at all.
+                r_idx_grp, s_idx_grp = np.unravel_index(
+                    ds_idx, haps_obj.genotypes.shape[:2]
+                )
+                genos = haps_obj.genotypes[r_idx_grp, s_idx_grp].to_packed()
+                v_idxs = genos.data
+                grp_offsets = np.asarray(genos.offsets, np.int64)
+                if haps_obj.min_af is not None or haps_obj.max_af is not None:
+                    geno_afs = haps_obj.variants.info["AF"][v_idxs]
+                    keep = np.full(len(v_idxs), True, np.bool_)
+                    if haps_obj.min_af is not None:
+                        keep &= geno_afs >= haps_obj.min_af
+                    if haps_obj.max_af is not None:
+                        keep &= geno_afs <= haps_obj.max_af
+                    v_idxs = v_idxs[keep]
+                    keep_csum = np.concatenate(
+                        [
+                            [np.int64(0)],
+                            np.cumsum(keep.astype(np.int64), dtype=np.int64),
+                        ]
+                    )
+                    grp_offsets = keep_csum[grp_offsets]
+                ilen_sel = np.asarray(haps_obj.variants.ilen)[v_idxs].astype(np.int64)
+                span = 1 + np.maximum(-ilen_sel, 0)
+                span_csum = np.concatenate(
+                    [[np.int64(0)], np.cumsum(span, dtype=np.int64)]
+                )
+                ref_span = (
+                    (span_csum[grp_offsets[1:]] - span_csum[grp_offsets[:-1]])
+                    .reshape(-1, real_ploidy)
+                    .sum(-1)
+                )
+            # token count per present window slot: window slots add 2L flank
+            # tokens per variant; bare allele slots do not.
+            ref_tokens = (
+                (ref_span + n_vars_total * 2 * L) if opt.ref == "window" else ref_span
+            )
+            alt_tokens = (
+                (alt_alleles + n_vars_total * 2 * L)
+                if opt.alt == "window"
+                else alt_alleles
+            )
+            total += (ref_tokens + alt_tokens) * tok_itemsize
+            # scalar .fields (start/ilen/dosage/info) — alt/ref are NOT scalar
+            # fields here (they became window slots). "start" is unconditionally
+            # emitted by the flat variant builder regardless of var_fields (see
+            # get_variants_flat's "start: ALWAYS"), so charge it independent of
+            # var_fields membership -- charging it only when "start" in
+            # var_fields under-counts for e.g. the legal var_fields=["alt"].
+            total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+            for f in haps_obj.var_fields:
+                if f in ("alt", "ref", "start"):
+                    continue  # "start" charged unconditionally above
+                if f == "ilen":
+                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                elif f == "dosage":
+                    if haps_obj.dosages is None:
+                        continue
+                    total += n_vars_total * haps_obj.dosages.data.dtype.itemsize
+                else:
+                    # INFO column: numeric, known dtype from on-disk schema.
+                    # _info_field_dtype guards Svar2Haps, whose .variants is a
+                    # dummy placeholder (info={}) -- store fields' dtypes live
+                    # in the store manifest instead.
+                    info_dtype = _info_field_dtype(haps_obj, f)
+                    total += n_vars_total * info_dtype.itemsize
+            if include_offsets:
+                # "start" always has its own outer-offsets array (it is
+                # always emitted -- see the unconditional start charge above)
+                # even when absent from var_fields, so count it as an extra
+                # scalar field with offsets in that case.
+                n_scalar = sum(
+                    1 for f in haps_obj.var_fields if f not in ("alt", "ref")
+                )
+                if "start" not in haps_obj.var_fields:
+                    n_scalar += 1
+                n_window_slots = 2  # exactly one ref-slot + one alt-slot
+                offset_total += OFF * ploidy * (n_scalar + n_window_slots)
+                offset_total += (
+                    OFF * n_vars_total * n_window_slots
+                )  # inner (per-variant) offsets
+            # dummy-variant fill (see the "variants" branch above for the
+            # full rationale): a group with 0 *post-filter* variants still
+            # gets one dummy window/allele entry per window slot when
+            # dummy_variant is active. n_vars_flat is a *raw on-disk* count,
+            # not post-AF-filter, so it cannot safely identify which groups
+            # the flat builder will actually dummy-fill under min_af/max_af.
+            # Conservatively charge every one of the `ploidy` groups/instance
+            # instead of only the raw-empty ones -- a provable upper bound
+            # under any AF-filter config, at the cost of a modest over-count
+            # (only incurred when dummy_variant is opted in). Window slots
+            # (opt.*="window") get a full 2L-flanked dummy window;
+            # bare-allele slots (opt.*="allele") get just the dummy allele's
+            # tokens.
+            dummy = getattr(haps_obj, "dummy_variant", None)
+            if dummy is not None:
+                n_dummy_groups = ploidy  # upper bound on dummy rows/instance
+                ref_dummy_tok = (
+                    (2 * L + len(dummy.ref)) if opt.ref == "window" else len(dummy.ref)
+                )
+                alt_dummy_tok = (
+                    (2 * L + len(dummy.alt)) if opt.alt == "window" else len(dummy.alt)
+                )
+                total += n_dummy_groups * (ref_dummy_tok + alt_dummy_tok) * tok_itemsize
+                # "start" dummy rows are filled unconditionally too (see the
+                # "variants" branch's dummy loop above for the same rationale)
+                # -- charge it once here, outside the var_fields loop.
+                total += n_dummy_groups * haps_obj.variants.start.dtype.itemsize
+                for f in haps_obj.var_fields:
+                    if f in ("alt", "ref", "start"):
+                        continue  # "start" charged unconditionally above
+                    if f == "ilen":
+                        total += n_dummy_groups * haps_obj.variants.ilen.dtype.itemsize
+                    elif f == "dosage":
+                        if haps_obj.dosages is None:
+                            continue
+                        total += n_dummy_groups * haps_obj.dosages.data.dtype.itemsize
+                    else:
+                        info_dtype = _info_field_dtype(haps_obj, f)
+                        total += n_dummy_groups * info_dtype.itemsize
+                if include_offsets:
+                    # Only the window slots' inner (per-variant) offsets grow
+                    # (+1 entry/dummy group); scalar offsets are fixed-length
+                    # (b*p+1) regardless of fill, already covered above.
+                    # Recomputed (not reused from the include_offsets block
+                    # above) so this branch stands alone for the static
+                    # analyzer.
+                    dummy_n_window_slots = 2  # exactly one ref-slot + one alt-slot
+                    offset_total += OFF * n_dummy_groups * dummy_n_window_slots
         elif seq_kind is None:
             pass
         else:

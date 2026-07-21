@@ -436,3 +436,260 @@ def test_reshape_ragged_for_chunk_leaves_raggedvariants_untouched():
     out = _reshape_ragged_for_chunk([rv], n_instances=2)[0]
     assert out is rv  # untouched
     assert out.shape == (2, 1, None)
+
+
+def test_reshape_ragged_for_chunk_passes_variant_windows():
+    """A _FlatVariantWindows (window-mode variants output) must pass through
+    _reshape_ragged_for_chunk unchanged -- the shm reader already builds correct
+    (b, rs, None, None) per-slot shapes from regular_size, so the generic
+    Ragged/_Flat ploidy-reshape branches must not touch it."""
+    import numpy as np
+    from genvarloader._flat import _Flat
+    from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
+    from genvarloader._double_buffered_loader import _reshape_ragged_for_chunk
+
+    start = _Flat(
+        np.array([1, 2], np.int32), np.array([0, 1, 2], np.int64), (2, 1, None)
+    )
+    rw = _FlatWindow(
+        np.arange(4, dtype=np.uint8),
+        np.array([0, 2, 4], np.int64),
+        np.array([0, 1, 2], np.int64),
+        (2, 1, None, None),
+    )
+    fvw = _FlatVariantWindows({"start": start}, ref_window=rw)
+    out = _reshape_ragged_for_chunk([fvw], n_instances=2)[0]
+    assert isinstance(out, _FlatVariantWindows)
+    assert out.ref_window is not None and out.ref_window.shape[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# PR2: variant-windows and flank-token parity over double_buffered
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("ref,alt", [("window", "window"), ("window", "allele")])
+def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, alt):
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref,
+                alt=alt,
+            ),
+        )
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
+def test_double_buffered_variant_windows_unphased_union_matches_buffered(
+    file_backed_ds,
+):
+    """Regression: unphased_union must be replayed across the producer boundary.
+
+    ``_build_producer_schema`` previously dropped ``unphased_union`` entirely
+    (see ``test_producer_schema.py``'s schema round-trip test for the
+    isolated version of this regression): the parent process sizes shm slots
+    from the folded ploidy-1 shape, but the producer subprocess replayed
+    every other setting while silently decoding at the on-disk ploidy --
+    a content mismatch (or ProducerError from an oversized write) that only
+    surfaces end-to-end, in mode="double_buffered", not in the in-process
+    mode="buffered" path. Mirrors
+    ``test_double_buffered_variant_windows_matches_buffered`` with
+    ``unphased_union=True`` layered on top.
+    """
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref="window",
+                alt="window",
+            ),
+        )
+        .with_settings(unphased_union=True)
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
+def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
+    # unknown_token=0 collides with "A"'s own token id (0) in b"ACGT". This used
+    # to make double_buffered raise (the producer schema recovered token_alphabet
+    # by inverting Haps.token_lut, which is provably lossy for this collision) even
+    # though mode="buffered"/mode=None handle it fine -- a parity break for a
+    # legal, common config (0 as a natural pad/unknown id). Haps now stores
+    # token_alphabet directly, so this must pass end-to-end.
+    ds = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
+        .with_output_format("flat")
+    )
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        # Values are ragged (variable ploidy/length) across instances in this
+        # file-backed dataset, so a plain nested-list comparison is used instead of
+        # np.testing.assert_array_equal, which raises ValueError trying to build a
+        # homogeneous ndarray from a jagged nested list rather than comparing it.
+        assert (
+            b.flank_tokens.to_ragged().to_ak().to_list()
+            == d.flank_tokens.to_ragged().to_ak().to_list()
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task 2.6: slot-fit regression -- byte accounting must not undersize slots
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_double_buffered_variant_windows_slot_fits(file_backed_ds):
+    """Content-parity + no-raise check: double_buffered variant-windows vs. buffered.
+
+    Mirrors ``test_double_buffered_variants_offset_overflow_regression`` but for
+    the newer ``variant-windows`` flat output. Confirms ``double_buffered``
+    does not raise and its chunk count matches ``buffered`` under a
+    moderately tight ``buffer_bytes``.
+
+    This does NOT tightly pin the byte-accounting bound in
+    ``_output_bytes_per_instance``: on this small (~10 region x 3 sample)
+    fixture, the shm slot's fixed ~8KB slack (``HEADER_RESERVED`` + 4096, see
+    ``_double_buffered_loader.py``) absorbs under-estimates far larger than
+    anything this fixture can produce, so an under-count here would not
+    reliably surface as ``ProducerError``. The direct, slack-free bound check
+    lives in ``tests/unit/dataset/test_output_bytes_dummy_variant.py``
+    (compares ``_output_bytes_per_instance(..., include_offsets=True)``
+    straight against ``_shm_layout.write_chunk``'s real output, no subprocess
+    or fixed slack involved) -- that file is what actually guards the
+    byte-accounting fix.
+    """
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    # Must not raise ProducerError (buffer too small) -- byte accounting must not undersize.
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+
+
+@pytest.mark.slow
+def test_double_buffered_dummy_variant_windows_slot_fits(file_backed_ds):
+    """Content-parity + no-raise check: double_buffered variant-windows + dummy_variant.
+
+    When ``dummy_variant`` is set and a (region, sample, ploid) group has
+    zero real variants, the flat builder inserts one dummy row (a full
+    ``2*flank_length + len(dummy allele)`` token window per window slot) into
+    that otherwise-empty group. This test confirms ``double_buffered``
+    doesn't raise and matches ``buffered`` element-for-element on this
+    fixture (``snap_dataset``-style fixtures built from ``synthetic_case``
+    are known to contain empty groups in the first few (region, sample)
+    pairs -- see ``test_b_dummy_fill_no_empty_groups`` in
+    ``tests/dataset/test_flat_mode_equivalence.py`` -- so ``file_backed_ds``
+    exercises the dummy-fill path without any extra fixture construction).
+
+    Like ``test_double_buffered_variant_windows_slot_fits``, this does NOT
+    tightly pin the byte-accounting bound -- the fixed shm slack absorbs
+    under-estimates on a fixture this small. See
+    ``tests/unit/dataset/test_output_bytes_dummy_variant.py`` for the direct,
+    slack-free bound check (including the AF-filter + dummy_variant
+    interaction, which this fixture's raw-empty-only groups don't exercise).
+    """
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
+    ds = (
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_settings(dummy_variant=dv)
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        da, dbb = b.to_ragged(), d.to_ragged()
+        assert set(da) == set(dbb)
+        for k in da:
+            assert da[k].to_ak().to_list() == dbb[k].to_ak().to_list()
+
+
+@pytest.mark.slow
+def test_double_buffered_dummy_variant_flank_tokens_slot_fits(file_backed_ds):
+    """Content-parity + no-raise check: double_buffered variants + flank_tokens + dummy_variant.
+
+    Same shape as ``test_double_buffered_dummy_variant_windows_slot_fits``,
+    but for the sibling ``variants`` branch of ``_output_bytes_per_instance``
+    (Config B: flat ``variants`` output with ride-along ``flank_tokens``). A
+    dummy-filled empty group contributes a dummy allele's worth of alt/ref
+    bytes plus a full ``2*flank_length`` token ``flank_tokens`` row.
+
+    As with the other slot-fit tests in this section, this checks content
+    parity + no-raise, not the byte-accounting bound itself (the fixed shm
+    slack on this fixture absorbs under-estimates too small to trip
+    ``ProducerError`` here) -- see
+    ``tests/unit/dataset/test_output_bytes_dummy_variant.py`` for the direct
+    bound check.
+    """
+    dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
+    ds = (
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(
+            dummy_variant=dv, flank_length=2, token_alphabet=b"ACGT", unknown_token=4
+        )
+        .with_output_format("flat")
+    )
+    common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
+    db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
+    buf = list(ds.to_dataloader(mode="buffered", **common))
+    assert len(db) == len(buf)
+    for b, d in zip(buf, db):
+        assert (
+            b.flank_tokens.to_ragged().to_ak().to_list()
+            == d.flank_tokens.to_ragged().to_ak().to_list()
+        )

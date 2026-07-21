@@ -246,6 +246,31 @@ class _FlatWindow:
             self.data, self.seq_offsets, self.var_offsets, (*fixed, None, None)
         )
 
+    def __getitem__(self, key) -> "_FlatWindow":
+        """Slice the leading (instance) axis, rebasing both offset levels."""
+        if not isinstance(key, slice):
+            raise TypeError(
+                f"_FlatWindow supports only instance-axis slicing, got {key!r}"
+            )
+        n_inst = self.shape[0]
+        if n_inst is None:
+            raise ValueError("_FlatWindow.__getitem__: leading axis is the ragged axis")
+        start, stop, step = key.indices(n_inst)
+        if step != 1:
+            raise ValueError("_FlatWindow slicing supports step=1 only")
+        rows_per_inst = (len(self.var_offsets) - 1) // n_inst if n_inst else 0
+        r0, r1 = start * rows_per_inst, stop * rows_per_inst
+        v0, v1 = int(self.var_offsets[r0]), int(self.var_offsets[r1])
+        new_var = np.ascontiguousarray(
+            self.var_offsets[r0 : r1 + 1] - self.var_offsets[r0]
+        )
+        new_seq = np.ascontiguousarray(
+            self.seq_offsets[v0 : v1 + 1] - self.seq_offsets[v0]
+        )
+        new_data = self.data[int(self.seq_offsets[v0]) : int(self.seq_offsets[v1])]
+        new_shape = (stop - start,) + self.shape[1:]
+        return _FlatWindow(new_data, new_seq, new_var, new_shape)
+
 
 def _normalize_token_alphabet(alphabet: "str | bytes | sp.NucleotideAlphabet") -> bytes:
     """Normalize a token alphabet to the raw ``bytes`` downstream consumers expect.
@@ -369,6 +394,13 @@ class _FlatVariantWindows:
 
         return _FlatVariantWindows(new_fields, **present)
 
+    def __getitem__(self, key) -> "_FlatVariantWindows":
+        """Slice the leading (instance) axis of every scalar field and window slot."""
+        present = {n: w[key] for n, w in self._present().items()}
+        return _FlatVariantWindows(
+            {k: v[key] for k, v in self.fields.items()}, **present
+        )
+
 
 @dataclass(slots=True)
 class _FlatVariants:
@@ -423,16 +455,40 @@ class _FlatVariants:
         return new
 
     def __getitem__(self, key) -> "_FlatVariants":
-        # flank_tokens (shape (b, ploidy, None, 2L), ragged axis in the middle)
-        # cannot be sliced by the instance-axis _Flat.__getitem__, and the
-        # buffered transport path does not carry it. Slicing a _FlatVariants that
-        # has flank_tokens is unsupported rather than silently lossy.
+        """Slice the leading (instance) axis, carrying ``flank_tokens`` along.
+
+        ``flank_tokens`` has shape ``(b, ploidy, ~v, 2L)``: its offsets (length
+        ``b*ploidy + 1``) bound variants per ``(instance, ploid)`` row, and each
+        variant contributes a fixed ``2L``-token run, so it slices with the same
+        two-level rebasing as ``_FlatAlleles``/``_FlatWindow`` rather than the
+        generic instance-axis-leading ``_Flat.__getitem__``.
+        """
+        out = _FlatVariants({k: v[key] for k, v in self.fields.items()})
         if self.flank_tokens is not None:
-            raise NotImplementedError(
-                "Instance-axis slicing of _FlatVariants with flank_tokens is not "
-                "supported; flank tokens are not carried on the buffered transport path."
-            )
-        return _FlatVariants({k: v[key] for k, v in self.fields.items()})
+            from .._flat import _Flat
+
+            if not isinstance(key, slice):
+                raise TypeError(
+                    f"_FlatVariants supports only instance-axis slicing, got {key!r}"
+                )
+            ft = self.flank_tokens
+            n_inst = ft.shape[0]
+            if n_inst is None:
+                raise ValueError(
+                    "_FlatVariants.__getitem__: flank_tokens leading axis is the ragged axis"
+                )
+            start, stop, step = key.indices(n_inst)
+            if step != 1:
+                raise ValueError("_FlatVariants slicing supports step=1 only")
+            inner = ft.shape[-1]  # 2L, fixed per-variant token run
+            rows_per_inst = (len(ft.offsets) - 1) // n_inst if n_inst else 0
+            r0, r1 = start * rows_per_inst, stop * rows_per_inst
+            v0, v1 = int(ft.offsets[r0]), int(ft.offsets[r1])
+            new_off = np.ascontiguousarray(ft.offsets[r0 : r1 + 1] - ft.offsets[r0])
+            new_data = ft.data[v0 * inner : v1 * inner]
+            new_shape = (stop - start,) + ft.shape[1:]
+            out.flank_tokens = _Flat(new_data, new_off, new_shape)
+        return out
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatVariants":
         # Only alt/ref alleles are reverse-complemented; scalar fields unchanged

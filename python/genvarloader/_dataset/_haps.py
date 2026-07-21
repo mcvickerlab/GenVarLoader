@@ -280,6 +280,12 @@ class Haps(Reconstructor[_H]):
     """Output dtype of tokens produced via ``token_lut``."""
     unknown_token: int | None = None
     """Token id for bytes outside ``token_alphabet`` (set with ``token_lut``)."""
+    token_alphabet: bytes | None = None
+    """The normalized alphabet ``token_lut`` was built from (see
+    ``_normalize_token_alphabet``). Set together with ``token_lut``/``token_dtype``/
+    ``unknown_token`` so the original alphabet survives alongside the derived LUT
+    (needed to serialize a ``with_settings(token_alphabet=...)`` config for
+    ``mode='double_buffered'`` without lossily inverting the LUT)."""
     window_opt: VarWindowOpt | None = None
     """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
     unphased_union: bool = False

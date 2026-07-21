@@ -41,15 +41,144 @@ def _cleanup(shms: list, producer_ref) -> None:
             pass
 
 
+def _build_producer_schema(ds: "Dataset") -> dict:
+    """Build the serializable schema dict the producer subprocess replays.
+
+    Factored out of ``_spawn_producer`` so it is a pure function of ``ds``
+    (no process spawn, no requirement that ``ds`` be file-backed), which lets
+    tests exercise the exact schema-emission logic directly and feed the
+    result straight into ``_producer._apply_schema`` for a full round trip.
+
+    Args:
+        ds: The dataset the producer subprocess should replay.
+
+    Returns:
+        A plain dict of JSON/pickle-safe primitives describing how to
+        rebuild ``ds`` from a freshly opened ``Dataset.open(ds.path)``.
+
+    Raises:
+        ValueError: If ``ds`` uses a splice or a non-default track
+            ``insertion_fill`` strategy, neither of which ``mode='double_buffered'``
+            supports.
+    """
+    from ._dataset._reconstruct import Haps
+    from ._dataset._insertion_fill import Repeat5p
+
+    if ds.is_spliced:
+        raise ValueError(
+            "mode='double_buffered' is not supported when splice_info is set; "
+            "use mode='buffered' instead."
+        )
+    tracks = ds._tracks
+    if tracks is not None and tracks.insertion_fill:
+        non_default = {
+            name: fill
+            for name, fill in tracks.insertion_fill.items()
+            if not isinstance(fill, Repeat5p)
+        }
+        if non_default:
+            raise ValueError(
+                "mode='double_buffered' is not supported when non-default insertion_fill "
+                f"strategies are set ({list(non_default)}); use mode='buffered' instead."
+            )
+
+    schema: dict = {
+        "with_seqs": ds.sequence_type,
+        "with_tracks": ds.active_tracks if ds.active_tracks else False,
+        "deterministic": ds.deterministic,
+        "rc_neg": ds.rc_neg,
+        "jitter": ds.jitter,
+        "output_format": ds.output_format,
+    }
+
+    seqs = ds._seqs
+    if isinstance(seqs, Haps):
+        if seqs.min_af is not None:
+            schema["min_af"] = seqs.min_af
+        if seqs.max_af is not None:
+            schema["max_af"] = seqs.max_af
+        if seqs.filter is not None:
+            schema["var_filter"] = seqs.filter
+        if hasattr(seqs, "var_fields"):
+            schema["var_fields"] = list(seqs.var_fields)
+        if seqs.unphased_union:
+            # Folds ploidy -> 1 for "variants"/"variant-windows" output (see
+            # Dataset.with_settings' unphased_union docs). The parent process
+            # sizes the shm slot from the folded ploidy-1 shape, so the
+            # producer subprocess MUST replay this setting -- otherwise it
+            # decodes at the on-disk ploidy and emits mismatched (larger)
+            # rows, which either overflows the slot or silently diverges from
+            # mode="buffered"/mode=None output.
+            schema["unphased_union"] = True
+
+        # Key Config A vs Config B on the actual output kind
+        # (``ds.sequence_type``), not on ``seqs.window_opt`` truthiness:
+        # ``Haps.window_opt`` is never cleared when the builder chain
+        # switches away from ``with_seqs("variant-windows", ...)`` (see
+        # ``_impl.py``'s ``with_seqs``), so a chain like
+        # ``.with_seqs("variant-windows", opt).with_seqs("variants")
+        # .with_settings(flank_length=...)`` leaves a *stale* non-None
+        # ``window_opt`` sitting alongside an *active* flank config.
+        # Branching on truthiness would silently take the Config-A branch
+        # and drop the real flank settings from the schema.
+        window_opt = getattr(seqs, "window_opt", None)
+        if ds.sequence_type == "variant-windows" and window_opt is not None:
+            schema["window_opt"] = {
+                "flank_length": window_opt.flank_length,
+                "token_alphabet": window_opt.token_alphabet,
+                "unknown_token": window_opt.unknown_token,
+                "ref": window_opt.ref,
+                "alt": window_opt.alt,
+            }
+        elif getattr(seqs, "flank_length", None) and seqs.token_lut is not None:
+            # Plain-variants ride-along flank tokens (Config B). ``Haps``
+            # stores the normalized ``token_alphabet`` alongside the derived
+            # LUT (see ``_haps.py``), so read it directly instead of
+            # inverting the LUT.
+            schema["flank_length"] = seqs.flank_length
+            schema["token_alphabet"] = seqs.token_alphabet
+            schema["unknown_token"] = seqs.unknown_token
+
+        dummy_variant = getattr(seqs, "dummy_variant", None)
+        if dummy_variant is not None:
+            # Emitted as a plain field dict (not the DummyVariant object itself)
+            # to match the window_opt/flank-tokens pattern above -- the producer
+            # subprocess rebuilds it via ``DummyVariant(**schema["dummy_variant"])``.
+            schema["dummy_variant"] = {
+                "start": dummy_variant.start,
+                "ilen": dummy_variant.ilen,
+                "dosage": dummy_variant.dosage,
+                "ref": dummy_variant.ref,
+                "alt": dummy_variant.alt,
+                "info": dict(dummy_variant.info),
+            }
+
+    ref = getattr(ds, "reference", None)
+    if ref is not None:
+        ref_path = getattr(ref, "path", None)
+        if ref_path is not None:
+            schema["reference_path"] = str(ref_path)
+            # Detect whether the reference was opened as a memmap (in_memory=False).
+            # If so, tell the producer subprocess to do the same, ensuring
+            # identical data is returned for the same (r, s) indices.
+            ref_data = getattr(ref, "reference", None)
+            schema["reference_in_memory"] = not isinstance(ref_data, np.memmap)
+
+    return schema
+
+
 def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
     """Re-introduce the ploidy axis on any Ragged / _Flat that the shm reader flattened to (n_groups, None).
 
     _FlatVariants / RaggedVariants already carry ploidy (regular_size) and are left unchanged.
+    _FlatVariantWindows is likewise a passthrough: the shm reader builds its per-slot
+    shapes directly as (b, rs, None, None), so no reshape is needed.
     """
     from seqpro.rag import Ragged
 
     from ._ragged import RaggedAnnotatedHaps
     from ._flat import _Flat, _FlatAnnotatedHaps
+    from ._dataset._flat_variants import _FlatVariantWindows
     from ._dataset._rag_variants import RaggedVariants
 
     def _reshape_one(arr):
@@ -85,6 +214,11 @@ def _reshape_ragged_for_chunk(views: list, n_instances: int) -> list:
 
     result: list = []
     for arr in views:
+        if isinstance(arr, _FlatVariantWindows):
+            # The shm reader already builds correct (b, rs, None, None) per-slot
+            # shapes from regular_size; don't let the generic branches mangle it.
+            result.append(arr)
+            continue
         if isinstance(arr, RaggedAnnotatedHaps):
             arr = RaggedAnnotatedHaps(
                 haps=_reshape_one(arr.haps),
@@ -173,59 +307,9 @@ class _DoubleBufferedIterable:
 
     def _spawn_producer(self) -> None:
         from ._producer import producer_main
-        from ._dataset._reconstruct import Haps
-        from ._dataset._insertion_fill import Repeat5p
 
         ds = self._dataset
-
-        if ds.is_spliced:
-            raise ValueError(
-                "mode='double_buffered' is not supported when splice_info is set; "
-                "use mode='buffered' instead."
-            )
-        tracks = ds._tracks
-        if tracks is not None and tracks.insertion_fill:
-            non_default = {
-                name: fill
-                for name, fill in tracks.insertion_fill.items()
-                if not isinstance(fill, Repeat5p)
-            }
-            if non_default:
-                raise ValueError(
-                    "mode='double_buffered' is not supported when non-default insertion_fill "
-                    f"strategies are set ({list(non_default)}); use mode='buffered' instead."
-                )
-
-        schema: dict = {
-            "with_seqs": ds.sequence_type,
-            "with_tracks": ds.active_tracks if ds.active_tracks else False,
-            "deterministic": ds.deterministic,
-            "rc_neg": ds.rc_neg,
-            "jitter": ds.jitter,
-            "output_format": ds.output_format,
-        }
-
-        seqs = ds._seqs
-        if isinstance(seqs, Haps):
-            if seqs.min_af is not None:
-                schema["min_af"] = seqs.min_af
-            if seqs.max_af is not None:
-                schema["max_af"] = seqs.max_af
-            if seqs.filter is not None:
-                schema["var_filter"] = seqs.filter
-            if hasattr(seqs, "var_fields"):
-                schema["var_fields"] = list(seqs.var_fields)
-
-        ref = getattr(ds, "reference", None)
-        if ref is not None:
-            ref_path = getattr(ref, "path", None)
-            if ref_path is not None:
-                schema["reference_path"] = str(ref_path)
-                # Detect whether the reference was opened as a memmap (in_memory=False).
-                # If so, tell the producer subprocess to do the same, ensuring
-                # identical data is returned for the same (r, s) indices.
-                ref_data = getattr(ref, "reference", None)
-                schema["reference_in_memory"] = not isinstance(ref_data, np.memmap)
+        schema = _build_producer_schema(ds)
 
         ds_path = ds.path
         if not ds_path.is_dir():
