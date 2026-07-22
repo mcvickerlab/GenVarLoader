@@ -582,7 +582,13 @@ class StreamingDataset:
                         for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                     ]
                 engine = backend.build_engine(
-                    engine_jobs, batch_size, _out_len, _annotated, _variants
+                    engine_jobs,
+                    batch_size,
+                    _out_len,
+                    _annotated,
+                    _variants,
+                    min_af=self._min_af,
+                    max_af=self._max_af,
                 )
                 del engine_jobs
                 # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
@@ -1194,7 +1200,17 @@ class _Svar1Backend:
 
         self._contigs = list(contigs)
 
-        sv = SparseVar(str(svar_path))
+        # Wave B PR-B2 (#317): `SparseVar._scan_index` only selects a fixed column
+        # set (CHROM/POS/REF/ALT/ILEN/`index`) plus whatever `attrs` the caller
+        # requests -- a plain `SparseVar(path)` silently omits a cached "AF" column
+        # even when `cache_afs()` has already written it to `index.arrow` on disk.
+        # Peek the on-disk schema (same `index.arrow` layout `_svar_link.py` reads
+        # directly) and request "AF" explicitly when present, so `idx["AF"]` below
+        # is actually populated for stores with cached AF.
+        _has_cached_af = (
+            "AF" in pl.scan_ipc(Path(svar_path) / "index.arrow").collect_schema()
+        )
+        sv = SparseVar(str(svar_path), attrs=["AF"] if _has_cached_af else None)
         # `gvl.write()` always lexicographically sorts sample names
         # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
         # sample index `s` means "the s-th name in sorted order" -- NOT the
@@ -1231,6 +1247,17 @@ class _Svar1Backend:
         )
 
         idx = sv.index.sort("index")
+        # Wave B PR-B2 (#317): cached per-variant AF, row-aligned with `idx` at THIS
+        # point -- read before `_canonicalize_variant_table` below, which is a pure
+        # per-row column transform (no reorder/filter/row-count change), so alignment
+        # with the Rust global `v_starts`/`ilens` tables built from the canonicalized
+        # `idx` further down holds. `None` when the store has no cached AF (streaming
+        # `min_af`/`max_af` is then a no-op via `has_cached_af`/`build_engine`).
+        self._afs = (
+            idx["AF"].to_numpy().astype(np.float32, copy=False)
+            if "AF" in idx.columns
+            else None
+        )
         # Same "valid inputs only" contract `gvl.write` enforces (validated, not
         # fixed up). This is load-bearing here, not just parity-cosmetic: `ilens`
         # (used both to derive `v_ends` for the range search and by the
@@ -1325,6 +1352,13 @@ class _Svar1Backend:
             self._contig_arrays[c] = (vs_c, ve_c)
             self._contig_meta[c] = (contig_start, n_local, max_v_len)
 
+    @property
+    def has_cached_af(self) -> bool:
+        """Whether this store has cached per-variant AF (Wave B PR-B2, #317) --
+        `SparseVar.cache_afs()` has been run and `min_af`/`max_af` filtering is
+        therefore available on this backend."""
+        return self._afs is not None
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -1332,6 +1366,8 @@ class _Svar1Backend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,
+        max_af: "float | None" = None,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -1359,6 +1395,13 @@ class _Svar1Backend:
         `variants` parameter, which gates `Svar1Backend::generate_variants` (flat
         `alt`/`start`/`ilen` variant buffers via the shared `assemble_variants_window`
         helper) the same way `annotated` gates `next_batch_annotated`.
+
+        `min_af`/`max_af` (Wave B PR-B2, #317) forward straight to the engine
+        constructor's trailing `afs`/`min_af`/`max_af` parameters. `afs` (this
+        backend's cached per-variant AF, `self._afs`) is only passed when filtering
+        is actually requested (`min_af is not None or max_af is not None`) -- a
+        no-filter job stays zero-cost, matching the `afs=None` no-op fast path
+        documented on the Rust side (`stream_engine.rs`).
         """
         from ..genvarloader import Svar1StreamEngine
 
@@ -1427,6 +1470,9 @@ class _Svar1Backend:
             output_length,
             annotated,
             variants,
+            afs=(self._afs if (min_af is not None or max_af is not None) else None),
+            min_af=min_af,
+            max_af=max_af,
         )
 
     def read_window(
@@ -1895,6 +1941,8 @@ class _VcfBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
+        max_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -2036,6 +2084,8 @@ class _PgenBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
+        max_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
