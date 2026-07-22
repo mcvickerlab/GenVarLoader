@@ -148,6 +148,9 @@ class StreamingDataset:
     _rng: "int | np.random.Generator | None" = None
     # Deterministic: disables random within-window shifts for fixed-length output.
     _deterministic: bool = True
+    # Inclusive allele-frequency bounds for `with_seqs("variants")` (PR-B2, #317).
+    _min_af: "float | None" = None
+    _max_af: "float | None" = None
 
     def __init__(
         self,
@@ -284,6 +287,8 @@ class StreamingDataset:
             "_jitter",
             "_rng",
             "_deterministic",
+            "_min_af",
+            "_max_af",
         ):
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
@@ -1012,6 +1017,8 @@ class StreamingDataset:
         jitter: "int | None" = None,
         rng: "int | np.random.Generator | None" = None,
         deterministic: "bool | None" = None,
+        min_af: "float | None" = None,
+        max_af: "float | None" = None,
     ) -> "StreamingDataset":
         """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
         relevant subset of :meth:`Dataset.with_settings` (same parameter names).
@@ -1036,6 +1043,16 @@ class StreamingDataset:
             not yet implemented (documented Wave A deferral -- needs a Rust engine
             API addition). Currently has no observable effect on ``to_iter``'s
             output.
+        min_af
+            Inclusive lower allele-frequency bound for ``with_seqs("variants")``.
+            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
+            field); otherwise raises at iterate time. Matches
+            :meth:`Dataset.with_settings`.
+        max_af
+            Inclusive upper allele-frequency bound for ``with_seqs("variants")``.
+            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
+            field); otherwise raises at iterate time. Matches
+            :meth:`Dataset.with_settings`.
 
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
@@ -1049,6 +1066,10 @@ class StreamingDataset:
             object.__setattr__(out, "_rng", rng)
         if deterministic is not None:
             object.__setattr__(out, "_deterministic", bool(deterministic))
+        if min_af is not None:
+            object.__setattr__(out, "_min_af", float(min_af))
+        if max_af is not None:
+            object.__setattr__(out, "_max_af", float(max_af))
         return out
 
     def __getitem__(self, idx) -> None:

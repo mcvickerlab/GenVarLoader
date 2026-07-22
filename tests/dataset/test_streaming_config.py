@@ -1,6 +1,7 @@
 import polars as pl
 import pytest
 
+import genvarloader as gvl
 from genvarloader._dataset._streaming import StreamingDataset
 from genvarloader._ragged import RaggedSeqs
 
@@ -57,6 +58,16 @@ def test_with_settings_sets_jitter_rng_deterministic():
     assert sds._jitter == 4
     assert sds._rng == 0
     assert sds._deterministic is False
+
+
+def test_with_settings_min_max_af_stored(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert sds._min_af is None and sds._max_af is None
+    out = sds.with_settings(min_af=0.1, max_af=0.9)
+    assert out._min_af == 0.1 and out._max_af == 0.9
+    assert sds._min_af is None and sds._max_af is None  # immutable
+    assert out._jitter == sds._jitter  # copy preserves others
 
 
 def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
