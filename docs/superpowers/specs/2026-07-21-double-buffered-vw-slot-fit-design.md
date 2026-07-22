@@ -1,7 +1,9 @@
 # double_buffered variant-windows slot-fit (#315)
 
 **Date:** 2026-07-21
-**Status:** Draft (design) — pending real-corpus root-cause confirmation
+**Status:** Partially implemented — Layers 2a/2b/2c + Phase 0 done; **Layer 1 (estimate
+fix) deferred**, blocked on the real-corpus pin. See
+[Phase 0 findings](./2026-07-21-phase0-findings.md).
 **Issue:** [#315](https://github.com/mcvickerlab/GenVarLoader/issues/315)
 **Branch/target:** `fix/315-double-buffered-vw-slot` → `main` (this is the *released*
 `gvl.Dataset.to_dataloader` double-buffer path, **not** StreamingDataset work — see the
@@ -244,3 +246,19 @@ for prose docs).
 3. Full-tree + cargo verification; update #315 with the corrected repro + confirmed root
    cause + fix.
 4. Layer 3 (`realign_tracks`) as a separate issue + PR.
+
+## Implementation status (2026-07-21)
+
+| Layer | Status | Commit / note |
+|-------|--------|---------------|
+| **Phase 0** — pin divergence | ✅ done (negative) | Estimate is a **verified per-instance upper bound** for every synthetic record type × VCF/PGEN/SVAR on the released `Haps` path; `M == K == W`; `real − est` is a per-chunk constant covered by `slot_overhead`. Real-corpus divergence **not reproducible** synthetically. See [Phase 0 findings](./2026-07-21-phase0-findings.md). |
+| **2c** — schema-derived slot overhead (drop magic 4096) | ✅ done | `slot_overhead_bytes(dataset)` in `_slot_overhead.py`, wired into `_double_buffered_loader.py`; floored at 4096. |
+| **2a** — producer write-time guard | ✅ done | `SlotOverflowError(ValueError)` in `_shm_layout.py`; `write_chunk` translates the cryptic numpy overflow into an actionable "lower batch_size / raise buffer_bytes" error. |
+| **2b** — upper-bound property test | ✅ done | `tests/unit/test_slot_fit_property.py`; asserts `est + slot_overhead ≥ real` across ref/alt × unphased_union × flank × {dummy,VCF,PGEN,SVAR} (44 views, all pass). |
+| **1** — estimate upper-bound fix for the pinned case | ⏸ **deferred / blocked** | No reproducible divergence to fix; the design doc's hypothesized `to_packed()` mismatch is structurally impossible on the `Haps` path (Phase 0). Needs the **real Hartwig corpus** to pin, or a scope decision to adopt the **grow-or-split** escalation. Layer 1 must not proceed on a guess. |
+| **3** — `realign_tracks` propagation (Bug A) | ⬜ separate issue + PR | Out of scope for this PR. |
+
+**Net effect shipped so far:** the reported Hartwig config no longer fails with a cryptic
+`np.frombuffer` error — it now raises `SlotOverflowError` with an actionable remedy — and
+the slot-fit invariant is locked in CI. Making that config *fit* (rather than fail loud)
+still requires Layer 1, which is blocked as above.
