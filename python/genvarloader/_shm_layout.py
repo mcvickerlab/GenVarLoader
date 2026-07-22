@@ -59,6 +59,16 @@ from typing import Sequence
 
 import numpy as np
 
+
+class SlotOverflowError(ValueError):
+    """A serialized chunk does not fit its shared-memory slot.
+
+    Raised by write_chunk in place of the raw numpy "buffer is smaller than
+    requested size". Indicates the per-instance byte estimate under-sized the
+    slot for this chunk: lower batch_size or raise buffer_bytes.
+    """
+
+
 HEADER_RESERVED = 4096
 
 _PREAMBLE = struct.Struct("<QQB")  # n_instances, payload_bytes, n_arrays
@@ -422,20 +432,33 @@ def write_chunk(
     cursor = HEADER_RESERVED
 
     for a in arrays:
-        if isinstance(a, _FlatVariantWindows):
-            desc, cursor = _write_flat_variant_windows(buf, a, cursor)
-        elif isinstance(a, _FlatVariants):
-            desc, cursor = _write_flat_variants(buf, a, cursor)
-        elif isinstance(a, RaggedVariants):
-            desc, cursor = _write_rag_variants(buf, a, cursor)
-        elif isinstance(a, (RaggedAnnotatedHaps, _FlatAnnotatedHaps)):
-            desc, cursor = _write_rag_annotated(buf, a, cursor)
-        elif isinstance(a, (Ragged, _Flat)):
-            desc, cursor = _write_ragged(buf, a, cursor)
-        elif isinstance(a, np.ndarray):
-            desc, cursor = _write_dense(buf, a, cursor)
-        else:
-            raise TypeError(f"write_chunk: unsupported array type {type(a)}")
+        try:
+            if isinstance(a, _FlatVariantWindows):
+                desc, cursor = _write_flat_variant_windows(buf, a, cursor)
+            elif isinstance(a, _FlatVariants):
+                desc, cursor = _write_flat_variants(buf, a, cursor)
+            elif isinstance(a, RaggedVariants):
+                desc, cursor = _write_rag_variants(buf, a, cursor)
+            elif isinstance(a, (RaggedAnnotatedHaps, _FlatAnnotatedHaps)):
+                desc, cursor = _write_rag_annotated(buf, a, cursor)
+            elif isinstance(a, (Ragged, _Flat)):
+                desc, cursor = _write_ragged(buf, a, cursor)
+            elif isinstance(a, np.ndarray):
+                desc, cursor = _write_dense(buf, a, cursor)
+            else:
+                raise TypeError(f"write_chunk: unsupported array type {type(a)}")
+        except ValueError as e:
+            # numpy raises "buffer is smaller than requested size" when a write
+            # offset+extent exceeds the slot. Re-raise with actionable context;
+            # let unrelated ValueErrors (e.g. the TypeError branch) propagate.
+            if "buffer is smaller than requested size" not in str(e):
+                raise
+            raise SlotOverflowError(
+                f"serialized chunk (n_instances={n_instances}) does not fit the "
+                f"shared-memory slot of {len(buf)} bytes. The per-instance byte "
+                f"estimate under-sized this slot. Lower batch_size or raise "
+                f"buffer_bytes."
+            ) from e
         descriptors.append(desc)
 
     payload_bytes = cursor - HEADER_RESERVED
