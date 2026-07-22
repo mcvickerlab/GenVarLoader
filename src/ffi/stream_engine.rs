@@ -57,6 +57,7 @@ use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::svar1::store::Svar1Store;
@@ -130,6 +131,13 @@ struct Svar1Backend {
     /// needed, even across contigs. `false` (default) preserves pre-Task-4 behavior
     /// exactly (no extra allocation/work).
     annotated: bool,
+    /// Wave B PR-B1 (variants-output streaming): when `true`, callers may invoke
+    /// [`EngineBackend::generate_variants`]'s `Svar1Backend` override to get flat
+    /// variant buffers (`VariantsBatch`) for a batch row slice instead of reconstructed
+    /// haplotype bytes. Mirrors `annotated`'s shape; guarded at the top of that override
+    /// (bails if `false`) and surfaced to Python via `next_batch_variants`. `false`
+    /// (default) preserves pre-Task-4 behavior exactly.
+    variants: bool,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -221,6 +229,92 @@ impl EngineBackend for Svar1Backend {
             self.parallel,
         ))
     }
+
+    /// Wave B PR-B1: generate the `[row_lo, row_hi)` slice of this window's rows as flat
+    /// VARIANT buffers rather than reconstructed haplotype bytes — the SVAR1 counterpart
+    /// of `RecordBackend::generate_variants` (`crate::record_stream::engine`), which this
+    /// mirrors closely EXCEPT for two structural differences from SVAR1's on-disk layout:
+    ///
+    /// 1. **CSR is already region-expanded.** Unlike `DecodedWindow`'s single per-hap CSR
+    ///    (`RecordBackend` must replicate a sample's run across regions, see that method's
+    ///    doc comment), `slot.o_starts`/`slot.o_stops` (`FilledWindow`, from
+    ///    `Svar1Store::read_window`) are ALREADY one absolute index-pair per
+    ///    `(region, sample, ploid)` — `find_ranges` did the region expansion on read. So
+    ///    this indexes them with the SAME flat `o_lo = row_lo*ploidy` slice `generate`
+    ///    above uses, no `bi % n_samples` replication.
+    /// 2. **GLOBAL tables, no remap.** `self.store.geno_v_idxs()` yields dataset-GLOBAL
+    ///    variant ids directly (see the struct's "GLOBAL variant-scale tables" note), so
+    ///    fields are gathered from the backend's GLOBAL `self.v_starts`/`self.ilens`/
+    ///    `self.alt_alleles`/`self.alt_offsets` — not a per-window-local table like
+    ///    `DecodedWindow`'s. (Still emits no id field in the output — variants output is
+    ///    self-contained, issue #313.)
+    ///
+    /// Same region-overlap clip as `RecordBackend::generate_variants`:
+    /// `v_end = v_start - v_ilen.min(0) + 1`, keep iff `v_start < r_e && v_end > r_s`
+    /// (`src/genotypes/mod.rs:68-74`'s overlap-keep predicate, NOT `reconstruct/mod.rs`'s
+    /// exonic containment check). Assumes phased ploidy: one output row per `(row, ploid)`,
+    /// so `row_offsets` has length `(row_hi-row_lo)*ploidy + 1`.
+    fn generate_variants(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<crate::variants::VariantsBatch> {
+        if !self.variants {
+            anyhow::bail!(
+                "Svar1StreamEngine.next_batch_variants() called on an engine constructed \
+                 with variants=false"
+            );
+        }
+        let ploidy = self.store.ploidy();
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+        let geno = self.store.geno_v_idxs();
+
+        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy) — already
+        // region-expanded (see point 1 above), same flat slice `generate` uses.
+        let o_lo = row_lo * ploidy;
+
+        let mut kept: Vec<i32> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
+        row_offsets.push(0);
+        for r in 0..(n_rows * ploidy) {
+            let bi = row_lo + r / ploidy;
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let os = slot.o_starts[o_lo + r] as usize;
+            let oe = slot.o_stops[o_lo + r] as usize;
+            for o in os..oe {
+                let gvi = geno[o];
+                let v_start = self.v_starts[gvi as usize] as i64;
+                let v_ilen = self.ilens[gvi as usize] as i64;
+                let v_end = v_start - v_ilen.min(0) + 1;
+                if v_start < r_e as i64 && v_end > r_s as i64 {
+                    kept.push(gvi);
+                }
+            }
+            row_offsets.push(kept.len() as i64);
+        }
+
+        let v_idxs = Array1::from_vec(kept);
+        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
+            v_idxs.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+            self.alt_alleles.view(),
+            self.alt_offsets.view(),
+        );
+
+        Ok(crate::variants::VariantsBatch {
+            alt_data,
+            alt_seq_offsets,
+            start,
+            ilen,
+            row_offsets: Array1::from_vec(row_offsets),
+        })
+    }
 }
 
 /// Producer/consumer SVAR1 streamer (issue #283). See the module docs for the design.
@@ -248,6 +342,7 @@ impl Svar1StreamEngine {
         batch_size: usize,
         output_length: i64,
         annotated: bool,
+        variants: bool,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -265,6 +360,7 @@ impl Svar1StreamEngine {
             parallel,
             output_length,
             annotated,
+            variants,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -303,6 +399,7 @@ impl Svar1StreamEngine {
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
+        variants=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -331,6 +428,7 @@ impl Svar1StreamEngine {
         batch_size: usize,
         output_length: i64,
         annotated: bool,
+        variants: bool,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
@@ -423,6 +521,7 @@ impl Svar1StreamEngine {
             batch_size,
             output_length,
             annotated,
+            variants,
         ))
     }
 
@@ -475,6 +574,34 @@ impl Svar1StreamEngine {
                     "Svar1StreamEngine.next_batch_annotated() called on an engine \
                      constructed with annotated=false",
                 ))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Variants-output counterpart of `next_batch` (Wave B PR-B1): returns a `dict` with
+    /// keys `alt` (u8), `alt_offsets` (i64, ragged ALT-byte boundaries), `start` (i32),
+    /// `ilen` (i32), `offsets` (i64, per-`(row, ploid)` variant-count boundaries) — or
+    /// `None` when the plan is exhausted. Only valid when the engine was constructed with
+    /// `variants=true` — otherwise this raises `RuntimeError` (a caller bug, not a data
+    /// condition; `StreamingDataset._iter_batches` never calls this unless `variants` was
+    /// passed to `build_engine`). Mirrors `RecordStreamEngine::next_batch_variants`
+    /// (`crate::record_stream::engine`) exactly.
+    fn next_batch_variants<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let out = py.detach(|| self.core.next_batch_variants_core());
+        match out {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let dict = PyDict::new(py);
+                dict.set_item("alt", batch.alt_data.into_pyarray(py))?;
+                dict.set_item("alt_offsets", batch.alt_seq_offsets.into_pyarray(py))?;
+                dict.set_item("start", batch.start.into_pyarray(py))?;
+                dict.set_item("ilen", batch.ilen.into_pyarray(py))?;
+                dict.set_item("offsets", batch.row_offsets.into_pyarray(py))?;
+                Ok(Some(dict))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
@@ -595,6 +722,7 @@ mod tests {
             batch_size,
             -1,    // ragged
             false, // annotated
+            false, // variants
         )
     }
 
@@ -747,6 +875,7 @@ mod tests {
             8,
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
 
         match engine.next_batch_core() {
@@ -889,6 +1018,7 @@ mod tests {
             1000,
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1012,6 +1142,7 @@ mod tests {
             1000,
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();

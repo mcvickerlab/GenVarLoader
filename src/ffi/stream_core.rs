@@ -44,6 +44,8 @@ use std::thread::JoinHandle;
 use crossbeam_channel::bounded;
 use ndarray::Array1;
 
+use crate::variants::VariantsBatch;
+
 /// The two per-backend divergence points of the producer/consumer engine, plus the
 /// plan shape. A backend bundles whatever state it needs (store handles, global
 /// tables, the job list) — the core only ever sees it through this trait.
@@ -73,6 +75,18 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
         row_lo: usize,
         row_hi: usize,
     ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>;
+
+    /// Variants-output counterpart of `generate` (Wave B PR-B1). Default: unsupported.
+    /// RecordBackend overrides it; Svar1Backend overrides it in Task 4.
+    fn generate_variants(
+        &self,
+        _job_idx: usize,
+        _slot: &Self::Slot,
+        _row_lo: usize,
+        _row_hi: usize,
+    ) -> anyhow::Result<VariantsBatch> {
+        anyhow::bail!("variants output is not supported by this backend")
+    }
 }
 
 /// The window the consumer is currently draining, batch by batch.
@@ -135,6 +149,21 @@ impl<Slot> Drop for EngineState<Slot> {
             let _ = h.join();
         }
     }
+}
+
+/// Output-agnostic result of one iteration step (Wave B PR-B1): either a generatable row
+/// slice of the current window, clean exhaustion, or a producer error/panic. Shared by
+/// `StreamEngineCore::next_batch_core` and `next_batch_variants_core` so the window
+/// recycle/fetch/join-then-classify plumbing in `advance` is written exactly once — only
+/// what happens to a `Ready` slice (`generate` vs `generate_variants`) differs per caller.
+enum NextSlice {
+    Ready {
+        job_idx: usize,
+        row_lo: usize,
+        row_hi: usize,
+    },
+    Done,
+    Failed(anyhow::Error),
 }
 
 /// Generic producer/consumer engine core over an [`EngineBackend`]. A concrete engine
@@ -217,37 +246,40 @@ impl<B: EngineBackend> StreamEngineCore<B> {
         Ok(())
     }
 
-    /// The consumer, GIL-free. Returns:
-    ///   * `Some(Ok((data, offsets)))` — the next batch;
-    ///   * `Some(Err(_))` — a producer error/panic (join-then-classified);
-    ///   * `None` — the plan is exhausted (clean, no hang).
-    ///
-    /// Drains the current window batch-by-batch; when a window is spent it is recycled to
-    /// the producer and the next prefetched window is `recv`'d. On channel close the
-    /// producer is joined and classified before returning.
-    pub(crate) fn next_batch_core(
-        &self,
-    ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
-    {
-        // Recover from a poisoned lock rather than propagating panic-on-panic.
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-
+    /// Advance the shared iteration state to the next generatable row slice, or to
+    /// exhaustion/error. Byte-identical control flow to the pre-refactor `next_batch_core`
+    /// loop (issue #276/#283): the only change is that the terminal action — generating
+    /// bytes from `[row_lo, row_hi)` — is left to the caller instead of being inlined here,
+    /// so both the haplotype and variants-output paths can reuse this same cursor walk.
+    fn advance(&self, state: &mut EngineState<B::Slot>) -> NextSlice {
         if state.done {
-            return None;
+            return NextSlice::Done;
         }
-        if let Err(e) = self.ensure_started(&mut state) {
+        if let Err(e) = self.ensure_started(state) {
             state.done = true;
-            return Some(Err(e));
+            return NextSlice::Failed(e);
         }
 
         loop {
-            // 1. If the current window has rows left, generate the next batch.
+            // 1. If the current window has rows left, advance the cursor and yield the
+            //    next slice.
             let has_rows = match state.current.as_ref() {
                 Some(cur) => cur.next_row < cur.n_batch_rows,
                 None => false,
             };
             if has_rows {
-                return Some(self.generate_from_current(&mut state));
+                let cur = state
+                    .current
+                    .as_mut()
+                    .expect("has_rows implies a live current window");
+                let row_lo = cur.next_row;
+                let row_hi = (row_lo + self.batch_size).min(cur.n_batch_rows);
+                cur.next_row = row_hi;
+                return NextSlice::Ready {
+                    job_idx: cur.job_idx,
+                    row_lo,
+                    row_hi,
+                };
             }
 
             // 2. Current window is spent (or absent): recycle it, then fetch the next.
@@ -275,7 +307,7 @@ impl<B: EngineBackend> StreamEngineCore<B> {
                         next_row: 0,
                         n_batch_rows,
                     });
-                    // Loop back to generate from the newly received window.
+                    // Loop back to yield from the newly received window.
                 }
                 Err(_) => {
                     // Channel closed => producer finished. JOIN FIRST, classify AFTER —
@@ -283,37 +315,68 @@ impl<B: EngineBackend> StreamEngineCore<B> {
                     state.done = true;
                     if let Some(h) = state.producer.take() {
                         return match h.join() {
-                            Err(_) => {
-                                Some(Err(anyhow::anyhow!("streaming producer thread panicked")))
-                            }
-                            Ok(Err(e)) => Some(Err(e)),
-                            Ok(Ok(())) => None,
+                            Err(_) => NextSlice::Failed(anyhow::anyhow!(
+                                "streaming producer thread panicked"
+                            )),
+                            Ok(Err(e)) => NextSlice::Failed(e),
+                            Ok(Ok(())) => NextSlice::Done,
                         };
                     }
-                    return None;
+                    return NextSlice::Done;
                 }
             }
         }
     }
 
-    /// Generate the next `batch_size`-bounded slice of the current window's rows. Output
-    /// is `(hi-lo)`-bounded — never whole-window (issue #284). Delegates to the backend.
-    fn generate_from_current(
+    /// The consumer, GIL-free. Returns:
+    ///   * `Some(Ok((data, offsets)))` — the next batch;
+    ///   * `Some(Err(_))` — a producer error/panic (join-then-classified);
+    ///   * `None` — the plan is exhausted (clean, no hang).
+    ///
+    /// Drains the current window batch-by-batch; when a window is spent it is recycled to
+    /// the producer and the next prefetched window is `recv`'d. On channel close the
+    /// producer is joined and classified before returning.
+    pub(crate) fn next_batch_core(
         &self,
-        state: &mut EngineState<B::Slot>,
-    ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)> {
-        // Advance the cursor first (mutable borrow), then reborrow immutably to read.
-        let (row_lo, row_hi, job_idx) = {
-            let cur = state
-                .current
-                .as_mut()
-                .expect("generate_from_current called with a live current window");
-            let row_lo = cur.next_row;
-            let row_hi = (row_lo + self.batch_size).min(cur.n_batch_rows);
-            cur.next_row = row_hi;
-            (row_lo, row_hi, cur.job_idx)
-        };
-        let filled = &state.current.as_ref().unwrap().filled;
-        self.backend.generate(job_idx, filled, row_lo, row_hi)
+    ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
+    {
+        // Recover from a poisoned lock rather than propagating panic-on-panic.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match self.advance(&mut state) {
+            NextSlice::Ready {
+                job_idx,
+                row_lo,
+                row_hi,
+            } => {
+                let filled = &state.current.as_ref().unwrap().filled;
+                Some(self.backend.generate(job_idx, filled, row_lo, row_hi))
+            }
+            NextSlice::Done => None,
+            NextSlice::Failed(e) => Some(Err(e)),
+        }
+    }
+
+    /// Variants-output counterpart of `next_batch_core` (Wave B PR-B1): same iteration
+    /// state, same `advance` cursor walk, but yields flat `VariantsBatch` buffers via
+    /// `EngineBackend::generate_variants` instead of reconstructed haplotype bytes. Does
+    /// NOT fit `next_batch_core`'s 4-tuple shape, hence a sibling method rather than an
+    /// overload.
+    pub(crate) fn next_batch_variants_core(&self) -> Option<anyhow::Result<VariantsBatch>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match self.advance(&mut state) {
+            NextSlice::Ready {
+                job_idx,
+                row_lo,
+                row_hi,
+            } => {
+                let filled = &state.current.as_ref().unwrap().filled;
+                Some(
+                    self.backend
+                        .generate_variants(job_idx, filled, row_lo, row_hi),
+                )
+            }
+            NextSlice::Done => None,
+            NextSlice::Failed(e) => Some(Err(e)),
+        }
     }
 }

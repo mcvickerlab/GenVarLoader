@@ -2,6 +2,22 @@
 pub mod windows;
 use ndarray::{Array1, ArrayView1};
 
+/// Flat variant buffers for a `[row_lo, row_hi)` batch row slice (Wave B PR-B1):
+/// `alt_data`/`alt_seq_offsets` are the ragged ALT bytes (`gather_alleles`-shaped, one
+/// entry per kept variant), `start`/`ilen` are one scalar per kept variant (same order),
+/// and `row_offsets` delimits kept variants per `(row, ploid)` output row (length
+/// `n_rows*ploidy + 1` — phased ploidy, no unphased-union fold yet). No dataset-global id:
+/// variants output is self-contained (issue #313). Lives here (not `record_stream::engine`)
+/// so `crate::ffi::stream_core::EngineBackend` can name it without a record_stream<->ffi
+/// module cycle.
+pub struct VariantsBatch {
+    pub alt_data: Array1<u8>,
+    pub alt_seq_offsets: Array1<i64>,
+    pub start: Array1<i32>,
+    pub ilen: Array1<i32>,
+    pub row_offsets: Array1<i64>,
+}
+
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
 fn gather_rows_impl<T: Copy>(
     geno_offset_idx: ArrayView1<i64>,
@@ -73,6 +89,30 @@ pub fn gather_alleles(
         }
     }
     (data, seq_offsets)
+}
+
+/// Window CSR -> flat variant buffers (issue #276 Wave B PR-B1). Shared by every
+/// streaming backend's variants-output generate path (`RecordBackend::generate_variants`
+/// for VCF/PGEN; the SVAR1 path reuses this too — see that backend's task). Takes the
+/// already-clipped, already-flat kept window-local variant indices `v_idxs` (built by the
+/// caller's per-row CSR walk + region-overlap clip — see `src/genotypes/mod.rs:68-74` for
+/// the identical `v_end = v_start - v_ilen.min(0) + 1` overlap-keep predicate this mirrors)
+/// plus the window's static table, and assembles the ragged ALT bytes (via
+/// [`gather_alleles`]) and the scalar `start`/`ilen` arrays. Matches the written path's
+/// `_assemble_variant_buffers_rust` (`_flat_variants.py`) byte-for-byte given
+/// byte-identical inputs — no dataset-global id is produced here (variants output is
+/// self-contained, per #313).
+pub fn assemble_variants_window(
+    v_idxs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+) -> (Array1<u8>, Array1<i64>, Array1<i32>, Array1<i32>) {
+    let (alt_data, alt_seq_offsets) = gather_alleles(v_idxs, alt_alleles, alt_offsets);
+    let start: Array1<i32> = v_idxs.iter().map(|&vi| v_starts[vi as usize]).collect();
+    let ilen: Array1<i32> = v_idxs.iter().map(|&vi| ilens[vi as usize]).collect();
+    (alt_data, alt_seq_offsets, start, ilen)
 }
 
 /// Reverse-complement the alleles of mask-selected `(b*p)` rows, in place.

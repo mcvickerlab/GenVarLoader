@@ -545,6 +545,51 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   remains window-local** — genoray's VCF reader hard-codes `global_idx = -1` — real VCF
   global ids are **Phase 3**, not yet landed. `var_base` itself has been fully retired
   (Task 2.5 close-out).
+- ✅ **Variants-output surface, Wave B PR-B0 + PR-B1 — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** PR-B0 (region-overlap
+  clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
+  streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
+  byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (PR-B2),
+  non-default `var_fields` (PR-B3), and `"variant-windows"` (PR-B4) remain. Plan:
+  `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
+  design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
+  Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
+  ✅ **done** — `get_variants_flat` folded a region-overlap keep mask into the existing AF
+  `keep`/`_compact_keep` block (matches `src/reconstruct/mod.rs`'s inclusion extent). Serves
+  as the byte-identical parity oracle for **PR-B1** (streaming `with_seqs("variants")`).
+  Task 2 (**PR-B1**, `RecordBackend::generate_variants` Rust core) ✅ **done** — window
+  CSR → flat `VariantsBatch` (`alt`/`start`/`ilen`/`row_offsets`) via the shared
+  `assemble_variants_window` helper (`src/variants/mod.rs`), region-overlap-clipped
+  per `(row, ploid)` identically to `generate`'s haplotype path. Task 3 (**PR-B1**,
+  `next_batch_variants` FFI + Python wiring + VCF/PGEN parity) ✅ **done** —
+  `EngineBackend::generate_variants` (default-unsupported, `RecordBackend` overrides it;
+  the shared `advance`/`NextSlice` cursor extracted out of `next_batch_core` so
+  `next_batch_variants_core` reuses it without duplicating the producer/consumer loop),
+  `RecordStreamEngine.next_batch_variants` marshals to a `dict[str, ndarray]`
+  (`alt`/`alt_offsets`/`start`/`ilen`/`offsets`), and `StreamingDataset.with_seqs("variants")`
+  packs a `RaggedVariants` from it (mirrors `_FlatAlleles.to_ragged`/`_Flat.to_ragged`).
+  `tests/dataset/test_streaming_variants_parity.py` gates VCF + PGEN byte-identical against
+  the corrected written oracle. Task 4 (**PR-B1**, SVAR1 backend variants output) ✅ **done**
+  — `Svar1Backend::generate_variants` reuses the same shared `assemble_variants_window`
+  helper Task 2 introduced, adapted for SVAR1's two structural differences: the window CSR
+  (`FilledWindow.o_starts`/`o_stops`) is already region-expanded (flat `o_lo = row_lo*ploidy`
+  slice, no per-sample replication) and its variant ids are dataset-GLOBAL already (gathered
+  straight from the backend's global `v_starts`/`ilens`/`alt_alleles`/`alt_offsets`, no remap).
+  `Svar1StreamEngine.next_batch_variants` mirrors `RecordStreamEngine.next_batch_variants`'s
+  dict marshaling exactly; `_Svar1Backend.build_engine` forwards `variants` straight to the
+  constructor. `tests/dataset/test_streaming_variants_parity.py` now gates all three backends
+  (svar1/vcf/pgen) byte-identical against the written oracle, with a non-vacuous-pass guard
+  (`total_variants > 0`) folded in from Task 3 review.
+  **Verification caveat:** with the currently-pinned genoray rev, the described PGEN
+  "contig-scoped" leak could not be reproduced end-to-end through `gvl.write()` +
+  `Dataset.open()` for disjoint narrow regions (write-time `pgen.var_idxs`/`.chunk` are
+  already position-scoped) — the added tests (`tests/dataset/test_variants_region_clip.py`)
+  are an invariant/regression guard rather than a literal pre-fix repro; the fix is still
+  correct defense-in-depth and a verified no-op on all currently-passing scenarios. Follow-up
+  filed for the still-unclipped `get_variants_flat(self, idx)` no-region call site
+  (`_haps.py:676`, reached via `with_seqs("variants").with_tracks(...)`) — issue
+  [#314](https://github.com/mcvickerlab/GenVarLoader/issues/314).
 
 ## Sequencing
 

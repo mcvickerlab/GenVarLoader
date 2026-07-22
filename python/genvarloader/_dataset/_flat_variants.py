@@ -826,7 +826,32 @@ def get_variants_flat(
         # (genotypes and dosages share offset structure), so discard them.
         dosage_data, _ = _gather_rows(geno_offset_idx, dos_offsets, dos_all)
 
-    # Apply AF compaction to v_idxs / row_offsets / dosage.
+    # #202 region-extent-overlap clip. The written variants path previously gathered
+    # v_idxs straight from the sparse genotype set and never filtered by region extent,
+    # so RaggedVariants leaked variants outside the queried window (boundary-overlapping
+    # indels; for PGEN, other variants on the same contig). Clip to the same set the
+    # haplotype reconstruction uses: a variant [v_start, v_end) is kept iff it overlaps
+    # the region window [r_start, r_end), with v_end = v_start - min(ilen, 0) + 1
+    # (v_end formula matches src/reconstruct/mod.rs:705; the two-sided overlap keep
+    # matches the skip/break logic in src/genotypes/mod.rs:68-74). regions is None
+    # on the no-region call path (_haps.py get_variants_flat(self, idx)); skip the
+    # clip there.
+    if regions is not None:
+        regions_arr = np.asarray(regions)
+        # Per (b*ploidy) row region extents (C-order: b cells, each ploidy rows).
+        row_r_start = np.repeat(regions_arr[:, 1].astype(np.int64), ploidy)
+        row_r_end = np.repeat(regions_arr[:, 2].astype(np.int64), ploidy)
+        # Broadcast per variant via the per-row variant counts.
+        counts = np.diff(unfiltered_row_offsets)
+        v_r_start = np.repeat(row_r_start, counts)
+        v_r_end = np.repeat(row_r_end, counts)
+        v_start = np.asarray(haps.ffi_static.v_starts, np.int64)[v_idxs]
+        v_ilen = np.asarray(haps.ffi_static.ilens, np.int64)[v_idxs]
+        v_end = v_start - np.minimum(v_ilen, 0) + 1
+        region_keep = (v_start < v_r_end) & (v_end > v_r_start)
+        keep = region_keep if keep is None else (keep & region_keep)
+
+    # Apply AF + region-clip compaction to v_idxs / row_offsets / dosage.
     if keep is not None:
         v_idxs, row_offsets = _compact_keep(v_idxs, unfiltered_row_offsets, keep)
         if dosage_data is not None:

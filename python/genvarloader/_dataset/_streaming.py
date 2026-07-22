@@ -14,6 +14,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
+from ._rag_variants import RaggedVariants
 from .._torch import requires_torch
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import bed_to_regions
@@ -456,21 +457,26 @@ class StreamingDataset:
             # threaded through `build_engine`/the engine constructor -- the engine only
             # allocates/computes the two annotation arrays when this is `True`.
             _annotated = self._seq_kind is RaggedAnnotatedHaps
+            # Wave B PR-B1 (#304): whether to request flat variant buffers instead of
+            # reconstructed haplotype bytes. Resolved ONCE here, mirroring `_annotated`
+            # -- threaded through `build_engine`/the engine constructor and selects the
+            # `next_batch_variants` puller below.
+            _variants = self._seq_kind is RaggedVariants
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
             # unjittered region bounds and emit ragged haplotypes only, so combining
-            # them with jitter, `with_len`, or `with_seqs("annotated")` would silently
-            # ignore the request. Fail fast rather than return wrong output; SVAR2
-            # Wave A support is a follow-up.
+            # them with jitter, `with_len`, `with_seqs("annotated")`, or
+            # `with_seqs("variants")` would silently ignore the request. Fail fast
+            # rather than return wrong output; SVAR2 Wave A/B support is a follow-up.
             if isinstance(self._backend, _Svar2Backend) and (
-                self._jitter > 0 or _out_len != -1 or _annotated
+                self._jitter > 0 or _out_len != -1 or _annotated or _variants
             ):
                 raise NotImplementedError(
                     "StreamingDataset read-time jitter (jitter>0), with_len (a fixed "
-                    'output length), and with_seqs("annotated") are not yet supported '
-                    "for the SVAR2 (.svar2) backend; they are wired only through the "
-                    "SVAR1/VCF/PGEN engines (issue #277). Use ragged haplotype output "
-                    "with jitter=0 for .svar2 sources."
+                    'output length), with_seqs("annotated"), and with_seqs("variants") '
+                    "are not yet supported for the SVAR2 (.svar2) backend; they are "
+                    "wired only through the SVAR1/VCF/PGEN engines (issues #277, #304). "
+                    "Use ragged haplotype output with jitter=0 for .svar2 sources."
                 )
             # `with_seqs("annotated")` emits per-position dataset-GLOBAL variant ids
             # (`AnnotatedHaps.var_idxs`). SVAR1 carries these for free and PGEN derives
@@ -495,8 +501,9 @@ class StreamingDataset:
                 )
             if self._prefetch_strategy == "engine":
                 # "engine" drives the record-style backends (SVAR1, VCF, PGEN), which
-                # share the same `build_engine(jobs, batch_size, out_len, annotated)`
-                # producer/consumer interface. `_Svar2Backend` is NOT one of them --
+                # share the same `build_engine(jobs, batch_size, out_len, annotated,
+                # variants)` producer/consumer interface. `_Svar2Backend` is NOT one of
+                # them --
                 # its `_default_strategy` is "sync" and its `build_engine` is
                 # differently shaped -- so narrow the union to exclude it (and `None`),
                 # letting the calls below resolve against the record backends'
@@ -558,7 +565,7 @@ class StreamingDataset:
                         for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                     ]
                 engine = backend.build_engine(
-                    engine_jobs, batch_size, _out_len, _annotated
+                    engine_jobs, batch_size, _out_len, _annotated, _variants
                 )
                 del engine_jobs
                 # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
@@ -568,10 +575,17 @@ class StreamingDataset:
                 # array is one entry per output position), so all three `Ragged`s below
                 # are built from one `Ragged.from_offsets` call each over that offsets
                 # array -- mirrors the written path's `_FlatAnnotatedHaps.to_padded()`
-                # packing (`_flat.py`).
-                next_batch = (
-                    engine.next_batch_annotated if _annotated else engine.next_batch
-                )
+                # packing (`_flat.py`). Wave B PR-B1 (#304): variants output pulls a
+                # `dict` (keys `alt`/`alt_offsets`/`start`/`ilen`/`offsets`) instead of
+                # a tuple and packs a `RaggedVariants` -- mirrors `_FlatAlleles.to_ragged`
+                # (`_flat_variants.py`) for the ragged `alt` field and `_Flat.to_ragged`
+                # for the scalar `start`/`ilen` fields.
+                if _variants:
+                    next_batch = engine.next_batch_variants
+                elif _annotated:
+                    next_batch = engine.next_batch_annotated
+                else:
+                    next_batch = engine.next_batch
                 for _contig_idx, r_idx, s_lo, s_hi in plan_jobs:
                     n_s = s_hi - s_lo
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
@@ -584,9 +598,32 @@ class StreamingDataset:
                             raise RuntimeError(
                                 "streaming engine exhausted before the plan did"
                             )
-                        if _annotated:
+                        if _variants:
+                            b_times_p = (hi - lo) * backend.ploidy
+                            row_off = np.asarray(nxt["offsets"], np.int64)
+                            seq_off = np.asarray(nxt["alt_offsets"], np.int64)
+                            char = np.asarray(nxt["alt"], np.uint8).view("S1")
+                            alt = (
+                                Ragged.from_offsets(
+                                    char, (b_times_p, None, None), [row_off, seq_off]
+                                )
+                                .to_strings()
+                                .reshape(hi - lo, backend.ploidy, None)
+                            )
+                            start = Ragged.from_offsets(
+                                np.asarray(nxt["start"], np.int32),
+                                (b_times_p, None),
+                                row_off,
+                            ).reshape(hi - lo, backend.ploidy, None)
+                            ilen = Ragged.from_offsets(
+                                np.asarray(nxt["ilen"], np.int32),
+                                (b_times_p, None),
+                                row_off,
+                            ).reshape(hi - lo, backend.ploidy, None)
+                            out = RaggedVariants(alt=alt, start=start, ilen=ilen)
+                        elif _annotated:
                             data, annot_v, annot_pos, offsets = nxt
-                            shape = (hi - lo, self._backend.ploidy, None)
+                            shape = (hi - lo, backend.ploidy, None)
                             offsets = np.asarray(offsets, np.int64)
                             out = RaggedAnnotatedHaps(
                                 Ragged.from_offsets(
@@ -917,11 +954,15 @@ class StreamingDataset:
             for lo in range(0, n_rows, batch_size):
                 yield min(lo + batch_size, n_rows) - lo
 
-    def with_seqs(self, kind: Literal["haplotypes", "annotated"]) -> "StreamingDataset":
-        """Select the sequence output kind. ``"haplotypes"`` (default) or
+    def with_seqs(
+        self, kind: Literal["haplotypes", "annotated", "variants"]
+    ) -> "StreamingDataset":
+        """Select the sequence output kind. ``"haplotypes"`` (default),
         ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
-        variant indices and reference coordinates). ``"variants"`` /
-        ``"variant-windows"`` / ``"reference"`` are Wave B / later plans.
+        variant indices and reference coordinates), or ``"variants"`` (no
+        sequences, just variants as :class:`RaggedVariants` -- supported for the
+        SVAR1, VCF, and PGEN backends; not yet wired for ``.svar2``).
+        ``"variant-windows"`` / ``"reference"`` are later Wave B / follow-ups.
 
         ``"annotated"`` is **not supported for the VCF backend** (its
         ``var_idxs`` are dataset-global variant ids a VCF source cannot produce
@@ -929,12 +970,16 @@ class StreamingDataset:
         :class:`NotImplementedError`. Use a PGEN or SVAR source for annotated
         output.
         """
-        kind_map = {"haplotypes": RaggedSeqs, "annotated": RaggedAnnotatedHaps}
+        kind_map = {
+            "haplotypes": RaggedSeqs,
+            "annotated": RaggedAnnotatedHaps,
+            "variants": RaggedVariants,
+        }
         if kind not in kind_map:
             raise NotImplementedError(
                 f"StreamingDataset.with_seqs({kind!r}) is not implemented; "
-                'only "haplotypes" and "annotated" are supported in Wave A. '
-                '"variants"/"variant-windows" are Wave B (#304); "reference" is later.'
+                'supported: "haplotypes", "annotated", "variants". '
+                '"variant-windows" and "reference" are later Wave B / follow-ups.'
             )
         out = copy.copy(self)
         object.__setattr__(out, "_seq_kind", kind_map[kind])
@@ -1253,6 +1298,7 @@ class _Svar1Backend:
         batch_size: int,
         output_length: int,
         annotated: bool = False,
+        variants: bool = False,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -1274,6 +1320,12 @@ class _Svar1Backend:
         so the engine's producer reconstructs the window's physical samples on the fly
         as `phys_sample_idx[s_lo..s_hi]`. Total job metadata is region-scale
         (`O(n_windows * window_regions)`), never `O(n_windows * n_samples)`.
+
+        `variants` (Wave B PR-B1, #304) selects whether the engine's `next_batch_variants`
+        is usable: it forwards straight to the `Svar1StreamEngine` constructor's trailing
+        `variants` parameter, which gates `Svar1Backend::generate_variants` (flat
+        `alt`/`start`/`ilen` variant buffers via the shared `assemble_variants_window`
+        helper) the same way `annotated` gates `next_batch_annotated`.
         """
         from ..genvarloader import Svar1StreamEngine
 
@@ -1341,6 +1393,7 @@ class _Svar1Backend:
             batch_size,
             output_length,
             annotated,
+            variants,
         )
 
     def read_window(
@@ -1808,6 +1861,7 @@ class _VcfBackend:
         batch_size: int,
         output_length: int,
         annotated: bool = False,
+        variants: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1868,6 +1922,7 @@ class _VcfBackend:
             batch_size,
             output_length,
             annotated,
+            variants,
         )
 
 
@@ -1947,6 +2002,7 @@ class _PgenBackend:
         batch_size: int,
         output_length: int,
         annotated: bool = False,
+        variants: bool = False,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -2005,4 +2061,5 @@ class _PgenBackend:
             batch_size,
             output_length,
             annotated,
+            variants,
         )

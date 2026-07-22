@@ -32,11 +32,13 @@ use ndarray::{Array1, Array2};
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::record_stream::pgen::PgenWindowFiller;
 use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
+use crate::variants::VariantsBatch;
 
 /// Decode job `job`'s window (on `contig`) into `slot`, reusing its allocations. VCF/PGEN
 /// implementors (Task 4/10) do the actual genoray record-stream reading + the hap-major
@@ -95,6 +97,13 @@ struct RecordBackend {
     /// `global_v_idxs` (issue #305; see `remap_annot_local_to_global`). `false`
     /// (default) preserves pre-Task-4 behavior exactly (no extra allocation/work).
     annotated: bool,
+    /// Wave B PR-B1 (variants-output streaming): when `true`, callers may invoke
+    /// [`EngineBackend::generate_variants`]'s `RecordBackend` override instead of (or
+    /// alongside) `generate`, to get flat variant buffers (`VariantsBatch`) for a batch row
+    /// slice rather than reconstructed haplotype bytes. Mirrors `annotated`'s shape; guarded
+    /// at the top of that override (bails if `false`) and surfaced to Python via
+    /// `next_batch_variants`. `false` (default) preserves pre-Task-2 behavior exactly.
+    variants: bool,
 }
 
 impl RecordBackend {
@@ -217,6 +226,80 @@ impl EngineBackend for RecordBackend {
             self.parallel,
         ))
     }
+
+    /// Wave B PR-B1: generate the `[row_lo, row_hi)` slice of this window's rows as flat
+    /// VARIANT buffers rather than reconstructed haplotype bytes — the variants-output
+    /// counterpart of `generate` above. Same row->region->CSR mapping as `generate`
+    /// (`bi = ri*n_samples + si`, per-hap CSR replicated across regions — see that method's
+    /// doc comment), but instead of feeding the per-hap runs through `generate_batch_core`'s
+    /// haplotype-reconstruction kernel, this walks each row's `ploidy` haps directly and
+    /// keeps only the window-local variants whose extent overlaps the row's region
+    /// (`src/genotypes/mod.rs:68-74`'s `v_end = v_start - v_ilen.min(0) + 1`, keep iff
+    /// `v_start < r_e && v_end > r_s` — NOT `reconstruct::mod.rs`'s exonic containment
+    /// check, which is a different predicate despite sharing the `v_end` formula). Assumes
+    /// phased ploidy: one output row per `(row, ploid)`, so `row_offsets` has length
+    /// `(row_hi-row_lo)*ploidy + 1`.
+    fn generate_variants(
+        &self,
+        job_idx: usize,
+        slot: &DecodedWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<VariantsBatch> {
+        if !self.variants {
+            anyhow::bail!(
+                "RecordStreamEngine.next_batch_variants() called on an engine constructed \
+                 with variants=false"
+            );
+        }
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+
+        let mut v_idxs: Vec<i32> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy + 1);
+        row_offsets.push(0);
+
+        for bi in row_lo..row_hi {
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let si = bi % n_samples;
+            for p in 0..self.ploidy {
+                let h = si * self.ploidy + p;
+                let csr_lo = slot.geno_offsets[h] as usize;
+                let csr_hi = slot.geno_offsets[h + 1] as usize;
+                for &vidx in &slot.geno_v_idxs[csr_lo..csr_hi] {
+                    let v_start = slot.v_starts[vidx as usize] as i64;
+                    let v_ilen = slot.ilens[vidx as usize] as i64;
+                    let v_end = v_start - v_ilen.min(0) + 1;
+                    let keep = v_start < r_e as i64 && v_end > r_s as i64;
+                    if keep {
+                        v_idxs.push(vidx);
+                    }
+                }
+                row_offsets.push(v_idxs.len() as i64);
+            }
+        }
+
+        let v_idxs = Array1::from_vec(v_idxs);
+        let row_offsets = Array1::from_vec(row_offsets);
+
+        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
+            v_idxs.view(),
+            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+            ndarray::ArrayView1::from(slot.ilens.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+        );
+
+        Ok(VariantsBatch {
+            alt_data,
+            alt_seq_offsets,
+            start,
+            ilen,
+            row_offsets,
+        })
+    }
 }
 
 /// Producer/consumer record-stream engine (issue #276 task 3b). Python surface (issue
@@ -242,6 +325,7 @@ impl RecordStreamEngine {
         batch_size: usize,
         output_length: i64,
         annotated: bool,
+        variants: bool,
     ) -> Self {
         let backend = RecordBackend {
             filler,
@@ -253,6 +337,7 @@ impl RecordStreamEngine {
             parallel,
             output_length,
             annotated,
+            variants,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -269,6 +354,14 @@ impl RecordStreamEngine {
     ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
     {
         self.core.next_batch_core()
+    }
+
+    /// Variants-output counterpart of `next_batch_core` (Wave B PR-B1): returns the next
+    /// batch's flat `VariantsBatch` buffers, or `None` when the plan is exhausted.
+    /// Delegates to the shared core; see `stream_core`'s doc comment for the
+    /// exhaustion/error/panic classification contract.
+    pub fn next_batch_variants_core(&self) -> Option<anyhow::Result<VariantsBatch>> {
+        self.core.next_batch_variants_core()
     }
 }
 
@@ -297,6 +390,7 @@ impl RecordStreamEngine {
         contig_names, contig_ref_bytes,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         fasta_path, pad_char, parallel, batch_size, output_length, annotated=false,
+        variants=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -317,6 +411,7 @@ impl RecordStreamEngine {
         batch_size: usize,
         output_length: i64,
         annotated: bool,
+        variants: bool,
     ) -> PyResult<Self> {
         let n_contigs = contig_names.len();
         if contig_ref_bytes.len() != n_contigs {
@@ -387,6 +482,7 @@ impl RecordStreamEngine {
                     batch_size,
                     output_length,
                     annotated,
+                    variants,
                 ))
             }
             "pgen" => {
@@ -421,6 +517,7 @@ impl RecordStreamEngine {
                     batch_size,
                     output_length,
                     annotated,
+                    variants,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
@@ -478,6 +575,33 @@ impl RecordStreamEngine {
                     "RecordStreamEngine.next_batch_annotated() called on an engine \
                      constructed with annotated=false",
                 ))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Variants-output counterpart of `next_batch` (Wave B PR-B1): returns a `dict` with
+    /// keys `alt` (u8), `alt_offsets` (i64, ragged ALT-byte boundaries), `start` (i32),
+    /// `ilen` (i32), `offsets` (i64, per-`(row, ploid)` variant-count boundaries) — or
+    /// `None` when the plan is exhausted. Only valid when the engine was constructed with
+    /// `variants=true` — otherwise this raises `RuntimeError` (a caller bug, not a data
+    /// condition; `StreamingDataset._iter_batches` never calls this unless `variants` was
+    /// passed to `build_engine`).
+    fn next_batch_variants<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let out = py.detach(|| self.next_batch_variants_core());
+        match out {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let dict = PyDict::new(py);
+                dict.set_item("alt", batch.alt_data.into_pyarray(py))?;
+                dict.set_item("alt_offsets", batch.alt_seq_offsets.into_pyarray(py))?;
+                dict.set_item("start", batch.start.into_pyarray(py))?;
+                dict.set_item("ilen", batch.ilen.into_pyarray(py))?;
+                dict.set_item("offsets", batch.row_offsets.into_pyarray(py))?;
+                Ok(Some(dict))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
@@ -693,6 +817,7 @@ mod tests {
             1000, // batch_size larger than any window -> one batch per window
             -1,   // ragged
             false, // annotated
+            false, // variants
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -724,6 +849,7 @@ mod tests {
             8,
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
@@ -753,6 +879,7 @@ mod tests {
             8,
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
 
         match engine.next_batch_core() {
@@ -866,6 +993,7 @@ mod tests {
             1000, // one batch for the whole 4-row window
             -1,    // ragged
             false, // annotated
+            false, // variants
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -886,5 +1014,104 @@ mod tests {
 
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
+    }
+
+    /// Wave B PR-B1: `generate_variants` region-overlap clip. Window table has two SNPs:
+    /// v0@pos=12 falls inside the row's region `[10,20)`; v1@pos=25 falls outside. A
+    /// single hap's CSR carries both local variants. `generate_variants` must keep only
+    /// v0 -- its `start`/`ilen`/`alt` gathered from the window static table, and
+    /// `row_offsets` delimiting exactly one kept variant for the single `(row, ploid)`
+    /// output row (ploidy=1 -> length 2: `[0, 1]`).
+    #[test]
+    fn generate_variants_clips_to_window_and_gathers_fields() {
+        let slot = DecodedWindow {
+            v_starts: vec![12, 25],
+            ilens: vec![0, 0],
+            alt_alleles: vec![b'A', b'C'],
+            alt_offsets: vec![0, 1, 2],
+            geno_v_idxs: vec![0, 1], // hap 0 has both local variants
+            geno_offsets: vec![0, 2], // one hap, CSR [0,2)
+            global_v_idxs: vec![100, 101], // ignored for variants output
+        };
+        let backend = RecordBackend {
+            filler: Box::new(StubFiller),
+            contigs: vec![chr1()],
+            jobs: vec![RecordJob {
+                contig_idx: 0,
+                regions: vec![(10, 20)],
+                s_lo: 0,
+                s_hi: 1,
+            }],
+            n_samples: 1,
+            ploidy: 1,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+        };
+
+        let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
+        // only v0 survives the overlap clip
+        assert_eq!(out.start.as_slice().unwrap(), &[12]);
+        assert_eq!(out.ilen.as_slice().unwrap(), &[0]);
+        assert_eq!(out.alt_data.as_slice().unwrap(), &[b'A']);
+        assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 1]);
+    }
+
+    /// Wave B PR-B1 regression (task-2 review gap): the clip test above collapses
+    /// `ri = bi/n_samples`, `si = bi%n_samples`, `h = si*ploidy+p` all to 0 (n_samples=1,
+    /// ploidy=1, one region), so it cannot catch a wrong-sample read or a flat-CSR-slice
+    /// bug. This test uses `MultiRegionFiller` (2 samples x ploidy 2, 2 SNPs at distinct
+    /// positions/regions) so each of the 8 hap-rows has a distinguishable expected outcome
+    /// if `generate_variants` reads the wrong sample's CSR slice or fails to clip to the
+    /// right region:
+    ///   bi0(r0,s0): h0(s0,p0)=[v0@5]  -> kept [v0]   h1(s0,p1)=[]        -> kept []
+    ///   bi1(r0,s1): h2(s1,p0)=[v1@15] -> clipped []  h3(s1,p1)=[v0,v1]   -> kept [v0]
+    ///   bi2(r1,s0): h0(s0,p0)=[v0@5]  -> clipped []  h1(s0,p1)=[]        -> kept []
+    ///   bi3(r1,s1): h2(s1,p0)=[v1@15] -> kept [v1]   h3(s1,p1)=[v0,v1]   -> clipped [v1]
+    /// (region0=[0,10) keeps pos5=v0; region1=[10,20) keeps pos15=v1).
+    #[test]
+    fn generate_variants_multiregion_multisample_lands_on_correct_sample() {
+        let job = RecordJob {
+            contig_idx: 0,
+            regions: vec![(0, 10), (10, 20)],
+            s_lo: 0,
+            s_hi: 2,
+        };
+        let c = chr1();
+        let mut slot = DecodedWindow::default();
+        MultiRegionFiller.fill(&job, &c, &mut slot).unwrap();
+
+        let backend = RecordBackend {
+            filler: Box::new(MultiRegionFiller),
+            contigs: vec![c],
+            jobs: vec![job],
+            n_samples: 2,
+            ploidy: 2,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+        };
+
+        let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
+        let out = backend.generate_variants(0, &slot, 0, n_rows).unwrap();
+
+        assert_eq!(
+            out.row_offsets.as_slice().unwrap(),
+            &[0, 1, 1, 1, 2, 2, 2, 3, 4]
+        );
+        assert_eq!(out.start.as_slice().unwrap(), &[5, 5, 15, 15]);
+        assert_eq!(out.ilen.as_slice().unwrap(), &[0, 0, 0, 0]);
+        assert_eq!(
+            out.alt_data.as_slice().unwrap(),
+            &[b'A', b'A', b'C', b'C']
+        );
+        assert_eq!(
+            out.alt_seq_offsets.as_slice().unwrap(),
+            &[0, 1, 2, 3, 4]
+        );
     }
 }

@@ -59,11 +59,18 @@ def test_with_settings_sets_jitter_rng_deterministic():
     assert sds._deterministic is False
 
 
-def test_with_seqs_accepts_annotated_rejects_variants():
+def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     sds = _tiny_sds()
+    from genvarloader._dataset._rag_variants import RaggedVariants
     from genvarloader._ragged import RaggedAnnotatedHaps
 
     assert sds.with_seqs("annotated")._seq_kind is RaggedAnnotatedHaps
     assert sds.with_seqs("haplotypes")._seq_kind is RaggedSeqs
+    # Wave B PR-B1 (#304): "variants" is now accepted at the config layer for all
+    # backends. SVAR1/VCF/PGEN produce variants; only the `.svar2` backend still
+    # raises NotImplementedError, and that raises later at iterate time
+    # (`_iter_batches`), not here at the config layer.
+    assert sds.with_seqs("variants")._seq_kind is RaggedVariants
+    # "variant-windows"/"reference" remain later Wave B / follow-up work.
     with pytest.raises(NotImplementedError):
-        sds.with_seqs("variants")
+        sds.with_seqs("variant-windows")
