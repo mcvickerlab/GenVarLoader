@@ -262,7 +262,9 @@ Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or 
 
 ## Streaming dataset work
 
-All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:
+All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the StreamingDataset double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:
+
+**Note:** this scope covers *only* the write-free `StreamingDataset` double-buffer engine. The separate, already-released `gvl.Dataset.to_dataloader(mode="buffered" | "double_buffered")` path over a written, file-backed dataset (`python/genvarloader/_double_buffered_loader.py`, `_buffered_loader.py`, `_producer.py`, `_shm_layout.py`, `_chunked.py`) is **not** streaming work — treat bugs/features there as normal `main`-targeted work, not StreamingDataset-board work.
 
 - **Check the project board first** — it is the source of truth for what is in flight, sequencing (waves), and status. Don't start a piece of streaming work without a tracking issue on the board.
 - **File streaming issues with a `streaming:` title prefix and add them to the StreamingDataset project** (in addition to a `type:` label). Split-out and follow-up issues (e.g. deferred sub-tasks, bugs found in review) go on the board too, cross-linked to their parent.
