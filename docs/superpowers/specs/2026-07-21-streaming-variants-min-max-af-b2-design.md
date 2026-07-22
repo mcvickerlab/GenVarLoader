@@ -3,57 +3,69 @@
 **Issue:** [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317) (split out of
 [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), Wave B of
 [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)).
+**Also closes:** [#319](https://github.com/mcvickerlab/GenVarLoader/issues/319) — VCF/BCF
+live-INFO AF via the record-stream `FieldSpec` path. **Folded into this PR** (was previously
+deferred; see the 2026-07-21 scope change below).
 **Follows:** PR-B0 + PR-B1 (streaming `with_seqs("variants")`), landed in
 [#316](https://github.com/mcvickerlab/GenVarLoader/pull/316).
-**Follow-up filed:** [#319](https://github.com/mcvickerlab/GenVarLoader/issues/319)
-(VCF live-INFO AF via the record-stream `FieldSpec` path — explicitly out of scope here).
 **Parent design:** `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md` (§PR-B2).
 **Target branch:** `streaming` (streaming-coordination rules — see `CLAUDE.md`).
 
 ## Goal
 
 Add `min_af` / `max_af` allele-frequency filtering to **streaming**
-`StreamingDataset.with_seqs("variants")`, byte-identical to the written `Dataset`
-variants path at `jitter=0`. The deliverable is **full support on the SVAR1
-backend** plus **guard-parity on VCF/PGEN**, so streaming and written remain
-interchangeable everywhere.
+`StreamingDataset.with_seqs("variants")`, **byte-identical** to the written `Dataset`
+variants path at `jitter=0`. The deliverable is:
 
-## Key feasibility finding (why this scope)
+- **SVAR1** — full support: AF from the `.svar` index (`SparseVar.cache_afs()`).
+- **VCF/BCF** — full support: AF read from the **VCF `INFO/AF`** field, on **both** the
+  streaming side (live, via genoray's htslib record stream + a `FieldSpec`) **and** the
+  written side (via a `.gvi` index built with `info=["AF"]`), so the two stay interchangeable.
+- **PGEN** — guard-parity only: a PGEN record stream carries no INFO, and the written PGEN
+  index has no AF, so **both** paths raise the same AF-missing `RuntimeError`.
 
-Investigating the code (not just the parent spec) showed the parent spec's
-"VCF/PGEN: request the AF INFO column from genoray" assumption is **wrong**. AF
-filtering is **effectively SVAR-only** on the written path today:
+## Scope change (2026-07-21): fold #319 into B2
 
-- **`gvl.write` never computes `AF`.** VCF: `_write_gvi_index()` is called with no
-  `info=` (`_write.py:248`), so the written `variants.arrow` has no `AF` column
-  unless a `.gvi` was pre-built externally with `info=["AF"]`. PGEN: the index
-  parser (`genoray/_pgen.py:_load_index`) only reads INFO for SVLEN/END/ILEN —
-  **no numeric AF path at all**. So `Dataset.with_settings(min_af=...)` on a
-  VCF/PGEN-sourced dataset **raises** the AF-missing `RuntimeError`
-  (`_haps.py:334-340`) today.
-- **PGEN record streams cannot supply AF regardless** — genotype-only, no INFO;
-  `PgenWindowFiller` has no `fields` and `DenseChunk.info_staged` is always empty
-  for PGEN.
-- **SVAR is the coherent case.** `genoray.SparseVar.cache_afs()`
-  (`_svar/_annotate.py:556-561`) computes AF from genotypes and writes an `AF`
-  column into the `.svar` index. The written oracle reads it via
-  `variants.info["AF"]` (`_haps.py:145-179`, a plain numeric-column read of the
-  linked index) and streaming can read the **same** `sv.index["AF"]` at backend
-  construction (`_Svar1Backend.__init__`, `_streaming.py:1148-1293`).
+An earlier revision of this spec scoped AF as **SVAR-only** and deferred VCF/BCF live-INFO
+AF to #319, on the reasoning that the *written* path cannot filter VCF by AF today (so
+streaming filtering VCF would break the streaming ⟺ written parity contract). That reasoning
+is correct **only while the written path stays as-is**. The decision now is to **fix both
+sides together in this PR** (exactly the "both sides together" #319 called for):
 
-Reading AF from *live* VCF INFO on the streaming side (`FieldSpec` →
-`DenseChunk.info_staged`) would give streaming a capability the written path
-lacks by default, **breaking the streaming ⟺ written parity contract**. That
-path is therefore deferred to **#319**, where it is fixed on *both* sides
-together.
+- The written VCF path **gains** AF by building its `.gvi` index with `info=["AF"]` when the
+  VCF header declares an `INFO/AF` field. `gvl.Dataset` then reads it via the existing
+  `variants.info["AF"]` numeric-column path — no new written-path filter code.
+- The streaming VCF path reads the **same** `INFO/AF` field live via a genoray `FieldSpec`.
+
+Because **both sides read the same `INFO/AF` field, ALT-resolved by the same genoray
+`resolve_scalar(source_alt_index, ...)`**, parity holds by construction. This closes #319 and
+removes the SVAR-only limitation.
+
+### Feasibility (verified against the pinned genoray rev)
+
+**No genoray change is required.** Everything is on the gvl side (rev `73d25cb`,
+`Cargo.toml:25-26`):
+
+- **Streaming AF (live INFO).** genoray's `FieldSpec` (`genoray/src/field.rs:102-108`;
+  `FieldCategory::Info`, `HtslibType::Float`, `StorageDtype::F32`) is already accepted by
+  `ChunkAssembler::new(&[FieldSpec])` and by `VcfRecordSource::with_sample_indices(&[FieldSpec], …)`.
+  When an `AF` INFO spec is requested, the assembler stages **one Float per variant** into
+  `DenseChunk.info_staged` (`genoray/src/types.rs:137-180`, `StagedColumn::Float`), ALT-resolved
+  per atom via `resolve_scalar(atom.source_alt_index, spec)` in
+  `chunk_assembler.rs:decompose_raw_record`. gvl's `VcfWindowFiller` currently passes
+  `fields: Vec::new()` (`src/record_stream/vcf.rs:127`) so `info_staged` is always empty today —
+  that is the one line to change.
+- **Written AF (index INFO).** genoray's `_write_gvi_index(fields=None, info=None, …)`
+  (`genoray/python/genoray/_vcf.py:943`) already accepts `info=["AF"]` and writes an `AF` column
+  into the `.gvi`. gvl calls it with no `info=` today (`_write.py:248`).
 
 ## Background — the written oracle
 
-`min_af`/`max_af` are `Dataset.with_settings` params (`_impl.py:97-98`, threaded
-into `Haps`). The filter lives in the variants assembly path `get_variants_flat`
-(`_flat_variants.py:811-817`):
+`min_af`/`max_af` are `Dataset.with_settings` params (`_impl.py:97-98`, threaded into `Haps`).
+The filter lives in the variants assembly path `get_variants_flat` (`_flat_variants.py:810-817`):
 
 ```python
+keep = None
 if haps.min_af is not None or haps.max_af is not None:
     geno_afs = np.asarray(haps.variants.info["AF"])[v_idxs]
     keep = np.full(len(v_idxs), True, np.bool_)
@@ -63,219 +75,190 @@ if haps.min_af is not None or haps.max_af is not None:
         keep &= geno_afs <= haps.max_af
 ```
 
-`keep` is combined with the #202 region-overlap clip and applied via
-`_compact_keep` before allele assembly. Semantics PR-B2 must reproduce exactly:
+`keep` is AND-combined with the #202 region-extent clip (`_flat_variants.py:851-852`) and applied
+via `_compact_keep` (`_flat_variants.py:855-858`) before allele assembly. Semantics PR-B2 must
+reproduce exactly:
 
 - **Inclusive bounds** on both sides (`>=` / `<=`).
-- **AF gathered per variant** (`AF[v_idxs]`) — a **pure per-variant predicate**
-  (AF does not vary by row/sample), so it can be folded into the per-variant
-  inline keep.
-- **AF-missing guard** (`_haps.py:334-340`): if `min_af`/`max_af` is set and the
-  dataset has no cached `AF` column, raise `RuntimeError` with the message
-  `"Either this dataset is not backed by an SVAR file, or the SVAR file has not
-  had AFs cached yet."`
-- **Haplotype/annotated output** raises `NotImplementedError` when AF filtering
-  is requested (`_haps.py:707-709`) — AF filtering is variants-only.
+- **AF gathered per variant** (`AF[v_idxs]`) — a **pure per-variant predicate** (AF does not
+  vary by row/sample), so it can be folded into the per-variant keep.
+- **AF availability drives the guard** (`_haps.py:333-340`): AF filtering with no available `AF`
+  column raises `RuntimeError("Either this dataset is not backed by an SVAR file, or the SVAR
+  file has not had AFs cached yet." …)`. Availability is discovered by scanning the index schema
+  for a numeric `AF` column (`_haps.available_info_fields`, `_haps.py:184-195`, `313-332`) — so
+  **once `gvl.write` writes an `AF` column, the written VCF guard passes automatically** and the
+  filter runs.
+- **Haplotype/annotated output** raises `NotImplementedError` when AF filtering is requested
+  (`_haps.py:707-710`) — AF filtering is variants-only.
 
 ## Streaming baseline (post-PR-B1)
 
-- `StreamingDataset.with_settings` (`_streaming.py:1009`) exposes only
-  `jitter`/`rng`/`deterministic` — **no** `min_af`/`max_af`.
-- SVAR1 backend `Svar1Backend` (`src/ffi/stream_engine.rs:109-141`) holds global
-  variant-scale tables `v_starts`/`ilens`/`alt_alleles`/`alt_offsets` (`:118-121`);
-  `generate_variants` (`stream_engine.rs:257-315`) walks the region-expanded CSR
-  and applies the region-overlap clip **inline** before pushing each global
-  `gvi`, then calls the shared `assemble_variants_window` (`src/variants/mod.rs:105`).
-- SVAR1 arrays are built in `_Svar1Backend.__init__` from `sv.index` via
-  `_variant_arrays_from_table` (`_haps.py:119-133`) — POS/ILEN/REF/ALT only, **no
-  AF** — and passed to the engine `#[new]` constructor
-  (`_streaming.py:1387-1390`; constructor `stream_engine.rs:394-432`).
-- Record backend (`RecordBackend`, `src/record_stream/engine.rs`; `DecodedWindow`,
-  `transpose.rs`) carries no AF and — per the finding above — **needs none** for
-  PR-B2.
+- `StreamingDataset.with_settings` (`_streaming.py:1009`) exposes only `jitter`/`rng`/`deterministic`.
+- SVAR1 backend `Svar1Backend` (`src/ffi/stream_engine.rs:109-141`) holds global variant-scale
+  tables `v_starts`/`ilens`/`alt_alleles`/`alt_offsets`; `generate_variants`
+  (`stream_engine.rs:257-315`) walks the region-expanded CSR and applies the region-overlap clip
+  **inline** before pushing each global `gvi`, then calls `assemble_variants_window`.
+- Record backends (`RecordBackend`, `src/record_stream/engine.rs`; `DecodedWindow`,
+  `src/record_stream/transpose.rs:29-49`) carry **no AF channel**. `fill_decoded_window`
+  (`transpose.rs:50-`) copies `pos/ilens/alt/alt_offsets/global_idx` + the genotype transpose but
+  **does not read `chunk.info_staged`**. The record variants assembly
+  (`src/variants/windows.rs:assemble_variants_mode`, `generate_batch_core` in `src/ffi/mod.rs`)
+  gathers alleles by window-local `v_idxs`; **confirm where PR-B1 applies the record-path region
+  clip** — the AF keep folds in at the same site.
 
 ## Design
 
-### Approach: SVAR1 inline-fold; VCF/PGEN guard-only
+### A. SVAR1 (full support — inline fold)
 
-**SVAR1 (full support):** extend `Svar1Backend`'s existing per-variant inline
-keep with an AF term (user-approved inline-fold, byte-identical to
-`region_keep & af_keep` + compact because AF keep is a pure per-variant
-predicate). No separate compaction pass; no `DecodedWindow` touch (SVAR1 uses a
-global backend table, not a per-window channel).
+Extend `Svar1Backend`'s existing per-variant inline keep with an AF term. Byte-identical to
+`region_keep & af_keep` + compact because AF keep is a pure per-variant predicate. No separate
+compaction pass; no `DecodedWindow` touch (SVAR1 uses a global backend table, not a per-window
+channel).
 
-**VCF/PGEN (guard-parity):** no Rust changes. Reproduce the written
-`RuntimeError` at the Python surface when `min_af`/`max_af` is set on a source
-with no cached `AF`. This matches the written path exactly (which raises there
-today) and keeps the two interchangeable.
+- `Svar1Backend` gains `afs: Option<Array1<f32>>`, `min_af: Option<f32>`, `max_af: Option<f32>`
+  (`stream_engine.rs:109-141`), threaded via `Svar1StreamEngine::build` (`:331-368`) and the
+  `#[new]` pyclass constructor (`:394-432`, trailing pyO3 params defaulted `None`).
+- In `generate_variants` (`:257-315`) the inner keep becomes
+  `if region_keep && af_keep { kept.push(gvi) }`, with `af_keep` reading `self.afs[gvi]`.
+- Python `_Svar1Backend.__init__` loads `_afs` from `sv.index["AF"]` (global order, `float32`)
+  when the schema has `AF`; exposes `has_cached_af`.
 
-### 1. Python surface (`python/genvarloader/_dataset/_streaming.py`)
+### B. VCF/BCF (full support — write INFO/AF on both sides)
 
-- Add `min_af: float | None = None` / `max_af: float | None = None` keyword
-  params to `StreamingDataset.with_settings` (mirroring `Dataset.with_settings`).
-  Store as `_min_af` / `_max_af` on the copied instance (same
-  `object.__setattr__` pattern as `_jitter`); initialize both to `None` in
-  `__init__`/field defaults.
-- **Output-mode guard:** AF filtering with a non-`variants` output raises
-  `NotImplementedError`, mirroring `_haps.py:707-709`. Fire at `to_iter`/config
-  time (where `_variants = self._seq_kind is RaggedVariants` is already computed,
-  `_streaming.py:464`), before any batch is produced.
-- **AF-missing guard:** when `min_af`/`max_af` is set, check whether the source
-  exposes a cached `AF` column; if not, raise the **same** `RuntimeError`
-  (same message) as `_haps.py:334-340`. Availability check per backend:
-  - **SVAR1:** `"AF" in sv.index.collect_schema().names()` (the `.svar` index the
-    backend already opens). Computed in `_Svar1Backend` and surfaced to the
-    `StreamingDataset` guard (e.g. a `has_cached_af: bool` property on the
-    backend, analogous to how `_variants`/`_annotated` capabilities are checked).
-  - **VCF/PGEN:** `False` unless the genoray index already exposes an `AF` numeric
-    INFO column (`available_info_fields`-style check). In practice this raises for
-    PGEN always and for VCF unless a `.gvi` was pre-built with `info=["AF"]` —
-    exactly matching the written path.
-- Thread `_min_af`/`_max_af` into `build_engine` → the engine constructor (below).
+**B.1 Written path — `.gvi` with `info=["AF"]`.** In `gvl.write` (`_write.py:244-249`), when the
+source is a VCF **whose header declares an `INFO/AF` field**, build the index with
+`variants._write_gvi_index(info=["AF"])` instead of `_write_gvi_index()`. Then
+`Dataset.open(...)` surfaces `variants.info["AF"]` through the existing numeric-column path and
+the written AF filter runs unchanged.
 
-### 2. `build_engine` plumbing (`_streaming.py`, all three backends)
+- **Conditional on header presence.** Check the VCF header for an `INFO/AF` definition (via
+  genoray's VCF metadata surface — confirm the exact API during implementation, e.g. an
+  `available_info_fields`/header-inspection call on the `VCF` object). If `AF` is **absent**, keep
+  the current `_write_gvi_index()` (no AF column) so AF-less VCFs are unaffected and both paths
+  raise the AF-missing guard (parity preserved).
+- **Benign default-behavior change.** VCFs that carry `INFO/AF` now get an `AF` column in the
+  written index (one `f32`/variant — negligible) and `"AF"` becomes an available var_field. Flag
+  in docs. *(Open a follow-up if a user later wants to opt out; not expected.)*
 
-Extend the shared `build_engine` signature (identical across
-`_Svar1Backend`/`_VcfBackend`/`_PgenBackend`, at `_streaming.py:1295`/`1858`/`1999`):
+**B.2 Streaming path — live INFO/AF via `FieldSpec`.**
 
-```python
-def build_engine(self, jobs, batch_size, output_length,
-                 annotated=False, variants=False,
-                 min_af=None, max_af=None):
-```
+1. `VcfWindowFiller` requests an `AF` INFO `FieldSpec`
+   (`FieldSpec { name: "AF", category: Info, htype: Float, dtype: F32, default: None }`,
+   struct literal per `genoray/src/field.rs:248-255` — there is no `FieldSpec::new`) instead of
+   `fields: Vec::new()` (`src/record_stream/vcf.rs:127`). It flows unchanged into both
+   `VcfRecordSource::with_sample_indices` (`vcf.rs:166`) and `ChunkAssembler::new` (`vcf.rs:170-179`),
+   so genoray populates `DenseChunk.info_staged[0]` as a per-variant `StagedColumn::Float`.
+   - Request AF **only when AF filtering is active** for this job (keeps the no-filter path a pure
+     genotype read — no INFO decode cost). Thread a "want AF" flag from Python into the filler
+     constructor.
+2. `DecodedWindow` gains `afs: Vec<f32>` (`transpose.rs:29-49`); `fill_decoded_window`
+   (`transpose.rs:50-`) copies from `chunk.info_staged[af_col]` when present, else leaves it empty
+   (`afs.is_empty()` ⇒ no AF filter, matching the SVAR1 `afs: None` no-op).
+3. The record variants assembly folds an AF keep-term into the per-`(region, sample, ploid)`
+   variant list, AND-combined with the region clip, then compacts — mirroring the written
+   `keep`/`_compact_keep` (`_flat_variants.py:810-858`). **Locate PR-B1's record-path region-clip
+   first** (`generate_batch_core`/`assemble_variants_mode`); if PR-B1 relies on the window already
+   being region-restricted (genoray `skip_out_of_scope` + overlap), add the AF keep + compaction as
+   the record path's first per-variant keep mask. The parity test is the gate.
 
-- `_Svar1Backend.build_engine`: load the global AF array when present
-  (`afs = self._afs`, an `NDArray[np.float32]` gathered in `__init__` from
-  `sv.index["AF"]` parallel to `_v_starts`; `None`/empty when uncached), and pass
-  `afs`, `min_af`, `max_af` to the `Svar1StreamEngine` constructor.
-- `_VcfBackend.build_engine` / `_PgenBackend.build_engine`: accept and **ignore**
-  `min_af`/`max_af` (the Python guard already rejected any case where they are
-  meaningfully set — a set value here only survives if AF was somehow available,
-  which the record engines do not support in PR-B2; the guard prevents reaching
-  here with AF filtering active). Signature parity keeps `_iter_batches`'
-  single `build_engine(... , min_af=, max_af=)` call site uniform.
+**Parity invariant:** streaming `afs[i]` (from `info_staged`, ALT-resolved by
+`resolve_scalar(source_alt_index)`) must equal written `variants.info["AF"][global_i]` (from the
+`.gvi`, same genoray resolution). Multiallelic sites atomized to biallelic must map each atom to
+its source-ALT's AF on **both** sides — this is the primary parity risk; the interior-exclusion /
+multiallelic parity fixture is the gate.
 
-### 3. SVAR1 AF array (`_Svar1Backend.__init__`, `_streaming.py`)
+### C. PGEN (guard-parity only)
 
-- After reading `idx = sv.index.sort("index")` (`_streaming.py:1200`), if the
-  schema has `AF`, extract `self._afs = idx["AF"].to_numpy().astype(np.float32)`
-  (parallel to `_v_starts`, global variant order). Else `self._afs = None`.
-- Expose `has_cached_af` (True iff `_afs is not None`) for the Python guard.
-- `_variant_arrays_from_table` is left unchanged (POS/ILEN/REF/ALT); AF is read
-  separately since it is optional and only SVAR1 uses it.
+PGEN record streams are genotype-only (no INFO; `PgenWindowFiller` has no `fields`,
+`DenseChunk.info_staged` always empty), and the written PGEN index parser has no AF path. Both
+paths raise the AF-missing `RuntimeError`. `_PgenBackend.has_cached_af` returns `False`.
+*(pvar `INFO/AF` support on both sides is a future extension — out of scope; both raising keeps
+parity.)*
 
-### 4. Rust: `afs` on `Svar1Backend` + keep-fold (`src/ffi/stream_engine.rs`)
+### D. Guard reconciliation (all backends)
 
-- Add `afs: Option<Array1<f32>>` and `min_af: Option<f32>`, `max_af: Option<f32>`
-  fields to `Svar1Backend` (`:109-141`), populated via the shared constructor
-  `Svar1StreamEngine::build` (`:331-368`) and the `#[new]` pyclass constructor
-  (`:394-432`). Add trailing pyO3 params `afs: Option<PyReadonlyArray1<f32>>`,
-  `min_af: Option<f32>`, `max_af: Option<f32>` (all with `= None` in the
-  `#[pyo3(signature = ...)]`), so existing callers are unaffected.
-- In `Svar1Backend::generate_variants` (`:257-315`), extend the inline keep:
+- **Output-mode guard:** AF filtering with a non-`variants` output raises `NotImplementedError`
+  at `to_iter`/config time (mirrors `_haps.py:707-710`).
+- **AF-missing guard:** when `min_af`/`max_af` is set, each backend reports `has_cached_af`; if
+  `False`, raise the same `RuntimeError` (same message) as `_haps.py:333-340`:
+  - **SVAR1:** `"AF" in sv.index` schema.
+  - **VCF/BCF:** the VCF header declares an `INFO/AF` field (the same condition that made B.1
+    write the column, so streaming ⟺ written agree: AF present ⇒ both filter; absent ⇒ both raise).
+  - **PGEN:** always `False`.
 
-  ```rust
-  let v_start = self.v_starts[gvi as usize] as i64;
-  let v_ilen  = self.ilens[gvi as usize] as i64;
-  let v_end   = v_start - v_ilen.min(0) + 1;
-  let region_keep = v_start < r_e as i64 && v_end > r_s as i64;
-  let af_keep = match &self.afs {
-      Some(afs) => {
-          let af = afs[gvi as usize];
-          self.min_af.map_or(true, |m| af >= m) && self.max_af.map_or(true, |m| af <= m)
-      }
-      None => true, // no filtering requested (or no AF); guard handled in Python
-  };
-  if region_keep && af_keep { kept.push(gvi); }
-  ```
+### Python surface (`_streaming.py`)
 
-  Everything downstream (`row_offsets`, `assemble_variants_window`, FFI
-  marshaling, Python `RaggedVariants` packing) is unchanged.
+- `StreamingDataset.with_settings` gains `min_af: float | None = None`, `max_af: float | None = None`
+  (mirroring `Dataset.with_settings`); stored as `_min_af`/`_max_af`, propagated through the
+  copy/subset path.
+- `build_engine` (shared across `_Svar1Backend`/`_VcfBackend`/`_PgenBackend`) gains
+  `min_af=None, max_af=None`. SVAR1 passes `afs`; VCF passes the "want AF" flag into its filler;
+  PGEN ignores (guarded out upstream).
 
-### 5. Tests
+## Testing / parity plan
 
-**SVAR1 parity** (`tests/dataset/test_streaming_variants_parity.py` — extend, or
-a sibling test module):
-
-- Build an **AF-cached SVAR1 case**: copy the svar source into `tmp`, call
-  `genoray.SparseVar(copy).cache_afs()` (writes `AF` into the `.svar` index),
-  then `gvl.write` a fresh oracle dataset from it and point `StreamingDataset` at
-  the same svar. This gives both paths a real `AF` column. (New fixture/helper;
-  the existing `svar1_multicontig_fixture` carries no AF.)
-- Parametrize over `min_af` / `max_af` / a combined band; apply
-  `.with_settings(min_af=..., max_af=...)` on **both** the written oracle and the
-  `StreamingDataset`; assert **byte-identical** `RaggedVariants` cell-by-cell
-  (reuse `_assert_variants_cell_matches`).
-- **Non-vacuity:** assert the filtered total is **strictly less** than the
-  unfiltered total for at least one case (proving the filter removes variants),
-  keeping the existing `total_variants > 0` guard.
-
-**AF-missing guard parity** (all backends):
-
-- SVAR1 **without** `cache_afs` + `min_af` → `RuntimeError` (same message) on
-  both streaming and written.
-- VCF + `min_af` → `RuntimeError` on both (source has no AF index).
-- PGEN + `min_af` → `RuntimeError` on both.
-- Non-`variants` output (e.g. `with_seqs("haplotypes")`) + `min_af` on streaming
-  → `NotImplementedError`, matching `_haps.py:707-709`.
-
-**Rust unit** (`src/ffi/stream_engine.rs` tests): `Svar1Backend::generate_variants`
-with a small hand-built `afs` — a variant kept by the region clip but dropped by
-AF, and one inside the AF band but outside the region — proving the two keep
-terms compose as **AND**.
-
-## Decisions
-
-- **SVAR1-only AF filtering; VCF/PGEN guard-parity.** Matches the written path's
-  actual capabilities (AF is SVAR-only today) and preserves streaming ⟺ written
-  interchangeability. VCF live-INFO AF deferred to #319 (a written-path gap
-  first).
-- **Inline-fold over a separate compact pass** — byte-identical (pure
-  per-variant predicate), no extra allocation.
-- **SVAR1 AF as an optional global backend table** (`Option<Array1<f32>>`), not a
-  per-window channel — matches SVAR1's global-id model; no `DecodedWindow` /
-  record-backend change.
-- **Guard + output-mode errors mirror the written path exactly** (same exception
-  types and messages).
-- **`build_engine` gains `min_af`/`max_af` on all three backends** for call-site
-  uniformity; the record backends accept-and-ignore them (the Python guard
-  prevents them from being meaningfully set for VCF/PGEN).
-
-## Scope / non-goals
-
-- **No VCF/PGEN AF *filtering***; only the guard (raise). VCF live-INFO AF →
-  **#319**.
-- No `var_fields` (dosage / custom FORMAT/INFO) — **PR-B3**.
-- No REF bytes / `variant-windows` — **PR-B4**.
-- No AF filtering for haplotype / annotated / `variant-windows` output (raises,
-  same as written).
-- `.svar2` remains haplotypes-only (unchanged).
-- No new on-disk format. The only public-surface change is two new keyword args
-  on `StreamingDataset.with_settings` (matching `Dataset.with_settings`) — **no
-  new exported symbol**, so no `api.md`/`__all__` change.
-
-## Docs to update when PR-B2 lands
-
-Per `CLAUDE.md` (skill + docs-audit gates):
-
-- `skills/genvarloader/SKILL.md` — `StreamingDataset.with_settings` now accepts
-  `min_af`/`max_af` (SVAR1 variants output; VCF/PGEN raise the same guard as the
-  written path).
-- `docs/source/dataset.md` / `docs/source/faq.md` — streaming AF-filtering note +
-  the SVAR-only caveat and `cache_afs` requirement.
-- `docs/roadmaps/streaming-dataset.md` — tick PR-B2, update the Wave B status
-  line, link this design + #317 + #319.
-- No `api.md` / `__all__` change.
-
-## Testing plan (summary)
+Byte-identical vs `gvl.write()` + `Dataset[r, s]` under matching `.with_settings(min_af=, max_af=)`,
+`jitter=0`, reusing `_assert_variants_cell_matches`.
 
 | Test | Backend(s) | Asserts |
 |---|---|---|
-| AF-cached SVAR1 parity | svar1 | byte-identical `RaggedVariants` vs written oracle under `min_af`, `max_af`, combined band; filtered total < unfiltered for ≥1 case |
-| AF-missing guard | svar1 (uncached), vcf, pgen | same `RuntimeError` + message as written when `min_af`/`max_af` set without cached AF |
-| Output-mode guard | svar1 | `NotImplementedError` for `min_af` + non-`variants` output, matching `_haps.py:707-709` |
-| Rust unit (svar1 engine) | svar1 kernel | region-kept-but-AF-dropped and AF-kept-but-region-dropped compose as AND |
+| AF-cached SVAR1 parity | svar1 | byte-identical `RaggedVariants` under `min_af`/`max_af`/band; filtered total < unfiltered for ≥1 case |
+| **VCF/BCF INFO-AF parity** | vcf, bcf | fixture VCF **with `INFO/AF`**; `gvl.write(info=["AF"])` oracle vs streaming; byte-identical under `min_af`/`max_af`/band; **multiallelic/atomized ALT→AF mapping** matches on both sides; filtered total < unfiltered |
+| AF-missing guard | svar1 (uncached), vcf (no `INFO/AF`), pgen | same `RuntimeError` + message as written when AF unavailable |
+| Output-mode guard | svar1 | `NotImplementedError` for `min_af` + non-`variants` output |
+| Rust unit (svar1) | svar1 kernel | region-kept-but-AF-dropped and AF-kept-but-region-dropped compose as **AND** |
+| Rust unit (record afs) | vcf filler | `fill_decoded_window` copies `info_staged → afs`; AF keep + region clip compose as AND in the record assembly |
 
-**Rebuild reminder:** Rust changes require `pixi run -e dev maturin develop
---release` before the Python parity tests import the extension (per `CLAUDE.md`)
-— else pytest silently tests the stale binary.
+- **No fixture with `INFO/AF`?** Add one (a small multiallelic VCF with an `AF` INFO line), or
+  synthesize AF into an existing streaming VCF fixture.
+- **libdeflate:** VCF/BCF AF decode rides genoray's htslib reader, built with the `libdeflate`
+  feature (`genoray/Cargo.toml:33`, `rust-htslib { features = ["libdeflate"] }`; `libdeflate-sys`
+  present in gvl `Cargo.lock`). Add a build-time assertion/guard so this cannot silently regress
+  (e.g. a `cargo test` that fails if the non-libdeflate bgzf path is linked, or at minimum a
+  documented check in the plan's verification task).
+- **Rebuild:** `pixi run -e dev maturin develop --release` before pytest after any `src/` change.
+  Run the full tree before pushing (`CLAUDE.md`).
+
+## Scope / non-goals
+
+- **No PGEN AF** (guard only). pvar `INFO/AF` is a future extension.
+- No `var_fields` (dosage / custom FORMAT/INFO) — **PR-B3**.
+- No REF bytes / `variant-windows` — **PR-B4**.
+- No AF filtering for haplotype / annotated / `variant-windows` output (raises, same as written).
+- `.svar2` remains haplotypes-only.
+- No new on-disk format for streaming. The written change is additive (an optional `AF` column in
+  the VCF `.gvi` when the header has it). The only public-surface change is two new keyword args on
+  `StreamingDataset.with_settings` (matching `Dataset.with_settings`) — **no new exported symbol**,
+  so no `api.md`/`__all__` change.
+
+## Decisions
+
+- **Fold #319 into B2; fix both sides (chosen 2026-07-21).** VCF/BCF AF read from `INFO/AF` on both
+  the written (`.gvi info=["AF"]`) and streaming (`FieldSpec`) paths, so parity holds by
+  construction. Supersedes the earlier SVAR-only scope. PGEN stays guard-only.
+- **No genoray change.** Both the `FieldSpec` staging and `_write_gvi_index(info=…)` paths exist at
+  the pinned rev; verified. No rev bump.
+- **Written `.gvi info=["AF"]` gated on header presence.** AF-less VCFs are untouched (both paths
+  raise). AF-bearing VCFs "just work" on both paths.
+- **Stay on rust-htslib + libdeflate** for the VCF/BCF record read (faster than noodles; user
+  decision). Add a guard so libdeflate cannot silently regress.
+- **Inline-fold over a separate compact pass for SVAR1** (byte-identical, no extra allocation); the
+  record path uses a keep-mask + compaction mirroring the written `_compact_keep`.
+- **SVAR1 AF as an optional global backend table** (`Option<Array1<f32>>`); VCF AF as a per-window
+  `DecodedWindow.afs` channel — each matches its backend's id model.
+- **Guard + output-mode errors mirror the written path exactly** (same exception types/messages).
+
+## Docs to update when PR-B2 lands
+
+Per `CLAUDE.md` (skill + docs-audit + roadmap gates):
+
+- `skills/genvarloader/SKILL.md` — `StreamingDataset.with_settings` accepts `min_af`/`max_af`
+  (variants output); SVAR1 needs `cache_afs()`, VCF/BCF need an `INFO/AF` field; PGEN raises.
+- `docs/source/dataset.md` / `docs/source/faq.md` — streaming AF-filtering note + the per-backend
+  AF-source table (SVAR `cache_afs`, VCF `INFO/AF`, PGEN unsupported) and that `gvl.write` now
+  caches `AF` from VCF `INFO/AF`.
+- `docs/source/write.md` — `gvl.write` writes an `AF` column for VCFs with `INFO/AF`.
+- `docs/roadmaps/streaming-dataset.md` — tick PR-B2, update the Wave B status line, link this
+  design + #317 + #319 (now closed here). Update the StreamingDataset project board (move #319 to
+  the B2 PR; note the fold-in).
+- No `api.md` / `__all__` change.
