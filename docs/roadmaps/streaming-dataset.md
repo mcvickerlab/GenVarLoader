@@ -545,8 +545,13 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   remains window-local** — genoray's VCF reader hard-codes `global_idx = -1` — real VCF
   global ids are **Phase 3**, not yet landed. `var_base` itself has been fully retired
   (Task 2.5 close-out).
-- 🚧 **Variants-output surface, Wave B — issue
-  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Plan:
+- ✅ **Variants-output surface, Wave B PR-B0 + PR-B1 — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** PR-B0 (region-overlap
+  clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
+  streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
+  byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (PR-B2),
+  non-default `var_fields` (PR-B3), and `"variant-windows"` (PR-B4) remain. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)

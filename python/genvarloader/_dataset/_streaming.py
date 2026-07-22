@@ -961,7 +961,7 @@ class StreamingDataset:
         ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
         variant indices and reference coordinates), or ``"variants"`` (no
         sequences, just variants as :class:`RaggedVariants` -- supported for the
-        VCF/PGEN backends; SVAR1 lands in a later Wave B task).
+        SVAR1, VCF, and PGEN backends; not yet wired for ``.svar2``).
         ``"variant-windows"`` / ``"reference"`` are later Wave B / follow-ups.
 
         ``"annotated"`` is **not supported for the VCF backend** (its

@@ -224,8 +224,9 @@ one `batch_size` slice at a time, so output is never materialized for a whole wi
 at once. Together, peak memory is bounded by `max_mem` (offsets) + `batch_size`
 (output), regardless of how many samples or regions the dataset has.
 
-Haplotype (and `with_seqs("annotated")`) output is byte-identical to `gvl.write(...)` followed by
-`Dataset.open(...)[r, s]` (at `jitter=0`). It trades that write step for a slower per-epoch read,
+Haplotype (and `with_seqs("annotated")`/`with_seqs("variants")`) output is byte-identical to
+`gvl.write(...)` followed by `Dataset.open(...)[r, s]` (at `jitter=0`), on the SVAR1, VCF, and
+PGEN backends (`with_seqs("variants")` is not yet wired for `.svar2`). It trades that write step for a slower per-epoch read,
 since every window re-reads the live store instead of hitting a pre-indexed dataset — prefer a
 written `Dataset` for repeated-epoch training, and `StreamingDataset` for one-shot/inference work
 or when you'd rather not pay for the write.
@@ -240,7 +241,7 @@ super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iterat
 stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
 with each batch identify every row.
 
-### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`
+### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`, `with_seqs("variants")`
 
 `StreamingDataset` supports the following read-time knobs (issue
 [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
@@ -274,16 +275,25 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   dataset-global only for whole-contig or from-contig-start windows — a narrowed/partial-prefix
   VCF window currently reports window-local `var_idxs` instead of the dataset-global index. Fix
   deferred to Phase 3.
+- **`with_seqs("variants")`** (Wave B PR-B1, issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) — returns `RaggedVariants`
+  with the default field set (`alt`, `start`, `ilen`), the same defaults as the written
+  `Dataset.with_seqs("variants")`. Variants are clipped to each region's read window (matching
+  the written path's region-overlap clip), and output is byte-identical to
+  `Dataset.open(...).with_seqs("variants")[r, s]` at `jitter=0`. Streamed variant records carry
+  no dataset-global variant id (unlike `AnnotatedHaps.var_idxs`) — each `RaggedVariants` entry is
+  self-contained. `min_af`/`max_af` filtering and non-default `var_fields` (e.g. `dosage`/FORMAT
+  columns) on the streaming variants path are not yet wired.
 
-`"variants"`/`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and `var_fields`
-are **not yet implemented** for `StreamingDataset` — that's Wave B (issue
-[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs` raises
-`NotImplementedError` for any kind other than `"haplotypes"`/`"annotated"`.
+`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and non-default `var_fields`
+remain **not yet implemented** for `StreamingDataset` — later Wave B follow-ups (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B2–B4); `with_seqs` raises
+`NotImplementedError` for `"variant-windows"`/`"reference"`.
 
-The **`.svar2` backend** does not yet support these Wave A knobs. It is currently
+The **`.svar2` backend** does not yet support these knobs. It is currently
 **haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
-`with_len(<int>)`, or `with_seqs("annotated")` raises `NotImplementedError` (SVAR2 Wave A support
-is a known follow-up).
+`with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
+`NotImplementedError` (SVAR2 support is a known follow-up).
 
 `StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
 and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises
