@@ -449,8 +449,12 @@ def write_chunk(
                 raise TypeError(f"write_chunk: unsupported array type {type(a)}")
         except ValueError as e:
             # numpy raises "buffer is smaller than requested size" when a write
-            # offset+extent exceeds the slot. Re-raise with actionable context;
-            # let unrelated ValueErrors (e.g. the TypeError branch) propagate.
+            # offset+extent exceeds the slot. Re-raise those with actionable
+            # context; let any other ValueError propagate unchanged. (The
+            # unsupported-type branch above raises TypeError, not ValueError, so
+            # it bypasses this handler entirely.) NOTE: this couples to numpy's
+            # exact message; if numpy rewords it, the guard degrades to the raw
+            # error -- test_write_chunk_raises_actionable_on_overflow pins it.
             if "buffer is smaller than requested size" not in str(e):
                 raise
             raise SlotOverflowError(

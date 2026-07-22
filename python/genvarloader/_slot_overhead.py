@@ -40,6 +40,11 @@ def _array_counts(dataset) -> tuple[int, int]:
         n_allele = sum(1 for f in var_fields if f in ("alt", "ref"))
         n_off += n_scalar * 1 + n_allele * 2
         n_arr += n_scalar * 2 + n_allele * 3
+        # optional flank_tokens payload: _write_flat_variants emits one extra
+        # data + offset array when present. Charge it unconditionally (an
+        # upper bound; harmless over-count when flanks are absent).
+        n_off += 1
+        n_arr += 2
     else:
         # reference / haplotypes / annotated / none: few arrays; the 4096 floor
         # dominates. Charge a generous constant so the floor is never exceeded.
