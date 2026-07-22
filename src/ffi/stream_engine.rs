@@ -138,6 +138,18 @@ struct Svar1Backend {
     /// (bails if `false`) and surfaced to Python via `next_batch_variants`. `false`
     /// (default) preserves pre-Task-4 behavior exactly.
     variants: bool,
+    /// Wave B PR-B2 (`min_af`/`max_af` streaming AF filtering, issue #317): GLOBAL
+    /// per-variant allele frequency table, indexed by the same global variant id as
+    /// `v_starts`/`ilens`/etc. `Some` only when the `.svar` had AF cached AND filtering
+    /// was requested by the caller; `None` makes the AF keep-term in `generate_variants`
+    /// a pure no-op (`af_keep` always `true`), preserving pre-PR-B2 parity exactly.
+    afs: Option<Array1<f32>>,
+    /// Inclusive lower AF bound (`af >= min_af` kept); `None` disables the lower bound.
+    /// Only meaningful when `afs` is `Some`.
+    min_af: Option<f32>,
+    /// Inclusive upper AF bound (`af <= max_af` kept); `None` disables the upper bound.
+    /// Only meaningful when `afs` is `Some`.
+    max_af: Option<f32>,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -291,7 +303,17 @@ impl EngineBackend for Svar1Backend {
                 let v_start = self.v_starts[gvi as usize] as i64;
                 let v_ilen = self.ilens[gvi as usize] as i64;
                 let v_end = v_start - v_ilen.min(0) + 1;
-                if v_start < r_e as i64 && v_end > r_s as i64 {
+                // Wave B PR-B2: AND an AF keep-term onto the region-overlap keep.
+                // `afs=None` makes this a pure no-op (`af_keep` always `true`),
+                // preserving pre-PR-B2 parity exactly.
+                let af_keep = match &self.afs {
+                    Some(a) => {
+                        let af = a[gvi as usize];
+                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
+                    }
+                    None => true,
+                };
+                if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
                     kept.push(gvi);
                 }
             }
@@ -343,6 +365,9 @@ impl Svar1StreamEngine {
         output_length: i64,
         annotated: bool,
         variants: bool,
+        afs: Option<Array1<f32>>,
+        min_af: Option<f32>,
+        max_af: Option<f32>,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -361,6 +386,9 @@ impl Svar1StreamEngine {
             output_length,
             annotated,
             variants,
+            afs,
+            min_af,
+            max_af,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -375,6 +403,13 @@ impl Svar1StreamEngine {
     ) -> Option<anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>>
     {
         self.core.next_batch_core()
+    }
+
+    /// Test-only accessor mirroring the pyclass's `next_batch_variants`, minus the
+    /// numpy/PyDict marshaling — used directly by the `#[cfg(test)]` module below.
+    #[cfg(test)]
+    fn next_batch_variants_core(&self) -> Option<anyhow::Result<crate::variants::VariantsBatch>> {
+        self.core.next_batch_variants_core()
     }
 }
 
@@ -399,7 +434,7 @@ impl Svar1StreamEngine {
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
-        variants=false,
+        variants=false, afs=None, min_af=None, max_af=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -429,6 +464,9 @@ impl Svar1StreamEngine {
         output_length: i64,
         annotated: bool,
         variants: bool,
+        afs: Option<PyReadonlyArray1<f32>>,
+        min_af: Option<f32>,
+        max_af: Option<f32>,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
@@ -507,6 +545,7 @@ impl Svar1StreamEngine {
             });
         }
 
+        let afs = afs.map(|a| a.as_array().to_owned());
         Ok(Self::build(
             store,
             contigs,
@@ -522,6 +561,9 @@ impl Svar1StreamEngine {
             output_length,
             annotated,
             variants,
+            afs,
+            min_af,
+            max_af,
         ))
     }
 
@@ -723,6 +765,9 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
         )
     }
 
@@ -876,6 +921,9 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
         );
 
         match engine.next_batch_core() {
@@ -1019,6 +1067,9 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1143,6 +1194,9 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1166,5 +1220,109 @@ mod tests {
             batches[0], exp_swapped,
             "window must reconstruct phys_sample_idx[s_lo..s_hi] = [1, 0], not [0, 1]"
         );
+    }
+
+    /// Wave B PR-B2: `generate_variants`' AF keep must AND-compose with the existing
+    /// region-overlap keep. Fixture: var0 @10 (af 0.05), var1 @20 (af 0.5); 2 samples x
+    /// ploidy 2, per-hap sorted global ids hap0=[0], hap1=[], hap2=[0,1], hap3=[1] (see
+    /// `fixture()`'s doc comment).
+    ///
+    /// Case A: region (0,30) — both variants pass the position clip; `min_af=0.1` drops
+    /// var0 (af 0.05) but keeps var1 (af 0.5). Expected per-(row,ploid) sub-row kept
+    /// counts, in CSR (sample0-hap0, sample0-hap1, sample1-hap0, sample1-hap1) order:
+    /// hap0=[var0 dropped]->0, hap1=[]->0, hap2=[var0 dropped, var1 kept]->1, hap3=[var1
+    /// kept]->1 — cumulative `row_offsets = [0,0,0,1,2]`, both kept `start`s are var1's
+    /// position (20).
+    ///
+    /// Case B: region (0,15) — var1 (@20) fails the position clip regardless of AF; var0
+    /// (@10) passes position but is then dropped by `min_af=0.1` (af 0.05) — zero kept
+    /// overall, demonstrating the AND-compose from the other direction (position keep +
+    /// AF drop).
+    #[test]
+    fn svar1_generate_variants_af_and_region_compose_as_and() {
+        let f = fixture();
+        let afs = Some(Array1::from(vec![0.05f32, 0.5]));
+
+        // Case A: full-window region -> AF alone decides which variant survives.
+        let jobs_a = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 30)],
+            s_lo: 0,
+            s_hi: 2,
+        }];
+        let store_a = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        let engine_a = Svar1StreamEngine::build(
+            store_a,
+            vec![chr1_contig(&f)],
+            jobs_a,
+            vec![0usize, 1],
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            b'N',
+            false,
+            1000,
+            -1,   // ragged
+            false, // annotated
+            true,  // variants
+            afs.clone(),
+            Some(0.1f32),
+            None,
+        );
+        let batch_a = engine_a
+            .next_batch_variants_core()
+            .expect("one window")
+            .expect("no producer error");
+        assert_eq!(
+            batch_a.row_offsets.as_slice().unwrap(),
+            &[0, 0, 0, 1, 2],
+            "only var1 (af 0.5) survives min_af=0.1; var0 (af 0.05) is dropped"
+        );
+        assert_eq!(
+            batch_a.start.as_slice().unwrap(),
+            &[20, 20],
+            "both kept sub-rows carry var1 (@20)"
+        );
+        assert!(engine_a.next_batch_variants_core().is_none());
+
+        // Case B: narrow region -> var1 already fails the position clip; var0 passes
+        // position but is then dropped by AF -> zero kept overall.
+        let jobs_b = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 15)],
+            s_lo: 0,
+            s_hi: 2,
+        }];
+        let store_b = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        let engine_b = Svar1StreamEngine::build(
+            store_b,
+            vec![chr1_contig(&f)],
+            jobs_b,
+            vec![0usize, 1],
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            b'N',
+            false,
+            1000,
+            -1,   // ragged
+            false, // annotated
+            true,  // variants
+            afs,
+            Some(0.1f32),
+            None,
+        );
+        let batch_b = engine_b
+            .next_batch_variants_core()
+            .expect("one window")
+            .expect("no producer error");
+        assert_eq!(
+            batch_b.row_offsets.as_slice().unwrap(),
+            &[0, 0, 0, 0, 0],
+            "var1 fails the position clip and var0 fails the AF clip -> nothing kept"
+        );
+        assert_eq!(batch_b.start.len(), 0, "no variants survive either clip");
     }
 }
