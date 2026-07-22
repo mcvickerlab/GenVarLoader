@@ -467,6 +467,18 @@ class StreamingDataset:
             # -- threaded through `build_engine`/the engine constructor and selects the
             # `next_batch_variants` puller below.
             _variants = self._seq_kind is RaggedVariants
+            # Wave B PR-B2 (#317): min_af/max_af filtering is only implemented for
+            # `with_seqs("variants")` output -- mirroring the written `Dataset`, which
+            # raises for haplotype/annotated output when AF bounds are requested (AF
+            # filtering drops whole variants, which haplotype/annotated reconstruction
+            # has no way to represent). Fail fast rather than silently ignore the bounds.
+            _af_filter = self._min_af is not None or self._max_af is not None
+            if _af_filter and not _variants:
+                raise NotImplementedError(
+                    'min_af/max_af filtering is only supported for with_seqs("variants") '
+                    "output (matching the written Dataset, which raises for "
+                    "haplotype/annotated output)."
+                )
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
             # unjittered region bounds and emit ragged haplotypes only, so combining

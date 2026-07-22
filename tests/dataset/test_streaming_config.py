@@ -70,6 +70,17 @@ def test_with_settings_min_max_af_stored(streaming_case):
     assert out._jitter == sds._jitter  # copy preserves others
 
 
+def test_af_filter_rejects_non_variants_output(streaming_case):
+    regions, reference, variants, _ = streaming_case("svar1")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_seqs("haplotypes")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(NotImplementedError, match="af"):
+        next(iter(sds.to_iter(batch_size=4)))
+
+
 def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     sds = _tiny_sds()
     from genvarloader._dataset._rag_variants import RaggedVariants
