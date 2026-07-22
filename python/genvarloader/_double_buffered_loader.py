@@ -13,6 +13,7 @@ from multiprocessing.shared_memory import SharedMemory
 
 from ._chunked import ChunkPlanner, slice_chunk
 from ._shm_layout import read_chunk, HEADER_RESERVED
+from ._slot_overhead import slot_overhead_bytes
 
 if TYPE_CHECKING:
     import torch.utils.data as td
@@ -272,7 +273,7 @@ class _DoubleBufferedIterable:
         self._chunks: list[tuple[np.ndarray, np.ndarray, int]] = list(planner)
         peak = planner.peak_chunk_bytes
 
-        capacity = HEADER_RESERVED + peak + 4096
+        capacity = HEADER_RESERVED + peak + slot_overhead_bytes(dataset)
         suffix = uuid.uuid4().hex[:8]
         self._shm_names = [f"gvl-{os.getpid()}-{suffix}-{i}" for i in range(2)]
         self._shms = [

@@ -2,8 +2,15 @@
 
 import multiprocessing as mp
 import numpy as np
+import pytest
 from multiprocessing.shared_memory import SharedMemory
-from genvarloader._shm_layout import write_chunk, read_chunk, slot_capacity_for
+from genvarloader._shm_layout import (
+    write_chunk,
+    read_chunk,
+    slot_capacity_for,
+    SlotOverflowError,
+    HEADER_RESERVED,
+)
 
 
 def test_dense_roundtrip_single_array():
@@ -347,3 +354,14 @@ def test_flat_read_avoids_awkward_variant_funcs(monkeypatch):
     finally:
         shm.close()
         shm.unlink()
+
+
+def test_write_chunk_raises_actionable_on_overflow():
+    # A dense array whose payload exceeds a deliberately tiny slot.
+    arr = np.arange(4096, dtype=np.int64)  # 32 KiB payload
+    tiny = memoryview(bytearray(HEADER_RESERVED + 1024))  # far too small
+    with pytest.raises(SlotOverflowError) as ei:
+        write_chunk(tiny, [arr], n_instances=1)
+    msg = str(ei.value)
+    assert "slot" in msg.lower()
+    assert "buffer_bytes" in msg or "batch_size" in msg  # actionable remedy
