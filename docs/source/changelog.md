@@ -73,6 +73,17 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.40.1 (2026-07-23)
+
+### Fix
+
+- **dataloader**: charge variants flank_tokens overhead + clarify guard comments
+- **dataloader**: raise actionable SlotOverflowError on oversized chunk write
+- **dataloader**: derive double_buffered slot overhead from schema, drop magic 4096
+
 ## v0.40.0 (2026-07-21)
 
 ### Feat
