@@ -550,8 +550,8 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
   streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
   byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
-  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (PR-B2),
-  non-default `var_fields` (PR-B3), and `"variant-windows"` (PR-B4) remain. Plan:
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done —
+  see below**); non-default `var_fields` (PR-B3) and `"variant-windows"` (PR-B4) remain. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -590,6 +590,22 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   filed for the still-unclipped `get_variants_flat(self, idx)` no-region call site
   (`_haps.py:676`, reached via `with_seqs("variants").with_tracks(...)`) — issue
   [#314](https://github.com/mcvickerlab/GenVarLoader/issues/314).
+- ✅ **Variants-output surface, Wave B PR-B2 (`min_af`/`max_af`) — issue
+  [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317), closes
+  [#319](https://github.com/mcvickerlab/GenVarLoader/issues/319).** `StreamingDataset
+  .with_settings(min_af=, max_af=)` now filters `with_seqs("variants")` output with
+  inclusive AF bounds, mirroring `Dataset.with_settings`, and raises the SAME
+  `NotImplementedError`/`RuntimeError` guards as the written path for unsupported output
+  kinds / missing AF. **SVAR1** reads AF from the `.svar` index after
+  `SparseVar.cache_afs()`. **VCF/BCF** reads AF live from the `INFO/AF` header field (a
+  genoray `FieldSpec` staged into the record-stream decode) — folding in #319, `gvl.write()`
+  now also caches that same `INFO/AF` field into the written `.gvi` index at index-build
+  time, so a written VCF/BCF-sourced `Dataset` gains AF filtering too and the two paths stay
+  byte-identical by construction (both resolve the same field the same way). **PGEN** has no
+  INFO path and always raises (guard-parity only). No genoray rev bump was needed — both the
+  `FieldSpec` staging and `_write_gvi_index`-adjacent AF-attach path already existed at the
+  pinned rev. No new exported symbol (two new `with_settings` kwargs only) — no `api.md`
+  change. Design: `docs/superpowers/specs/2026-07-21-streaming-variants-min-max-af-b2-design.md`.
 
 ## Sequencing
 

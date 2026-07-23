@@ -67,6 +67,17 @@ gvl.write(
 
 This dataset would have haplotypes available for all samples in `all_chroms.bcf`.
 
+**Allele-frequency caching for VCF/BCF sources.** When `variants=` is a VCF/BCF whose header
+declares an `INFO/AF` field, `gvl.write()` now caches an `AF` column into the written index at
+index-build time. This is what lets a written `Dataset` open the VCF-sourced dataset and
+AF-filter it (`Dataset.with_settings(min_af=, max_af=)`) the same way a `.svar` store does after
+`SparseVar.cache_afs()` — see [dataset.md](dataset.md) (the `StreamingDataset` section) and the
+[FAQ](faq.md) for the guard and per-source rules. VCFs with no `INFO/AF` field are unaffected
+(no `AF` column is written, and AF filtering raises the same guard it always did). The cache is
+only attached when `gvl.write()` builds a fresh `.gvi` index — if a *valid* `.gvi` index already
+exists on disk without an `AF` column (e.g. built by an older gvl or by genoray directly), it is
+not rewritten, so AF filtering keeps raising until the index is rebuilt.
+
 ```python
 gvl.write(
     path="1000_genomes_lncRNA.gvl",
