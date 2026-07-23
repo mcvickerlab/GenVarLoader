@@ -496,6 +496,9 @@ impl RecordStreamEngine {
                     ploidy,
                     fasta_path.as_deref(),
                     min_af.is_some() || max_af.is_some(),
+                    // No var_fields INFO surface yet (Wave B PR-B3a follow-on task);
+                    // this task only adds the DecodedWindow.info_cols layer.
+                    &[],
                 )
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(Self::new_rs(
@@ -1072,6 +1075,7 @@ mod tests {
             geno_offsets: vec![0, 2], // one hap, CSR [0,2)
             global_v_idxs: vec![100, 101], // ignored for variants output
             afs: Vec::new(), // no AF filter in this fixture
+            info_cols: Vec::new(),
         };
         let backend = RecordBackend {
             filler: Box::new(StubFiller),
@@ -1183,6 +1187,7 @@ mod tests {
             geno_offsets: vec![0, 3],
             global_v_idxs: vec![100, 101, 102], // ignored for variants output
             afs: vec![0.05f32, 0.5, 0.5],
+            info_cols: Vec::new(),
         };
         let backend = RecordBackend {
             filler: Box::new(StubFiller),
@@ -1229,6 +1234,7 @@ mod tests {
             geno_offsets: vec![0, 3],
             global_v_idxs: vec![100, 101, 102],
             afs: vec![0.05f32, 0.5, 0.5],
+            info_cols: Vec::new(),
         };
         let backend = RecordBackend {
             filler: Box::new(StubFiller),
