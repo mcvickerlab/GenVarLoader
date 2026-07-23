@@ -690,6 +690,20 @@ impl Svar1StreamEngine {
                 dict.set_item("start", batch.start.into_pyarray(py))?;
                 dict.set_item("ilen", batch.ilen.into_pyarray(py))?;
                 dict.set_item("offsets", batch.row_offsets.into_pyarray(py))?;
+                if let (Some(rd), Some(ro)) = (batch.ref_data, batch.ref_seq_offsets) {
+                    dict.set_item("ref", rd.into_pyarray(py))?;
+                    dict.set_item("ref_offsets", ro.into_pyarray(py))?;
+                }
+                for (name, vals) in batch.info_out {
+                    match vals {
+                        crate::record_stream::transpose::InfoVals::I32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        crate::record_stream::transpose::InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                    }
+                }
                 Ok(Some(dict))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
