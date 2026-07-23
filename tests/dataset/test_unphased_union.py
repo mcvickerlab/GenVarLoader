@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from genvarloader._dataset._flat_variants import VarWindowOpt
+from genvarloader import VarWindowOpt
 
 
 def test_with_settings_stores_unphased_union(snap_dataset):

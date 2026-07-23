@@ -53,6 +53,16 @@ _SEQ_KIND_NAMES: dict[type, str] = {
 _RESERVED_VAR_FIELD_NAMES = frozenset(
     {"alt", "alt_offsets", "start", "ilen", "offsets", "ref", "ref_offsets"}
 )
+# Forward-looking note (final review, PR-B3a/B3b, #304): `variant-windows` mode
+# builds a SEPARATE FFI dict with its own fixed keys -- `ref_window`/`alt_window`/
+# `ref`/`alt` token buffers plus their `<name>_offsets` (see `with_seqs`'s
+# `_variant_windows` branch) -- that aren't in this set. `var_fields` ride-alongs
+# are currently guarded OFF in window mode (see `active_var_fields`/`with_seqs`),
+# so no user column can collide there YET. If/when window-mode ride-alongs are
+# enabled (tracked follow-up), this exclusion set must also cover those
+# windows-dict token-buffer keys, or a same-named INFO/index column could clobber
+# a token buffer via the same `PyDict::set_item` silent-overwrite hazard this set
+# already guards against for the plain "variants" dict.
 
 # Wave B PR-B3a (#304): `with_seqs("variants")`'s pre-var_fields default, reproduced
 # byte-for-byte when `var_fields` is never set (see `active_var_fields` and every

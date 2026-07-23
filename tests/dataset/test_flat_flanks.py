@@ -11,7 +11,8 @@ from genvarloader._dataset._flat_flanks import (
     compute_alt_window,
     tokenize_alleles,
 )
-from genvarloader._dataset._flat_variants import DummyVariant, VarWindowOpt
+from genvarloader import VarWindowOpt
+from genvarloader._dataset._flat_variants import DummyVariant
 
 
 def _flatten_lut_flanks(ref, contigs, starts, ilens, flank_len, lut):
@@ -248,7 +249,7 @@ def test_flank_tokens_end_to_end_matches_oracle(snap_dataset):
 
 
 def test_variant_windows_kind_end_to_end(snap_dataset):
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     ds = (
         snap_dataset.with_tracks(False)
@@ -274,7 +275,7 @@ def test_variant_windows_requires_opt(snap_dataset):
 
 def test_variant_windows_requires_flat_output(snap_dataset):
     import pytest
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     ds = snap_dataset.with_tracks(False).with_seqs(
         "variant-windows",
@@ -287,7 +288,7 @@ def test_variant_windows_requires_flat_output(snap_dataset):
 def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
     # A 2-D index (out_reshape != None) drives the _reshape_outer path. Regression
     # for a bug where windows dropped the ploidy dim during reshape.
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     ds = (
         snap_dataset.with_tracks(False)
@@ -319,7 +320,7 @@ def test_variant_windows_reshape_preserves_ploidy(snap_dataset):
     ],
 )
 def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     ds = (
         snap_dataset.with_tracks(False)
@@ -352,7 +353,7 @@ def test_variant_windows_matrix_fields(snap_dataset, ref_mode, alt_mode):
 
 def test_variant_windows_ref_window_alt_allele_oracle(snap_dataset):
     # The user's case: ref=window, alt=bare allele. Verify both against oracles.
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
     from genvarloader._dataset._flat_flanks import build_token_lut
 
     L = 4
@@ -715,7 +716,7 @@ def test_variant_windows_single_fetch_per_decode(snap_dataset, monkeypatch):
     both-window decode.
     """
     import genvarloader._dataset._flat_variants as _fv
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     calls = {"n": 0}
     real_fn = _fv._assemble_variant_buffers_rust

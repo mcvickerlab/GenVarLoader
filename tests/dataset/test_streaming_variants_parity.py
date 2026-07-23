@@ -561,6 +561,138 @@ def test_streaming_vcf_dp_field_streaming_only(af_vcf_case):
     assert total > 0, "vacuous pass: no variants compared"
 
 
+def test_streaming_vcf_af_dp_composite_matches_offset_arithmetic(af_vcf_case):
+    """Live-decoder parity for the `af_offset` composition (final review, PR-B3a/
+    B3b, #304) -- the one place on the whole branch where `af_offset` matters.
+
+    `src/record_stream/transpose.rs::fill_decoded_window` reads a requested
+    non-AF `var_field` at ``info_staged[af_offset + i]``, where ``af_offset`` is
+    1 iff AF-filtering is active (``want_af``) and 0 otherwise. Every existing
+    end-to-end VCF parity test exercises only ONE half of that composition at a
+    time: `test_streaming_svar1_af_matches_written`/`test_streaming_vcf_af_
+    matches_written` set an AF band with no extra INFO `var_field` requested
+    (nothing ever reads `info_staged[af_offset + i]`), and `test_streaming_vcf_
+    dp_field_streaming_only` requests `DP` with NO AF filter (`want_af=False`,
+    `af_offset=0`, so `DP` is read at `info_staged[0]` -- offset never
+    exercised). This test drives BOTH at once: `min_af`/`max_af` active (so
+    genoray's live VCF decoder stages `info_staged = [AF, DP]`) AND `DP`
+    requested as a `var_fields` ride-along, so the decoder must read `DP` at
+    `info_staged[1]`, not `info_staged[0]` (=AF).
+
+    Backend: this targets the live VCF `RecordBackend` (the ``af_vcf_case``
+    fixture, a plain bgzipped/indexed VCF -- not SVAR1). SVAR1 AF is served via
+    `SparseVar.cache_afs()`'s index column, a wholly different mechanism from
+    `transpose.rs`'s `info_staged`/`af_offset` arithmetic (confirmed by
+    `test_available_var_fields_af_cached_svar1`: SVAR1's cached `AF` is
+    "available" but NOT "servable" through the streaming engine at all, let
+    alone through this INFO-staging path). Only the VCF (and, structurally,
+    PGEN, which never stages INFO at all -- see `transpose.rs`'s doc comment)
+    `RecordBackend` genuinely constructs `want_af=True` and stages `[AF, ...]`
+    positionally through `VcfWindowFiller`/`fill_decoded_window`, so VCF is the
+    only backend that can exercise `af_offset=1` at all.
+
+    `gvl.write` never persists `DP` into a queryable written column for a VCF
+    source (`test_streaming_vcf_dp_field_streaming_only`), so there is no
+    written oracle for the composite case. Instead this asserts, entirely
+    within streaming:
+      (a) requesting the `DP` ride-along does not change which variants the AF
+          filter keeps -- compared against the SAME query without `DP`
+          requested (`info_staged` gains a column, but `af_offset` and the AF
+          keep-mask must not move);
+      (b) the `DP` values riding along the surviving variants are the correct
+          per-position ground truth (`_AF_VCF_DP_BY_POS`).
+
+    A wrong `af_offset` (reading `info_staged[0]` -- the AF column -- instead
+    of `info_staged[af_offset]` = `info_staged[1]` for the sole requested
+    `DP`) would substitute each surviving variant's AF for its DP. This
+    fixture's AF values (0.1-0.85, all < 1) and DP values (11-29, all
+    integers >= 11) are numerically disjoint -- and DP is `Type=Integer` while
+    AF is `Type=Float`, so a wrong-offset read would also very likely trip the
+    dtype-driven `StagedColumn`/`InfoVals` decode -- so misreading the column
+    would fail assertion (b) below for every surviving variant, not just some.
+    """
+    regions, reference, variants, written = af_vcf_case
+    # Both-bounds band (same as `test_streaming_vcf_af_matches_written`'s third
+    # parametrization): a genuine partial filter, not vacuously all-kept/dropped.
+    min_af, max_af = 0.12, 0.7
+
+    def _make(fields: list[str]):
+        return (
+            gvl.StreamingDataset(regions, reference=reference, variants=variants)
+            .with_settings(var_fields=fields, min_af=min_af, max_af=max_af)
+            .with_seqs("variants")
+        )
+
+    sds_dp = _make(["alt", "ilen", "start", "DP"])
+    sds_no_dp = _make(["alt", "ilen", "start"])
+
+    # (r, s) -> per-hap `start` arrays (ground truth for "which variants survived").
+    starts_dp: dict[tuple[int, int], list[np.ndarray]] = {}
+    # (r, s) -> per-hap `DP` arrays, aligned index-for-index with `starts_dp`.
+    dps_by_cell: dict[tuple[int, int], list[np.ndarray]] = {}
+    total = 0
+    for data, r_idx, s_idx in sds_dp.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            hap_starts = [
+                np.atleast_1d(np.asarray(data[k].start[h]))
+                for h in range(sds_dp.ploidy)
+            ]
+            hap_dps = [
+                np.atleast_1d(np.asarray(data[k].DP[h])) for h in range(sds_dp.ploidy)
+            ]
+            starts_dp[(r, s)] = hap_starts
+            dps_by_cell[(r, s)] = hap_dps
+            total += sum(a.shape[0] for a in hap_starts)
+
+    starts_no_dp: dict[tuple[int, int], list[np.ndarray]] = {}
+    for data, r_idx, s_idx in sds_no_dp.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            r, s = int(r_idx[k]), int(s_idx[k])
+            starts_no_dp[(r, s)] = [
+                np.atleast_1d(np.asarray(data[k].start[h]))
+                for h in range(sds_no_dp.ploidy)
+            ]
+
+    # (a) requesting the `DP` ride-along must not change which variants survive
+    # the AF filter -- the AF keep-mask and `af_offset` arithmetic must stay
+    # independent of what else was requested.
+    assert set(starts_dp) == set(starts_no_dp)
+    for key, hap_starts in starts_dp.items():
+        for h in range(sds_dp.ploidy):
+            np.testing.assert_array_equal(hap_starts[h], starts_no_dp[key][h])
+
+    # (b) the ride-along `DP` values at the surviving positions are the correct
+    # per-variant values -- this is what a wrong `af_offset` would corrupt.
+    for key, hap_starts in starts_dp.items():
+        hap_dps = dps_by_cell[key]
+        for h, starts_h in enumerate(hap_starts):
+            dps_h = hap_dps[h]
+            assert dps_h.shape == starts_h.shape
+            assert dps_h.dtype == np.int32, f"DP dtype {dps_h.dtype}, expected int32"
+            for pos0, dp in zip(starts_h, dps_h):
+                expected_dp = _AF_VCF_DP_BY_POS[int(pos0) + 1]
+                assert int(dp) == expected_dp, (
+                    f"{key} hap {h}: DP mismatch at 0-based start={pos0}: "
+                    f"got {dp}, expected {expected_dp} -- af_offset likely wrong "
+                    "(reading the AF column instead of DP's)"
+                )
+
+    assert total > 0, "vacuous pass: no variants compared"
+
+    # Guard against a vacuous partial-filter claim: the band must have actually
+    # dropped SOME variants relative to the unfiltered source (same pattern as
+    # `test_streaming_vcf_af_matches_written`'s `0 < total < n_unf`).
+    unfiltered = written.with_seqs("variants")
+    n_unf = sum(
+        np.atleast_1d(np.asarray(unfiltered[r, s].start[h])).shape[0]
+        for r in range(written.shape[0])
+        for s in range(written.shape[1])
+        for h in range(sds_dp.ploidy)
+    )
+    assert 0 < total < n_unf
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_available_var_fields_matches_written(streaming_case, backend):
     """Streaming derives the field set from the live source, the written path from
@@ -992,7 +1124,7 @@ def test_streaming_variant_windows_matches_written(
     case, where we still assert full value equality (just not dtype) -- a
     genuine divergence must stay explicit, not silently dropped from the gate.
     """
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     regions, reference, variants, written = streaming_case(backend)
     opt = VarWindowOpt(
@@ -1032,7 +1164,7 @@ def test_variant_windows_empty_group_matches_written(empty_region_case, backend)
     """A (region, sample, ploid) cell with no in-window variant stays empty on both
     paths at the default `dummy_variant=None` -- no sentinel fill on either side.
     """
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     regions, reference, variants, written = empty_region_case(backend)
     opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)

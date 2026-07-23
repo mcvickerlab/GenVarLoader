@@ -194,7 +194,7 @@ def test_pgen_var_fields_limited_to_ref(streaming_case):
 
 def test_with_seqs_accepts_annotated_variants_and_variant_windows():
     sds = _tiny_sds()
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
     from genvarloader._dataset._rag_variants import RaggedVariants
     from genvarloader._ragged import RaggedAnnotatedHaps
 
@@ -374,7 +374,7 @@ def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
     """
     from seqpro.rag import Ragged
 
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     regions, reference, variants, _written = streaming_case("svar1")
     opt = VarWindowOpt(
@@ -420,7 +420,7 @@ def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
 
 
 def test_variant_windows_rejected_on_svar2(streaming_svar2_case):
-    from genvarloader._dataset._flat_variants import VarWindowOpt
+    from genvarloader import VarWindowOpt
 
     regions, reference, variants = streaming_svar2_case
     opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
