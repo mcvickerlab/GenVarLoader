@@ -171,14 +171,10 @@ def _declared_info_numeric_dtypes(vcf: "genoray.VCF") -> dict[str, bool]:
     second ``genoray.VCF(...)`` construction -- which, unlike this header scan, eagerly loads
     the on-disk ``.gvi`` index (see `genoray.VCF.__init__`'s ``with_gvi_index`` default).
 
-    Parameters
-    ----------
-    vcf
-        An already-opened ``genoray.VCF``.
+    Args:
+        vcf: An already-opened ``genoray.VCF``.
 
-    Returns
-    -------
-    dict
+    Returns:
         Mapping of INFO field name -> ``is_float`` (``True`` for ``Type=Float``, ``False``
         for ``Type=Integer``), in VCF header declaration order.
     """
@@ -522,9 +518,7 @@ class StreamingDataset:
         ``variants.arrow``. The injected-callback (test) construction path has no
         backend and always returns the builtin default.
 
-        Returns
-        -------
-        list[str]
+        Returns:
             Field names requestable via :meth:`with_settings`'s ``var_fields``.
         """
         if self._backend is None:
@@ -545,9 +539,7 @@ class StreamingDataset:
         fails at configuration time, not after a full ``build_engine`` + first
         window read.
 
-        Returns
-        -------
-        list[str]
+        Returns:
             Field names :meth:`with_settings`'s ``var_fields`` can request without
             raising :class:`NotImplementedError` at iterate time.
         """
@@ -559,9 +551,7 @@ class StreamingDataset:
     def active_var_fields(self) -> list[str]:
         """The variant fields currently selected for ``with_seqs("variants")`` output.
 
-        Returns
-        -------
-        list[str]
+        Returns:
             The configured ``var_fields``, or the default ``["alt", "ilen", "start"]``
             when none was set via :meth:`with_settings`.
         """
@@ -1384,28 +1374,23 @@ class StreamingDataset:
         :class:`NotImplementedError`. Use a PGEN or SVAR source for annotated
         output.
 
-        Parameters
-        ----------
-        kind
-            The sequence output kind.
-        opt
-            Required for, and only accepted with, ``kind="variant-windows"``
-            (Wave B PR-B4, #304): a
-            :class:`~genvarloader._dataset._flat_variants.VarWindowOpt`
-            configuring the flank length, token alphabet, unknown token, and
-            per-side (``ref``/``alt``) window-vs-allele mode. Passing ``opt``
-            with any other ``kind``, or omitting it for ``"variant-windows"``,
-            raises :class:`ValueError`.
+        Args:
+            kind: The sequence output kind.
+            opt: Required for, and only accepted with, ``kind="variant-windows"``
+                (Wave B PR-B4, #304): a
+                :class:`~genvarloader._dataset._flat_variants.VarWindowOpt`
+                configuring the flank length, token alphabet, unknown token, and
+                per-side (``ref``/``alt``) window-vs-allele mode. Passing ``opt``
+                with any other ``kind``, or omitting it for ``"variant-windows"``,
+                raises :class:`ValueError`.
 
-        Raises
-        ------
-        NotImplementedError
-            ``kind`` is unrecognized, or ``kind="variant-windows"`` was requested
-            against the SVAR2 (``.svar2``) backend (not yet wired; see the
-            SVAR1/VCF/PGEN engines).
-        ValueError
-            ``opt`` was omitted for ``kind="variant-windows"``, or supplied for
-            any other ``kind``.
+        Raises:
+            NotImplementedError: ``kind`` is unrecognized, or
+                ``kind="variant-windows"`` was requested against the SVAR2
+                (``.svar2``) backend (not yet wired; see the SVAR1/VCF/PGEN
+                engines).
+            ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
+                supplied for any other ``kind``.
         """
         kind_map = {
             "haplotypes": RaggedSeqs,
