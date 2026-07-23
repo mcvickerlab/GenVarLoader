@@ -38,7 +38,7 @@ use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::record_stream::pgen::PgenWindowFiller;
 use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
-use crate::variants::{TokBuf, TokenLut, VariantWindowsBatch, VariantsBatch, WindowModeConfig};
+use crate::variants::{VariantWindowsBatch, VariantsBatch, WindowModeConfig};
 
 /// Decode job `job`'s window (on `contig`) into `slot`, reusing its allocations. VCF/PGEN
 /// implementors (Task 4/10) do the actual genoray record-stream reading + the hap-major
@@ -197,9 +197,9 @@ impl RecordBackend {
 
     /// Build the per-window-local-variant REF byte table (Wave B PR-B3a's `want_ref`
     /// machinery), shared by `generate_variants` (gated on `self.want_ref`) and
-    /// `generate_variant_windows` (gated on `win.ref_mode == 2`, the "bare allele" mode —
-    /// `ref_mode == 1`, the flanked-window mode, instead reads the whole contig reference
-    /// directly via `windows::fetch_windows`, no per-variant table needed). genoray's
+    /// `generate_variant_windows` (gated on `win.ref_mode == WindowMode::Allele` —
+    /// `WindowMode::Window`, the flanked-window mode, instead reads the whole contig
+    /// reference directly via `windows::fetch_windows`, no per-variant table needed). genoray's
     /// `DenseChunk` does not expose REF, so slice the contig reference at
     /// `[start, start + ref_len)` with `ref_len = alt_len - ilen` — exact for the
     /// normalized, left-aligned biallelic variants gvl requires. Window-LOCAL table (one
@@ -428,11 +428,11 @@ impl EngineBackend for RecordBackend {
         let job = &self.jobs[job_idx];
         let (v_idxs, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
-        // ref_mode==2 (bare allele) needs the per-window-local REF byte table (same one
-        // `generate_variants` builds under `want_ref`); ref_mode==1 (flanked window)
-        // instead reads the whole contig reference directly via
+        // ref_mode==Allele (bare allele) needs the per-window-local REF byte table (same
+        // one `generate_variants` builds under `want_ref`); ref_mode==Window (flanked
+        // window) instead reads the whole contig reference directly via
         // `windows::fetch_windows` below, no per-variant table needed.
-        let ref_table = if win.ref_mode == 2 {
+        let ref_table = if win.ref_mode == crate::variants::WindowMode::Allele {
             Some(self.window_ref_table(job_idx, slot))
         } else {
             None
@@ -446,80 +446,46 @@ impl EngineBackend for RecordBackend {
         let reference = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
         let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
 
-        let tok_bufs = match &win.token_lut {
-            TokenLut::U8(lut) => {
-                let bufs = crate::variants::windows::assemble_windows_mode::<u8>(
-                    v_idxs.view(),
-                    row_offsets.view(),
-                    win.ref_mode,
-                    win.alt_mode,
-                    ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
-                    ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
-                    ref_table
-                        .as_ref()
-                        .map(|(b, _)| ndarray::ArrayView1::from(b.as_slice())),
-                    ref_table
-                        .as_ref()
-                        .map(|(_, o)| ndarray::ArrayView1::from(o.as_slice())),
-                    win.flank_len,
-                    lut.view(),
-                    v_contigs.view(),
-                    ndarray::ArrayView1::from(slot.v_starts.as_slice()),
-                    ndarray::ArrayView1::from(slot.ilens.as_slice()),
-                    reference,
-                    ref_offsets.view(),
-                    self.pad_char,
-                );
-                bufs.tok_bufs
-                    .into_iter()
-                    .map(|(name, data, offs)| (name.to_string(), TokBuf::U8(data, offs)))
-                    .collect::<Vec<_>>()
-            }
-            TokenLut::I32(lut) => {
-                let bufs = crate::variants::windows::assemble_windows_mode::<i32>(
-                    v_idxs.view(),
-                    row_offsets.view(),
-                    win.ref_mode,
-                    win.alt_mode,
-                    ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
-                    ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
-                    ref_table
-                        .as_ref()
-                        .map(|(b, _)| ndarray::ArrayView1::from(b.as_slice())),
-                    ref_table
-                        .as_ref()
-                        .map(|(_, o)| ndarray::ArrayView1::from(o.as_slice())),
-                    win.flank_len,
-                    lut.view(),
-                    v_contigs.view(),
-                    ndarray::ArrayView1::from(slot.v_starts.as_slice()),
-                    ndarray::ArrayView1::from(slot.ilens.as_slice()),
-                    reference,
-                    ref_offsets.view(),
-                    self.pad_char,
-                );
-                bufs.tok_bufs
-                    .into_iter()
-                    .map(|(name, data, offs)| (name.to_string(), TokBuf::I32(data, offs)))
-                    .collect::<Vec<_>>()
-            }
-        };
+        let tok_bufs = crate::variants::windows_tok_bufs(
+            v_idxs.view(),
+            row_offsets.view(),
+            win.ref_mode,
+            win.alt_mode,
+            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+            ref_table
+                .as_ref()
+                .map(|(b, _)| ndarray::ArrayView1::from(b.as_slice())),
+            ref_table
+                .as_ref()
+                .map(|(_, o)| ndarray::ArrayView1::from(o.as_slice())),
+            win.flank_len,
+            &win.token_lut,
+            v_contigs.view(),
+            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+            ndarray::ArrayView1::from(slot.ilens.as_slice()),
+            reference,
+            ref_offsets.view(),
+            self.pad_char,
+        );
 
-        let (alt_data, alt_seq_offsets, start, ilen, _ref_data, _ref_seq_offsets) =
-            crate::variants::assemble_variants_window(
-                v_idxs.view(),
-                ndarray::ArrayView1::from(slot.v_starts.as_slice()),
-                ndarray::ArrayView1::from(slot.ilens.as_slice()),
-                ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
-                ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
-                None,
-            );
+        // Wave B PR-B4 review, Minor 3: only `start`/`ilen` are needed for `scalars` here
+        // -- `assemble_variants_window` would also gather ALT bytes, duplicating the ALT
+        // gather `windows_tok_bufs` above already did internally (and variant-windows has
+        // no raw-byte-allele slot to put a second copy in anyway, see
+        // `_flat_variants.py:272`). `alt_data`/`alt_seq_offsets` are therefore left as
+        // empty placeholders, never read for this output mode.
+        let (start, ilen) = crate::variants::windows::gather_starts_ilens(
+            v_idxs.view(),
+            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+            ndarray::ArrayView1::from(slot.ilens.as_slice()),
+        );
         let info_out = gather_info_out(v_idxs.view(), &slot.info_cols);
 
         Ok(VariantWindowsBatch {
             scalars: VariantsBatch {
-                alt_data,
-                alt_seq_offsets,
+                alt_data: Array1::from_vec(Vec::new()),
+                alt_seq_offsets: Array1::from_vec(vec![0i64]),
                 start,
                 ilen,
                 row_offsets,
@@ -993,6 +959,7 @@ impl RecordStreamEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variants::{TokenLut, WindowMode};
 
     /// Filler that ignores the source entirely and decodes each window to a fixed
     /// 2-variant table where every hap carries variant 0 only — so the engine's plumbing
@@ -1415,8 +1382,8 @@ mod tests {
     /// 256-entry identity map (byte -> itself) -- the tests only assert token BUFFER
     /// NAMES/shapes, not exact token values, so the LUT's actual mapping is irrelevant.
     fn variants_windows_fixture(
-        ref_mode: i64,
-        alt_mode: i64,
+        ref_mode: WindowMode,
+        alt_mode: WindowMode,
         flank: i64,
     ) -> (RecordBackend, DecodedWindow) {
         let (mut backend, slot) = variants_fixture();
@@ -1452,7 +1419,7 @@ mod tests {
     /// buffer per configured side. ref="window"/alt="window" ⇒ ref_window + alt_window.
     #[test]
     fn generate_variant_windows_emits_both_window_buffers() {
-        let (backend, slot) = variants_windows_fixture(1, 1, 2); // ref_mode, alt_mode, flank
+        let (backend, slot) = variants_windows_fixture(WindowMode::Window, WindowMode::Window, 2);
         let batch = backend.generate_variant_windows(0, &slot, 0, 1).unwrap();
         let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["ref_window", "alt_window"]);
@@ -1463,7 +1430,7 @@ mod tests {
     /// ref="allele" emits the bare tokenized REF allele, which needs the REF table.
     #[test]
     fn generate_variant_windows_ref_allele_uses_ref_table() {
-        let (backend, slot) = variants_windows_fixture(2, 1, 2);
+        let (backend, slot) = variants_windows_fixture(WindowMode::Allele, WindowMode::Window, 2);
         let batch = backend.generate_variant_windows(0, &slot, 0, 1).unwrap();
         let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["ref", "alt_window"]);

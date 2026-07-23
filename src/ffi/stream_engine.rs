@@ -276,6 +276,44 @@ impl Svar1Backend {
             Array1::from_vec(row_offsets),
         )
     }
+
+    /// The per-call FORMAT/dosage gather shared by `generate_variants` and
+    /// `generate_variant_windows` (Wave B PR-B4 review, Important 1) -- factored out of
+    /// what was previously `generate_variants`'s own inline loop, exactly the same DRY
+    /// move `kept_v_idxs` already made for the selection walk, so BOTH output modes gather
+    /// per-call fields identically instead of risking a second, independently-wrong copy.
+    /// Indexed by CSR POSITION (`kept_o`, from `kept_v_idxs`), NOT by variant id -- a
+    /// per-call field can legitimately differ across two calls of the SAME variant (e.g.
+    /// per-sample dosage), so indexing by variant id instead would silently collapse
+    /// those distinct values into one (wrong output, no error, no crash).
+    fn gather_call_bufs(&self, kept_o: &[usize]) -> Vec<(String, InfoVals)> {
+        let mut call_bufs: Vec<InfoVals> = self
+            .call_fields
+            .iter()
+            .map(|(_, v)| match v {
+                CallVals::F32(_) => InfoVals::F32(Vec::new()),
+                CallVals::I32(_) => InfoVals::I32(Vec::new()),
+                CallVals::I16(_) => InfoVals::I16(Vec::new()),
+            })
+            .collect();
+        for &o in kept_o {
+            for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
+                match (vals, &mut call_bufs[fi]) {
+                    (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
+                    (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
+                    (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
+                    _ => {
+                        unreachable!("call_fields/call_bufs dtype pairing is fixed at construction")
+                    }
+                }
+            }
+        }
+        self.call_fields
+            .iter()
+            .zip(call_bufs)
+            .map(|((name, _), buf)| (name.clone(), buf))
+            .collect()
+    }
 }
 
 impl EngineBackend for Svar1Backend {
@@ -408,37 +446,8 @@ impl EngineBackend for Svar1Backend {
         let (v_idxs, kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
         // Wave B PR-B3b (#304): per-call FORMAT/dosage columns, gathered by the SAME CSR
-        // positions `kept_v_idxs` kept (`kept_o`) -- NOT by variant id, since a per-call
-        // field can legitimately differ across two calls of the SAME variant (e.g.
-        // per-sample dosage); indexing it by variant id instead of CSR position would
-        // silently collapse those distinct values -- wrong output, no error.
-        let mut call_bufs: Vec<InfoVals> = self
-            .call_fields
-            .iter()
-            .map(|(_, v)| match v {
-                CallVals::F32(_) => InfoVals::F32(Vec::new()),
-                CallVals::I32(_) => InfoVals::I32(Vec::new()),
-                CallVals::I16(_) => InfoVals::I16(Vec::new()),
-            })
-            .collect();
-        for &o in &kept_o {
-            for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
-                match (vals, &mut call_bufs[fi]) {
-                    (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
-                    (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
-                    (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
-                    _ => {
-                        unreachable!("call_fields/call_bufs dtype pairing is fixed at construction")
-                    }
-                }
-            }
-        }
-        let info_out: Vec<(String, InfoVals)> = self
-            .call_fields
-            .iter()
-            .zip(call_bufs)
-            .map(|((name, _), buf)| (name.clone(), buf))
-            .collect();
+        // positions `kept_v_idxs` kept (`kept_o`) via the shared `gather_call_bufs` helper.
+        let info_out = self.gather_call_bufs(&kept_o);
 
         // PR-B3a: pass the GLOBAL REF table through iff requested -- `None` (the
         // default) costs no extra allocation/work, matching `RecordBackend`'s gate.
@@ -479,11 +488,22 @@ impl EngineBackend for Svar1Backend {
     /// select), then feeds the GLOBAL static tables through
     /// `crate::variants::windows::assemble_windows_mode` instead of
     /// `assemble_variants_window`'s plain ALT/REF gather. `scalars` still carries
-    /// `start`/`ilen`/`row_offsets` for the identical kept `v_idxs`, but never raw
-    /// `ref_data`/`ref_seq_offsets` (variant-windows only exposes REF as a tokenized
-    /// buffer) nor `info_out` (SVAR1's per-call FORMAT/dosage fields are
-    /// `generate_variants`-only, gathered by CSR position -- variant-windows has no
-    /// analogous per-call-position output to attach them to).
+    /// `start`/`ilen`/`row_offsets`/`info_out` for the identical kept `v_idxs`, but never
+    /// raw `ref_data`/`ref_seq_offsets` (variant-windows only exposes REF as a tokenized
+    /// buffer).
+    ///
+    /// **Review fix (Important 1, PR-B4 review): `info_out` is populated here too.** The
+    /// original implementation left it `Vec::new()` on the theory that variant-windows has
+    /// "no per-call-position slot" for per-call FORMAT/dosage fields to ride on -- that was
+    /// wrong: `scalars` shares the exact same per-kept-variant axis `start`/`ilen` already
+    /// use (the written path's `_FlatVariantWindows.fields` is documented as
+    /// `start`/`ilen`/`dosage`/`info`, `_flat_variants.py:277`), and `kept_v_idxs` already
+    /// returns the CSR positions (`kept_o`) needed to gather it -- the SAME gather
+    /// `generate_variants` performs, via the shared `gather_call_bufs` helper. Dropping it
+    /// here silently produced empty ride-along columns for SVAR1 while `RecordBackend`'s
+    /// `generate_variant_windows` (which gathers window INFO columns) returned real data --
+    /// a backend parity divergence on a surface contracted to be byte-identical to the
+    /// written path.
     fn generate_variant_windows(
         &self,
         job_idx: usize,
@@ -498,15 +518,15 @@ impl EngineBackend for Svar1Backend {
             )
         })?;
         let job = &self.jobs[job_idx];
-        let (v_idxs, _kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
+        let (v_idxs, kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
-        // ref_mode==2 (bare allele) needs REF bytes -- SVAR1 already has a GLOBAL REF
+        // ref_mode==Allele (bare allele) needs REF bytes -- SVAR1 already has a GLOBAL REF
         // table (`self.ref_alleles`/`self.ref_offsets`, same layout `generate_variants`'s
         // `want_ref` branch reuses), unlike `RecordBackend` which must slice the contig
-        // reference to build a window-local one. ref_mode==1 (flanked window) instead
+        // reference to build a window-local one. ref_mode==Window (flanked window) instead
         // reads the whole contig reference directly via `windows::fetch_windows` below,
         // no per-variant table needed.
-        let (ref_g, ref_o) = if win.ref_mode == 2 {
+        let (ref_g, ref_o) = if win.ref_mode == crate::variants::WindowMode::Allele {
             (Some(self.ref_alleles.view()), Some(self.ref_offsets.view()))
         } else {
             (None, None)
@@ -520,79 +540,48 @@ impl EngineBackend for Svar1Backend {
         let reference = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
         let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
 
-        let tok_bufs = match &win.token_lut {
-            crate::variants::TokenLut::U8(lut) => {
-                let bufs = crate::variants::windows::assemble_windows_mode::<u8>(
-                    v_idxs.view(),
-                    row_offsets.view(),
-                    win.ref_mode,
-                    win.alt_mode,
-                    self.alt_alleles.view(),
-                    self.alt_offsets.view(),
-                    ref_g,
-                    ref_o,
-                    win.flank_len,
-                    lut.view(),
-                    v_contigs.view(),
-                    self.v_starts.view(),
-                    self.ilens.view(),
-                    reference,
-                    ref_offsets.view(),
-                    self.pad_char,
-                );
-                bufs.tok_bufs
-                    .into_iter()
-                    .map(|(name, data, offs)| {
-                        (name.to_string(), crate::variants::TokBuf::U8(data, offs))
-                    })
-                    .collect::<Vec<_>>()
-            }
-            crate::variants::TokenLut::I32(lut) => {
-                let bufs = crate::variants::windows::assemble_windows_mode::<i32>(
-                    v_idxs.view(),
-                    row_offsets.view(),
-                    win.ref_mode,
-                    win.alt_mode,
-                    self.alt_alleles.view(),
-                    self.alt_offsets.view(),
-                    ref_g,
-                    ref_o,
-                    win.flank_len,
-                    lut.view(),
-                    v_contigs.view(),
-                    self.v_starts.view(),
-                    self.ilens.view(),
-                    reference,
-                    ref_offsets.view(),
-                    self.pad_char,
-                );
-                bufs.tok_bufs
-                    .into_iter()
-                    .map(|(name, data, offs)| {
-                        (name.to_string(), crate::variants::TokBuf::I32(data, offs))
-                    })
-                    .collect::<Vec<_>>()
-            }
-        };
+        let tok_bufs = crate::variants::windows_tok_bufs(
+            v_idxs.view(),
+            row_offsets.view(),
+            win.ref_mode,
+            win.alt_mode,
+            self.alt_alleles.view(),
+            self.alt_offsets.view(),
+            ref_g,
+            ref_o,
+            win.flank_len,
+            &win.token_lut,
+            v_contigs.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+            reference,
+            ref_offsets.view(),
+            self.pad_char,
+        );
 
-        let (alt_data, alt_seq_offsets, start, ilen, _ref_data, _ref_seq_offsets) =
-            crate::variants::assemble_variants_window(
-                v_idxs.view(),
-                self.v_starts.view(),
-                self.ilens.view(),
-                self.alt_alleles.view(),
-                self.alt_offsets.view(),
-                None,
-            );
+        // Wave B PR-B4 review, Minor 3: only `start`/`ilen` are needed for `scalars` here
+        // -- avoid `assemble_variants_window`'s redundant ALT-byte gather (already done,
+        // separately, by `windows_tok_bufs` above). `alt_data`/`alt_seq_offsets` are left
+        // as empty placeholders, never read for this output mode.
+        let (start, ilen) = crate::variants::windows::gather_starts_ilens(
+            v_idxs.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+        );
+
+        // Important 1 fix: gather the SAME per-call FORMAT/dosage columns
+        // `generate_variants` does, via the shared `kept_o` CSR positions -- see this
+        // method's doc comment.
+        let info_out = self.gather_call_bufs(&kept_o);
 
         Ok(crate::variants::VariantWindowsBatch {
             scalars: crate::variants::VariantsBatch {
-                alt_data,
-                alt_seq_offsets,
+                alt_data: Array1::from_vec(Vec::new()),
+                alt_seq_offsets: Array1::from_vec(vec![0i64]),
                 start,
                 ilen,
                 row_offsets,
-                info_out: Vec::new(),
+                info_out,
                 ref_data: None,
                 ref_seq_offsets: None,
             },
@@ -1039,6 +1028,8 @@ impl Svar1StreamEngine {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    use crate::variants::{TokenLut, WindowMode, WindowModeConfig};
 
     fn write_raw<T: bytemuck::NoUninit>(dir: &std::path::Path, name: &str, data: &[T]) {
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
@@ -1742,5 +1733,109 @@ mod tests {
             "var1 fails the position clip and var0 fails the AF clip -> nothing kept"
         );
         assert_eq!(batch_b.start.len(), 0, "no variants survive either clip");
+    }
+
+    /// Wave B PR-B4 review (Important 1): `Svar1Backend::generate_variant_windows` must
+    /// gather per-call FORMAT/dosage fields the SAME way `generate_variants` does -- via
+    /// `kept_v_idxs`'s `kept_o` CSR positions -- not silently drop them (`info_out:
+    /// Vec::new()`, the pre-fix behavior). Constructs `Svar1Backend` directly (mirroring
+    /// how `RecordBackend`'s variant-windows tests bypass the engine/threading wrapper),
+    /// since `Svar1StreamEngine` has no `next_batch_variant_windows_core` test accessor.
+    ///
+    /// Fixture: `fixture()`'s 2-sample/ploidy-2/2-SNP layout (var0@10, var1@20;
+    /// `variant_idxs=[0,0,1,1]`, per-hap sorted global ids hap0=[0], hap1=[], hap2=[0,1],
+    /// hap3=[1]) with a full-window region `(0,30)` so every CSR position `o` in
+    /// `variant_idxs` survives the region-overlap keep. A synthetic F32 "DS" call field
+    /// holds a DISTINCT value per CSR position (`[0.1, 0.2, 0.3, 0.4]` for o=0..3) so a
+    /// wrong gather (dropped entirely, indexed by variant id instead of CSR position, or
+    /// misordered) is distinguishable from the correct one -- not just "some value came
+    /// back".
+    #[test]
+    fn svar1_generate_variant_windows_gathers_call_fields() {
+        let f = fixture();
+        let call_fields = vec![(
+            "DS".to_string(),
+            CallVals::F32(Array1::from(vec![0.1f32, 0.2, 0.3, 0.4])),
+        )];
+
+        let mut store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        store.set_contig_meta_rs("chr1", 0, 2, 1);
+        let regions = vec![(0u32, 30u32)];
+        let w = store
+            .read_window("chr1", &[10, 20], &[11, 21], &regions, &[0, 1])
+            .unwrap();
+        let slot = FilledWindow {
+            o_starts: w.o_starts,
+            o_stops: w.o_stops,
+        };
+
+        let lut: Vec<u8> = (0..=255u8).collect();
+        let backend = Svar1Backend {
+            store,
+            contigs: vec![chr1_contig(&f)],
+            jobs: vec![WindowJob {
+                contig_idx: 0,
+                regions,
+                s_lo: 0,
+                s_hi: 2,
+            }],
+            phys_sample_idx: vec![0, 1],
+            v_starts: f.v_starts.clone(),
+            ilens: f.ilens.clone(),
+            alt_alleles: f.alt_alleles.clone(),
+            alt_offsets: f.alt_offsets.clone(),
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: false,
+            afs: None,
+            min_af: None,
+            max_af: None,
+            ref_alleles: f.ref_alleles.clone(),
+            ref_offsets: f.ref_offsets.clone(),
+            want_ref: false,
+            call_fields,
+            win_mode: Some(WindowModeConfig {
+                ref_mode: WindowMode::Window,
+                alt_mode: WindowMode::Window,
+                flank_len: 2,
+                token_lut: TokenLut::U8(Array1::from_vec(lut)),
+            }),
+        };
+
+        let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
+        let batch = backend
+            .generate_variant_windows(0, &slot, 0, n_rows)
+            .unwrap();
+
+        // Sanity: all four CSR positions (both variants, all haps that carry them)
+        // survive the full-window region-overlap keep.
+        assert_eq!(
+            batch.scalars.start.as_slice().unwrap(),
+            &[10, 10, 20, 20],
+            "kept variant order must match the CSR walk (var0 twice, then var1 twice)"
+        );
+
+        assert_eq!(
+            batch.scalars.info_out.len(),
+            1,
+            "the DS call field must ride along, not be silently dropped"
+        );
+        assert_eq!(batch.scalars.info_out[0].0, "DS");
+        let InfoVals::F32(ds) = &batch.scalars.info_out[0].1 else {
+            panic!("expected F32 column");
+        };
+        assert_eq!(
+            ds.len(),
+            batch.scalars.start.len(),
+            "one DS value per kept variant -- same length as scalars.start"
+        );
+        assert_eq!(
+            ds.as_slice(),
+            &[0.1f32, 0.2, 0.3, 0.4],
+            "DS must be gathered by CSR position (kept_o), in kept_o's order -- \
+             a variant-id gather or a dropped gather would not reproduce this exactly"
+        );
     }
 }

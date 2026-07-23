@@ -138,8 +138,12 @@ pub struct VariantBufs<Tok> {
     pub tok_bufs: Vec<(&'static str, Array1<Tok>, Array1<i64>)>,
 }
 
-/// Gather per-selected-variant `start`/`ilen` from the GLOBAL arrays via `v_idxs`.
-fn gather_starts_ilens(
+/// Gather per-selected-variant `start`/`ilen` from the GLOBAL arrays via `v_idxs`. `pub`
+/// (Wave B PR-B4 review, Minor 3) so `generate_variant_windows` in both backends can reuse
+/// it directly for `scalars.start`/`scalars.ilen`, instead of paying for
+/// `assemble_variants_window`'s redundant ALT-byte gather (already done, separately, by
+/// `assemble_windows_mode` above) just to get these two fields.
+pub fn gather_starts_ilens(
     v_idxs: ArrayView1<i32>,
     v_starts: ArrayView1<i32>,
     ilens: ArrayView1<i32>,

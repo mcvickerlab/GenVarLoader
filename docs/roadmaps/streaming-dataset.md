@@ -552,7 +552,8 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
   backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**),
   non-default `var_fields` (**PR-B3a, done — see below**), and SVAR1 per-call FORMAT/dosage
-  `var_fields` (**PR-B3b, done — see below**) are wired; `"variant-windows"` (PR-B4) remains. Plan:
+  `var_fields` (**PR-B3b, done — see below**) are wired; `"variant-windows"` (PR-B4, Rust core
+  done, Python surface + parity still open — see below) remains. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -676,6 +677,25 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   mmap instead. Not a blocker for this task (correctness-first, flagged for follow-up). Docs
   updated: `docs/source/dataset.md`, `skills/genvarloader/SKILL.md`. Plan:
   `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 7). Branch:
+  `spec/streaming-waveb-b3b4`.
+- 🚧 **Variants-output surface, Wave B PR-B4 (`with_seqs("variant-windows")`) — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Task 8 (Rust
+  `generate_variant_windows`) **done** — both `RecordBackend` (VCF/PGEN) and `Svar1Backend`
+  (SVAR1) grew a `generate_variant_windows` override reusing the shared `kept_v_idxs`
+  selection walk (so `"variants"` and `"variant-windows"` output can never silently diverge
+  on which variants/order they select for a given row slice) and feeding the window-local or
+  GLOBAL static table through `crate::variants::windows::assemble_windows_mode` instead of
+  `assemble_variants_window`'s plain ALT/REF gather. `scalars` carries the SAME
+  `start`/`ilen`/`row_offsets`/`info_out` a plain `generate_variants` call would return for
+  the identical kept variants — including SVAR1's per-call FORMAT/dosage fields, gathered by
+  CSR position via a `gather_call_bufs` helper shared with `generate_variants` (fixed in
+  review: the first cut left SVAR1's `info_out` empty on the mistaken theory that
+  variant-windows had no per-call-position slot for it). Not yet reachable from Python —
+  `WindowModeConfig` (bundling `ref_mode`/`alt_mode`/`flank_len`/token LUT, with `ref_mode`/
+  `alt_mode` a `WindowMode` enum rather than a bare `i64`) is always `None` until Task 9 wires
+  the `with_seqs("variant-windows")` Python surface + FFI marshaling through to it, and Task
+  10 gates it with a byte-identical parity suite. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 8). Branch:
   `spec/streaming-waveb-b3b4`.
 
 ## Sequencing

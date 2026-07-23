@@ -44,15 +44,47 @@ pub enum TokenLut {
     I32(Array1<i32>),
 }
 
+/// Per-side `with_seqs("variant-windows")` mode (Wave B PR-B4 review, Minor 4): makes the
+/// invalid "unset" and "out-of-range" states unrepresentable, rather than leaving
+/// `ref_mode`/`alt_mode` as a bare `i64` where `0` silently emits no buffer for that side
+/// and an out-of-range value (confirmed by probe: e.g. `3`) ALSO silently emits nothing —
+/// both indistinguishable from a real "no buffer" choice. `windows::assemble_windows_mode`
+/// is an FFI-adjacent kernel and genuinely needs the `i64` encoding (`0`/`1`/`2`); [`as_i64`]
+/// is the single, obvious conversion point — Task 9 (constructing this from Python) should
+/// convert into a `WindowMode` as early as possible and never pass a raw `i64` further than
+/// that boundary.
+///
+/// [`as_i64`]: WindowMode::as_i64
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMode {
+    /// No buffer emitted for this side.
+    None,
+    /// Flanked window: `[start-L, end+L)` reference read (ref) or `flank5 . alt . flank3`
+    /// (alt).
+    Window,
+    /// Bare tokenized allele, no flanks.
+    Allele,
+}
+
+impl WindowMode {
+    /// The single conversion point into `windows::assemble_windows_mode`'s `i64` encoding.
+    pub fn as_i64(self) -> i64 {
+        match self {
+            WindowMode::None => 0,
+            WindowMode::Window => 1,
+            WindowMode::Allele => 2,
+        }
+    }
+}
+
 /// `with_seqs("variant-windows")` configuration (Wave B PR-B4, #304): the ref/alt mode
-/// knobs `windows::assemble_windows_mode` needs (`1` = flanked window, `2` = bare tokenized
-/// allele) plus the dtype-tagged token LUT. Bundled into one struct — rather than four loose
-/// backend fields — so a backend only grows by one `Option<WindowModeConfig>` field; `None`
-/// means "not configured for variant-windows output" (mirrors how `variants: bool` gates
-/// `generate_variants`).
+/// knobs `windows::assemble_windows_mode` needs plus the dtype-tagged token LUT. Bundled
+/// into one struct — rather than four loose backend fields — so a backend only grows by
+/// one `Option<WindowModeConfig>` field; `None` means "not configured for variant-windows
+/// output" (mirrors how `variants: bool` gates `generate_variants`).
 pub struct WindowModeConfig {
-    pub ref_mode: i64,
-    pub alt_mode: i64,
+    pub ref_mode: WindowMode,
+    pub alt_mode: WindowMode,
     pub flank_len: i64,
     pub token_lut: TokenLut,
 }
@@ -77,6 +109,78 @@ pub enum TokBuf {
 pub struct VariantWindowsBatch {
     pub scalars: VariantsBatch,
     pub tok_bufs: Vec<(String, TokBuf)>,
+}
+
+/// Collapse the four duplicated `assemble_windows_mode::<u8>`/`::<i32>` call sites (Wave B
+/// PR-B4 review, Minor 2) — `RecordBackend` and `Svar1Backend` each had their own u8/i32
+/// match arm spelling out the same 16-argument call, so a mis-ordered argument in one copy
+/// would have been a silent divergence between the two backends. One call site,
+/// monomorphizing on `token_lut`'s tagged variant, replaces all four.
+#[allow(clippy::too_many_arguments)]
+pub fn windows_tok_bufs(
+    v_idxs: ArrayView1<i32>,
+    row_offsets: ArrayView1<i64>,
+    ref_mode: WindowMode,
+    alt_mode: WindowMode,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+    ref_bytes: Option<ArrayView1<u8>>,
+    ref_offsets: Option<ArrayView1<i64>>,
+    flank_len: i64,
+    token_lut: &TokenLut,
+    v_contigs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    reference: ArrayView1<u8>,
+    contig_ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+) -> Vec<(String, TokBuf)> {
+    match token_lut {
+        TokenLut::U8(lut) => windows::assemble_windows_mode::<u8>(
+            v_idxs,
+            row_offsets,
+            ref_mode.as_i64(),
+            alt_mode.as_i64(),
+            alt_alleles,
+            alt_offsets,
+            ref_bytes,
+            ref_offsets,
+            flank_len,
+            lut.view(),
+            v_contigs,
+            v_starts,
+            ilens,
+            reference,
+            contig_ref_offsets,
+            pad_char,
+        )
+        .tok_bufs
+        .into_iter()
+        .map(|(name, data, offs)| (name.to_string(), TokBuf::U8(data, offs)))
+        .collect(),
+        TokenLut::I32(lut) => windows::assemble_windows_mode::<i32>(
+            v_idxs,
+            row_offsets,
+            ref_mode.as_i64(),
+            alt_mode.as_i64(),
+            alt_alleles,
+            alt_offsets,
+            ref_bytes,
+            ref_offsets,
+            flank_len,
+            lut.view(),
+            v_contigs,
+            v_starts,
+            ilens,
+            reference,
+            contig_ref_offsets,
+            pad_char,
+        )
+        .tok_bufs
+        .into_iter()
+        .map(|(name, data, offs)| (name.to_string(), TokBuf::I32(data, offs)))
+        .collect(),
+    }
 }
 
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
