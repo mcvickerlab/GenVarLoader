@@ -1413,4 +1413,86 @@ mod tests {
         assert_eq!(out.start.as_slice().unwrap(), &[12, 14]);
         assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 2]);
     }
+
+    /// PR-B3a review gap: pin the `want_ref` REF reference-slice arithmetic in
+    /// `generate_variants` (the `ref_len = alt_len - ilen` loop just above this test
+    /// module's call site), which the shipped tests never exercised — they all use
+    /// `want_ref: false`. This test PASSES today (the arithmetic is correct); it exists
+    /// to CATCH a regression, not to fix a bug.
+    ///
+    /// Four window-local variants on a single hap, over a 20 bp synthetic contig
+    /// `"ACGTACGTACGTACGTACGT"` (so expected REF bytes can be stated literally by
+    /// indexing the pattern), each pinning a different failure mode of the arithmetic:
+    ///   v0@0  SNP        (ilen= 0, alt_len=1) -> ref_len=1            -> "A"
+    ///   v1@4  insertion  (ilen=+2, alt_len=3) -> ref_len=1            -> "A"
+    ///   v2@10 deletion   (ilen=-2, alt_len=1) -> ref_len=3            -> "GTA"
+    ///   v3@18 deletion   (ilen=-5, alt_len=1) -> ref_len=6, runs off the 20 bp contig
+    ///         end at index 20 -> "GT" (in-range) + four `pad_char` bytes -> "GTNNNN"
+    /// Concatenated: ref_data = "AAGTAGTNNNN", ref_seq_offsets = [0, 1, 2, 5, 11].
+    ///
+    /// Each of the three broken variants named in the review would change this result:
+    /// - `alt_len + ilen` instead of `alt_len - ilen` flips every non-SNP `ref_len`
+    ///   (v1 -> ref_len=5 instead of 1, v2 -> ref_len=-1 (nonsensical/panics), v3 ->
+    ///   ref_len=-4) -- nothing here would still be "AAGTAGTNNNN".
+    /// - an off-by-one index (`s + k + 1` instead of `s + k`) shifts every multi-byte
+    ///   slice by one contig position, changing v2's "GTA" to "TAC" and v3's in-range
+    ///   prefix from "GT" to "TA" (with the pad count unchanged, so `ref_seq_offsets`
+    ///   alone would NOT catch this -- only the literal byte comparison does).
+    /// - dropping the `pad_char` substitution (no bounds check) would either panic
+    ///   (index out of range) or, if the check were merely inverted, corrupt v3's tail;
+    ///   either way the last 4 bytes would not be "NNNN".
+    #[test]
+    fn generate_variants_ref_reference_slice_arithmetic() {
+        let contig = ContigRef {
+            name: "chr1".into(),
+            ref_bytes: b"ACGTACGTACGTACGTACGT".to_vec(), // 20 bp, repeating pattern
+        };
+        assert_eq!(contig.ref_bytes.len(), 20);
+
+        let slot = DecodedWindow {
+            v_starts: vec![0, 4, 10, 18],
+            ilens: vec![0, 2, -2, -5],
+            // alt_alleles chosen only to produce the desired alt_len per variant
+            // (content is irrelevant to the REF arithmetic under test):
+            //   v0 "G" (1), v1 "TAG" (3), v2 "A" (1), v3 "A" (1)
+            alt_alleles: b"GTAGAA".to_vec(),
+            alt_offsets: vec![0, 1, 4, 5, 6],
+            geno_v_idxs: vec![0, 1, 2, 3], // single hap carries all four variants
+            geno_offsets: vec![0, 4],
+            global_v_idxs: vec![100, 101, 102, 103], // ignored for variants output
+            afs: Vec::new(),
+            info_cols: Vec::new(),
+        };
+        let backend = RecordBackend {
+            filler: Box::new(StubFiller),
+            contigs: vec![contig],
+            jobs: vec![RecordJob {
+                contig_idx: 0,
+                regions: vec![(0, 30)], // wide enough to keep all four variants
+                s_lo: 0,
+                s_hi: 1,
+            }],
+            n_samples: 1,
+            ploidy: 1,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+            min_af: None,
+            max_af: None,
+            want_ref: true,
+        };
+
+        let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
+        // Sanity: all four variants survived the region-overlap keep.
+        assert_eq!(out.start.as_slice().unwrap(), &[0, 4, 10, 18]);
+
+        let ref_data = out.ref_data.expect("want_ref: true must populate ref_data");
+        let ref_seq_offsets = out
+            .ref_seq_offsets
+            .expect("want_ref: true must populate ref_seq_offsets");
+        assert_eq!(ref_data.as_slice().unwrap(), b"AAGTAGTNNNN");
+        assert_eq!(ref_seq_offsets.as_slice().unwrap(), &[0, 1, 2, 5, 11]);
+    }
 }

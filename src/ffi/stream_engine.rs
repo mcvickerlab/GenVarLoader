@@ -357,7 +357,9 @@ impl EngineBackend for Svar1Backend {
             start,
             ilen,
             row_offsets: Array1::from_vec(row_offsets),
-            // PR-B3a: SVAR1 has no window INFO columns yet (Task 3 fills this in).
+            // PR-B3a: SVAR1 has no window INFO columns (VCF/PGEN-only per-window INFO;
+            // SVAR1's per-call FORMAT/dosage fields are separate, deferred to Wave B
+            // PR-B3b).
             info_out: Vec::new(),
             ref_data,
             ref_seq_offsets,
