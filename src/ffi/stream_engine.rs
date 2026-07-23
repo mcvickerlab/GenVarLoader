@@ -200,9 +200,11 @@ struct Svar1Backend {
     /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration. `None` (the
     /// default, and every pre-Task-8 construction site) means the backend was not built
     /// for variant-windows output; [`Svar1Backend::generate_variant_windows`] bails in
-    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is not
-    /// yet reachable from Python — `Svar1StreamEngine::build` always passes `None`; a
-    /// later task wires the Python-facing `var_fields`/`with_seqs` surface through to it.
+    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is
+    /// reachable from Python since Task 9: `Svar1StreamEngine::build`'s `#[new]`
+    /// constructor decodes the Python-facing `with_seqs("variant-windows")` surface
+    /// (`win_ref_mode`/`win_alt_mode`/`win_flank_len`/`win_token_lut_{u8,i32}`) via
+    /// `WindowModeConfig::from_python` and threads it through here.
     win_mode: Option<crate::variants::WindowModeConfig>,
 }
 
@@ -1882,7 +1884,12 @@ mod tests {
     /// holds a DISTINCT value per CSR position (`[0.1, 0.2, 0.3, 0.4]` for o=0..3) so a
     /// wrong gather (dropped entirely, indexed by variant id instead of CSR position, or
     /// misordered) is distinguishable from the correct one -- not just "some value came
-    /// back".
+    /// back". Constructs `Svar1Backend` directly (mirroring how `RecordBackend`'s
+    /// variant-windows tests bypass the engine/threading wrapper) even though
+    /// `Svar1StreamEngine` now has its own `next_batch_variant_windows_core` test
+    /// accessor (added alongside this test) -- going through the backend directly
+    /// keeps this test focused on `generate_variant_windows`'s gather logic without
+    /// the producer/consumer channel machinery in the way.
     #[test]
     fn svar1_generate_variant_windows_gathers_call_fields() {
         let f = fixture();

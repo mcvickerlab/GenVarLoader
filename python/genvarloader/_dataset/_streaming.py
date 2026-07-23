@@ -161,10 +161,14 @@ def _declared_info_numeric_dtypes(vcf: "genoray.VCF") -> dict[str, bool]:
     second ``genoray.VCF(...)`` construction -- which, unlike this header scan, eagerly loads
     the on-disk ``.gvi`` index (see `genoray.VCF.__init__`'s ``with_gvi_index`` default).
 
-    Args:
-        vcf: An already-opened ``genoray.VCF``.
+    Parameters
+    ----------
+    vcf
+        An already-opened ``genoray.VCF``.
 
-    Returns:
+    Returns
+    -------
+    dict
         Mapping of INFO field name -> ``is_float`` (``True`` for ``Type=Float``, ``False``
         for ``Type=Integer``), in VCF header declaration order.
     """
@@ -508,7 +512,9 @@ class StreamingDataset:
         ``variants.arrow``. The injected-callback (test) construction path has no
         backend and always returns the builtin default.
 
-        Returns:
+        Returns
+        -------
+        list[str]
             Field names requestable via :meth:`with_settings`'s ``var_fields``.
         """
         if self._backend is None:
@@ -529,7 +535,9 @@ class StreamingDataset:
         fails at configuration time, not after a full ``build_engine`` + first
         window read.
 
-        Returns:
+        Returns
+        -------
+        list[str]
             Field names :meth:`with_settings`'s ``var_fields`` can request without
             raising :class:`NotImplementedError` at iterate time.
         """
@@ -541,7 +549,9 @@ class StreamingDataset:
     def active_var_fields(self) -> list[str]:
         """The variant fields currently selected for ``with_seqs("variants")`` output.
 
-        Returns:
+        Returns
+        -------
+        list[str]
             The configured ``var_fields``, or the default ``["alt", "ilen", "start"]``
             when none was set via :meth:`with_settings`.
         """
@@ -967,7 +977,14 @@ class StreamingDataset:
                             # `_Flat.to_ragged`.
                             b_times_p = (hi - lo) * backend.ploidy
                             row_off = np.asarray(nxt["offsets"], np.int64)
-                            out: dict[str, Ragged] = {}
+                            # No type annotation here (Minor, Wave B PR-B4 review):
+                            # `out` is reused across this if/elif chain's mutually
+                            # exclusive branches (`RaggedVariants` / this dict /
+                            # `RaggedAnnotatedHaps` / plain `Ragged`), and annotating
+                            # just this branch as `dict[str, Ragged]` reads as if that
+                            # were `out`'s type everywhere in the function, not only
+                            # here.
+                            out = {}
                             for _name in ("ref_window", "alt_window", "ref", "alt"):
                                 if _name not in nxt:
                                     continue
@@ -1048,18 +1065,31 @@ class StreamingDataset:
                         'default `_prefetch_strategy="engine"` (do not set jitter '
                         'with "readahead").'
                     )
-                # Annotated output (issue #277 Wave A Task 4) is likewise only wired
-                # through the default "engine" path: `_Svar1Backend.generate_batch`
-                # (the readahead seam) has no annotated variant, and this experimental
-                # toggle is out of scope for that addition. Fail fast rather than
-                # silently ignoring `with_seqs("annotated")`.
-                if _annotated:
+                # Annotated / variants / variant-windows output are likewise only
+                # wired through the default "engine" path: `_Svar1Backend.generate_batch`
+                # (the readahead seam) unconditionally produces haplotypes -- it has no
+                # annotated/variants/variant-windows variant, and this experimental
+                # toggle is out of scope for any of those additions (issue #277 Wave A
+                # Task 4 for "annotated"; Wave B PR-B1/PR-B4 for "variants"/
+                # "variant-windows", #304). Without this guard the branch would
+                # silently yield haplotypes instead of the requested output kind. Fail
+                # fast rather than silently ignoring `with_seqs(...)`.
+                if _annotated or _variants or _variant_windows:
+                    kind = (
+                        "annotated"
+                        if _annotated
+                        else "variants"
+                        if _variants
+                        else "variant-windows"
+                    )
                     raise NotImplementedError(
-                        'StreamingDataset with_seqs("annotated") is only supported '
+                        f"StreamingDataset with_seqs({kind!r}) is only supported "
                         'with the default "engine" prefetch strategy; the '
-                        'experimental "readahead" toggle has no annotated variant. '
-                        'Use the default `_prefetch_strategy="engine"` (do not '
-                        'combine with_seqs("annotated") with "readahead").'
+                        'experimental "readahead" toggle only produces haplotypes '
+                        "(`_Svar1Backend.generate_batch` has no annotated/variants/"
+                        "variant-windows variant). Use the default "
+                        '`_prefetch_strategy="engine"` (do not combine '
+                        f'with_seqs({kind!r}) with "readahead").'
                     )
 
                 from ..genvarloader import svar1_prefetch_runs
@@ -1344,23 +1374,28 @@ class StreamingDataset:
         :class:`NotImplementedError`. Use a PGEN or SVAR source for annotated
         output.
 
-        Args:
-            kind: The sequence output kind.
-            opt: Required for, and only accepted with, ``kind="variant-windows"``
-                (Wave B PR-B4, #304): a
-                :class:`~genvarloader._dataset._flat_variants.VarWindowOpt`
-                configuring the flank length, token alphabet, unknown token, and
-                per-side (``ref``/``alt``) window-vs-allele mode. Passing ``opt``
-                with any other ``kind``, or omitting it for ``"variant-windows"``,
-                raises :class:`ValueError`.
+        Parameters
+        ----------
+        kind
+            The sequence output kind.
+        opt
+            Required for, and only accepted with, ``kind="variant-windows"``
+            (Wave B PR-B4, #304): a
+            :class:`~genvarloader._dataset._flat_variants.VarWindowOpt`
+            configuring the flank length, token alphabet, unknown token, and
+            per-side (``ref``/``alt``) window-vs-allele mode. Passing ``opt``
+            with any other ``kind``, or omitting it for ``"variant-windows"``,
+            raises :class:`ValueError`.
 
-        Raises:
-            NotImplementedError: ``kind`` is unrecognized, or
-                ``kind="variant-windows"`` was requested against the SVAR2
-                (``.svar2``) backend (not yet wired; see the SVAR1/VCF/PGEN
-                engines).
-            ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
-                supplied for any other ``kind``.
+        Raises
+        ------
+        NotImplementedError
+            ``kind`` is unrecognized, or ``kind="variant-windows"`` was requested
+            against the SVAR2 (``.svar2``) backend (not yet wired; see the
+            SVAR1/VCF/PGEN engines).
+        ValueError
+            ``opt`` was omitted for ``kind="variant-windows"``, or supplied for
+            any other ``kind``.
         """
         kind_map = {
             "haplotypes": RaggedSeqs,

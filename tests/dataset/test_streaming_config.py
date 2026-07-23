@@ -361,6 +361,19 @@ def test_var_fields_ref_is_forwarded_svar1(streaming_case):
 
 
 def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
+    """Config-level test (Wave B PR-B4 review, Minor 4): despite the name, the
+    original version of this test only checked dict keys -- it would have
+    survived a transposed-offsets bug or a dtype-coercing implementation.
+    Strengthen it with cheap, still config-level assertions: every value is a
+    real `seqpro.rag.Ragged` (not e.g. a plain numpy array masquerading as
+    one), token buffers carry the four-level ragged shape `(batch, ploidy,
+    None, None)` while scalars carry the three-level `(batch, ploidy, None)`,
+    and the token dtype matches the LUT dtype `with_seqs` built from `opt`.
+    Full byte-identical parity against the written path is the next task's
+    job, not this one.
+    """
+    from seqpro.rag import Ragged
+
     from genvarloader._dataset._flat_variants import VarWindowOpt
 
     regions, reference, variants, _written = streaming_case("svar1")
@@ -376,7 +389,34 @@ def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
     ).with_seqs("variant-windows", opt)
     data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2)))
     assert isinstance(data, dict)
-    assert {"ref_window", "alt_window", "start"} <= set(data)
+    assert {"ref_window", "alt_window", "start", "ilen"} <= set(data)
+
+    batch_size = len(r_idx)
+    ploidy = sds._backend.ploidy  # pyright: ignore[reportOptionalMemberAccess]
+    lut_dtype = sds._var_window_lut_dtype
+    assert lut_dtype is not None
+
+    for name, value in data.items():
+        assert isinstance(value, Ragged), (
+            f"{name!r} must be a Ragged, got {type(value)!r}"
+        )
+        if name in ("ref_window", "alt_window"):
+            # Token buffers are ragged over both variant count and window
+            # length: (batch, ploidy, ~variants, ~window_len).
+            assert value.shape == (batch_size, ploidy, None, None), (
+                f"{name!r} shape {value.shape} != expected token-buffer shape "
+                f"({batch_size}, {ploidy}, None, None)"
+            )
+            assert value.dtype == lut_dtype, (
+                f"{name!r} dtype {value.dtype} != token LUT dtype {lut_dtype}"
+            )
+        else:
+            # Scalar per-variant fields (`start`/`ilen`) are ragged only over
+            # variant count: (batch, ploidy, ~variants).
+            assert value.shape == (batch_size, ploidy, None), (
+                f"{name!r} shape {value.shape} != expected scalar shape "
+                f"({batch_size}, {ploidy}, None)"
+            )
 
 
 def test_variant_windows_rejected_on_svar2(streaming_svar2_case):

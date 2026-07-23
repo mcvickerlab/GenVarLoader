@@ -120,9 +120,11 @@ struct RecordBackend {
     /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration. `None` (the
     /// default, and every pre-Task-8 construction site) means the backend was not built
     /// for variant-windows output; [`RecordBackend::generate_variant_windows`] bails in
-    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is not
-    /// yet reachable from Python — the `#[new]` constructor always passes `None`; a later
-    /// task wires the Python-facing `var_fields`/`with_seqs` surface through to it.
+    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is
+    /// reachable from Python since Task 9: the `#[new]` constructor decodes the
+    /// Python-facing `with_seqs("variant-windows")` surface
+    /// (`win_ref_mode`/`win_alt_mode`/`win_flank_len`/`win_token_lut_{u8,i32}`) via
+    /// `WindowModeConfig::from_python` and threads it through here.
     win_mode: Option<WindowModeConfig>,
 }
 
