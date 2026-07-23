@@ -20,6 +20,7 @@ import polars as pl
 import seqpro as sp
 from genoray import PGEN, VCF, SparseVar, SparseVar2
 from genoray import exprs as _gexprs
+from genoray._io import atomic_write_path
 from genoray._svar import dense2sparse
 from genoray._svar._convert import _dense2sparse_with_length
 from genoray._types import V_IDX_TYPE
@@ -47,6 +48,55 @@ from ._utils import bed_to_regions, regions_to_bed
 DATASET_FORMAT_VERSION = SemanticVersion.parse("2.0.0")
 """On-disk layout version for a gvl.write dataset directory. Bump MAJOR only when
 an existing dataset can no longer be read correctly by new code."""
+
+
+def _vcf_has_info_af(variants: VCF) -> bool:
+    """True iff the VCF header declares an INFO/AF field (Wave B PR-B2, #317/#319)."""
+    return bool(variants._declared_info_fields(("AF",)))
+
+
+def _attach_af_column(variants: VCF) -> None:
+    """Attach a POS-aligned ``AF`` column onto the just-written ``.gvi`` index
+    (Wave B PR-B2, #317/#319), so a written VCF-sourced ``Dataset`` can
+    AF-filter like the streaming path.
+
+    Deliberately does NOT use ``VCF._write_gvi_index(info=["AF"])`` -- as of
+    ``genoray>=3.0.0,<4`` that silently drops the requested INFO column.
+    ``_write_gvi_index``'s general ``info=`` parameter flows into
+    ``get_record_info(fields=[...], info=[...])``, which chains
+    ``.rename(str.upper)`` before collecting; polars' projection pushdown
+    through that rename calls the io-source builder with a ``columns`` set
+    that no longer contains the (lowercase) ``"info"`` sentinel the builder
+    case-sensitively checks for, so the builder resets ``info_fields=[]`` and
+    the column never materializes. Confirmed by direct reproduction: a bare
+    ``get_record_info(fields=["CHROM", "POS", "REF", "ALT"], info=["AF"])``
+    omits AF/INFO from its schema entirely (both lazy and eager), while
+    ``VCF._fetch_info_cols`` (genoray's own internal helper for SVLEN/END/
+    IMPRECISE, which reads with no subsequent rename) returns it correctly.
+    This helper uses ``_fetch_info_cols`` directly and attaches the result
+    onto the base index ourselves, mirroring how genoray's own SV-field
+    handling in ``_write_gvi_index`` works around the same defect.
+
+    TODO(#317/#319): drop this workaround once genoray fixes the
+    ``get_record_info`` INFO-pushdown bug -- filed as
+    https://github.com/d-laub/genoray/issues/139.
+
+    Only ever called with ``info=None`` already passed to
+    ``_write_gvi_index`` (i.e. this attaches AF as a follow-up step, never
+    concurrently with genoray's own broken ``info=`` path).
+    """
+    idx_path = variants._index_path()
+    base = pl.read_ipc(idx_path)
+    af = variants._fetch_info_cols(["AF"]).collect()
+    if base.height != af.height or not base["POS"].equals(af["POS"]):
+        raise ValueError(
+            "Row count or order mismatch between the .gvi index and the "
+            "fetched AF column; refusing to attach a misaligned AF column. "
+            "This should not happen -- please report it as a genvarloader bug."
+        )
+    base = base.with_columns(af["AF"])
+    with atomic_write_path(idx_path) as tmp:
+        base.write_ipc(tmp, compression="zstd")
 
 
 def _check_dataset_format_version(meta: "Metadata", path: Path) -> None:
@@ -246,6 +296,14 @@ def write(
                         if not variants._valid_index():
                             logger.info("VCF genoray index is invalid, writing")
                             variants._write_gvi_index()
+                            # Cache INFO/AF into the .gvi at index-BUILD time (Wave B
+                            # PR-B2, #317/#319) so a written VCF-sourced Dataset can
+                            # AF-filter like the streaming path. If a *valid* index
+                            # already exists without AF, it is not rewritten here --
+                            # AF filtering then hits the "no cached AF" guard, which
+                            # is an accepted limitation.
+                            if _vcf_has_info_af(variants):
+                                _attach_af_column(variants)
                         variants._load_index()
                 elif isinstance(variants, PGEN):
                     variants._init_index()
