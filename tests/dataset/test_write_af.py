@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -34,6 +35,36 @@ chr1\t10\t.\tG\tC\t.\t.\t.\tGT\t1|1\t0|0
 chr1\t16\t.\tT\tC\t.\t.\tAF=0.77\tGT\t1|1\t0|1
 """
 
+# Realistic case: ``Number=A`` is the standard real-world INFO/AF declaration
+# (one value per ALT allele). oxbow/genoray return this as a `List(Float32)`
+# column, which must be coerced to scalar before it survives the
+# `is_numeric()` filter in `_Variants.available_info_fields`/`from_table`.
+# All records here are bi-allelic (one ALT each), so every list has length 1.
+_VCF_WITH_AF_NUMBER_A = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\tAF=0.05\tGT\t1|0\t0|0
+chr1\t10\t.\tG\tC\t.\t.\tAF=0.42\tGT\t1|1\t0|0
+chr1\t16\t.\tT\tC\t.\t.\tAF=0.91\tGT\t1|1\t0|1
+"""
+# Expected AF values in ascending-POS order (3, 10, 16); a sorted single-contig
+# VCF is read in POS order end-to-end (oxbow record order == file order), and
+# `_attach_af_column` cross-checks POS alignment before attaching, so POS order
+# is preserved all the way into `variants.arrow`.
+_EXPECTED_AF_NUMBER_A = [0.05, 0.42, 0.91]
+
+
+def _build_indexed_vcf(vcf_text: str, d: Path) -> Path:
+    vcf = d / "in.vcf"
+    vcf.write_text(vcf_text)
+    vcf_gz = d / "in.vcf.gz"
+    subprocess.run(["bcftools", "view", "-Oz", "-o", str(vcf_gz), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", "-t", str(vcf_gz)], check=True)
+    return vcf_gz
+
 
 @pytest.fixture(scope="module")
 def vcf_with_af(tmp_path_factory) -> tuple[Path, Path]:
@@ -42,11 +73,18 @@ def vcf_with_af(tmp_path_factory) -> tuple[Path, Path]:
     ref.write_text(f">chr1\n{_REF}\n")
     subprocess.run(["samtools", "faidx", str(ref)], check=True)
 
-    vcf = d / "in.vcf"
-    vcf.write_text(_VCF_WITH_AF)
-    vcf_gz = d / "in.vcf.gz"
-    subprocess.run(["bcftools", "view", "-Oz", "-o", str(vcf_gz), str(vcf)], check=True)
-    subprocess.run(["bcftools", "index", "-t", str(vcf_gz)], check=True)
+    vcf_gz = _build_indexed_vcf(_VCF_WITH_AF, d)
+    return vcf_gz, ref
+
+
+@pytest.fixture(scope="module")
+def vcf_with_af_number_a(tmp_path_factory) -> tuple[Path, Path]:
+    d = tmp_path_factory.mktemp("write_af_number_a_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf_gz = _build_indexed_vcf(_VCF_WITH_AF_NUMBER_A, d)
     return vcf_gz, ref
 
 
@@ -61,6 +99,32 @@ def test_write_caches_af_from_info(vcf_with_af, regions, tmp_path):
     gvl.write(out, regions, variants=str(vcf_gz), overwrite=True)
 
     assert "AF" in _Variants.available_info_fields(out / "genotypes" / "variants.arrow")
+
+
+def test_write_caches_af_number_a_values_round_trip(
+    vcf_with_af_number_a, regions, tmp_path
+):
+    """``Number=A`` INFO/AF (the realistic real-world declaration) comes back from
+    oxbow as `List(Float32)`; `_attach_af_column` must coerce it to scalar or the
+    column is silently dropped by `is_numeric()` filtering downstream. This test
+    verifies actual cached AF VALUES round-trip (not just column presence) --
+    without the `List` -> scalar coercion in `_attach_af_column` this fails with
+    `AF` absent from `v.info`.
+    """
+    vcf_gz, ref = vcf_with_af_number_a
+    out = tmp_path / "ds"
+    gvl.write(out, regions, variants=str(vcf_gz), overwrite=True)
+
+    v = _Variants.from_table(out / "genotypes" / "variants.arrow")
+    assert "AF" in v.info
+
+    # POS-aligned comparison: the .gvi index and variants.arrow preserve VCF
+    # (ascending-POS) record order end-to-end, so zipping POS with AF and
+    # sorting by POS recovers per-record AF values unambiguously.
+    order = np.argsort(v.start)
+    np.testing.assert_allclose(
+        np.asarray(v.info["AF"])[order], _EXPECTED_AF_NUMBER_A, rtol=1e-5
+    )
 
 
 def test_write_af_less_vcf_has_no_af_column(streaming_case, tmp_path):

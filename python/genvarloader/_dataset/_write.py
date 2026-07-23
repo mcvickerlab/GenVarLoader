@@ -75,7 +75,9 @@ def _attach_af_column(variants: VCF) -> None:
     IMPRECISE, which reads with no subsequent rename) returns it correctly.
     This helper uses ``_fetch_info_cols`` directly and attaches the result
     onto the base index ourselves, mirroring how genoray's own SV-field
-    handling in ``_write_gvi_index`` works around the same defect.
+    handling in ``_write_gvi_index`` works around the same defect -- including
+    its ``List`` -> scalar coercion (``pl.col(col).list.first()``) for
+    ``Number=A`` INFO fields.
 
     TODO(#317/#319): drop this workaround once genoray fixes the
     ``get_record_info`` INFO-pushdown bug -- filed as
@@ -88,6 +90,18 @@ def _attach_af_column(variants: VCF) -> None:
     idx_path = variants._index_path()
     base = pl.read_ipc(idx_path)
     af = variants._fetch_info_cols(["AF"]).collect()
+    if isinstance(af.schema["AF"], pl.List):
+        # Number=A INFO/AF comes back as List(Float); gvl requires bi-allelic
+        # normalization (bcftools norm -m -any) so every record has exactly one
+        # ALT -> the list is length 1 and list.first() is lossless. A longer list
+        # means an un-normalized multiallelic record slipped through.
+        if af["AF"].list.len().max() > 1:
+            raise ValueError(
+                "A VCF INFO/AF field carries multiple values for a record, which "
+                "means the VCF was not bi-allelically normalized (bcftools norm -m -any). "
+                "gvl requires bi-allelic input; please normalize before writing."
+            )
+        af = af.with_columns(pl.col("AF").list.first())
     if base.height != af.height or not base["POS"].equals(af["POS"]):
         raise ValueError(
             "Row count or order mismatch between the .gvi index and the "
