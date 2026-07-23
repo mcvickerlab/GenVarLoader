@@ -553,7 +553,7 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**),
   non-default `var_fields` (**PR-B3a, done — see below**), and SVAR1 per-call FORMAT/dosage
   `var_fields` (**PR-B3b, done — see below**) are wired; `"variant-windows"` (PR-B4, Rust core
-  done, Python surface + parity still open — see below) remains. Plan:
+  + Python surface/FFI done, byte-identical parity suite still open — see below) remains. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -614,7 +614,8 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)` but valid
   **only** for `with_seqs("variants")` (raises `NotImplementedError` on any other output kind —
   stricter than the written path, which also allows `var_fields` on `"variant-windows"`;
-  streaming doesn't support that output kind yet, PR-B4). New `available_var_fields`,
+  streaming's `"variant-windows"` output, wired as of PR-B4 Task 9, has no `var_fields`-
+  equivalent knob of its own yet). New `available_var_fields`,
   `servable_var_fields`, and `active_var_fields` properties. The requestable set is
   **backend-derived**: SVAR1 offers its numeric index columns (e.g. `AF`) + `ref`; VCF/BCF
   offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
@@ -690,12 +691,29 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   the identical kept variants — including SVAR1's per-call FORMAT/dosage fields, gathered by
   CSR position via a `gather_call_bufs` helper shared with `generate_variants` (fixed in
   review: the first cut left SVAR1's `info_out` empty on the mistaken theory that
-  variant-windows had no per-call-position slot for it). Not yet reachable from Python —
-  `WindowModeConfig` (bundling `ref_mode`/`alt_mode`/`flank_len`/token LUT, with `ref_mode`/
-  `alt_mode` a `WindowMode` enum rather than a bare `i64`) is always `None` until Task 9 wires
-  the `with_seqs("variant-windows")` Python surface + FFI marshaling through to it, and Task
-  10 gates it with a byte-identical parity suite. Plan:
-  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 8). Branch:
+  variant-windows had no per-call-position slot for it).
+  Task 9 (Python surface + FFI marshaling) **done** — `next_batch_variant_windows` added to
+  both `Svar1StreamEngine` and `RecordStreamEngine`, marshaling `VariantWindowsBatch` to a
+  `dict` (`start`/`ilen`/`offsets` plus `<name>`/`<name>_offsets` per emitted token buffer),
+  symmetric between the two engines. `WindowModeConfig::from_python` (`src/variants/mod.rs`) is
+  the ONE shared Rust-side decode point both engines' `#[new]` call — parses
+  `win_ref_mode`/`win_alt_mode` (`"window"`/`"allele"` strings, converted to the `WindowMode`
+  enum immediately at the FFI boundary, never passed further as a raw `i64`),
+  `win_flank_len`, and a dtype-tagged `win_token_lut_{u8,i32}` (exactly one populated) into an
+  `Option<WindowModeConfig>` — `None` (every pre-Task-9 call site, including every Rust unit
+  test) preserves the old disabled default byte-for-byte. On the Python side,
+  `StreamingDataset.with_seqs("variant-windows", opt)` requires `opt` (a `VarWindowOpt`,
+  rejected for every other kind with `ValueError`), builds the token LUT once via
+  `build_token_lut` (same call `_impl.py`'s written-path `with_seqs` makes) and caches
+  `(lut, lut_dtype, opt)` on the dataset; `_win_mode_kwargs` (one shared builder) translates
+  that bundle into the `win_*` keyword arguments for whichever of SVAR1/VCF/PGEN
+  `build_engine` is in play. `_iter_batches` packs the output as a plain `dict[str, Ragged]`
+  — token buffers get TWO ragged axes (`(b, p, ~v, ~w)`, mirroring `_FlatWindow.to_ragged`),
+  scalars (`start`/`ilen`) get one (`(b, p, ~v)`, mirroring `_Flat.to_ragged`). The SVAR2
+  (`.svar2`) backend rejects `"variant-windows"` with `NotImplementedError` immediately from
+  `with_seqs` (config time, not iterate time). Docs updated: `skills/genvarloader/SKILL.md`.
+  Task 10 (byte-identical parity suite) is the remaining open item. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-9). Branch:
   `spec/streaming-waveb-b3b4`.
 
 ## Sequencing

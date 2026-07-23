@@ -89,6 +89,83 @@ pub struct WindowModeConfig {
     pub token_lut: TokenLut,
 }
 
+impl WindowModeConfig {
+    /// Parse `with_seqs("variant-windows")` configuration crossing the PyO3 boundary
+    /// (Wave B PR-B4 Task 9) into a `WindowModeConfig`, or `None` if the caller passed
+    /// no variant-windows configuration at all (every pre-Task-9 engine construction
+    /// path). This is the ONE shared conversion point for BOTH `Svar1StreamEngine::new`
+    /// (`crate::ffi::stream_engine`) and `RecordStreamEngine::new`
+    /// (`crate::record_stream::engine`) -- one parsing implementation, rather than two
+    /// independently-maintained copies, so the two backends' `#[new]` cannot silently
+    /// diverge in how they decode the SAME wire format (`"window"`/`"allele"` mode
+    /// strings plus a dtype-tagged token LUT) -- the asymmetry risk the Task 9 brief
+    /// calls out explicitly.
+    ///
+    /// `ref_mode`/`alt_mode`/`flank_len` must be all-`Some` or all-`None` together
+    /// (partial configuration is a caller bug, not a data condition, so it is an `Err`
+    /// rather than silently defaulting); exactly one of `token_lut_u8`/`token_lut_i32`
+    /// must be `Some` in the all-`Some` case (mirrors the `call_field_{f32,i32,i16}`
+    /// three-bucket convention already used for per-call FORMAT fields: one dtype-
+    /// homogeneous slot per possible token dtype, "exactly one populated" enforced
+    /// here rather than left to the caller).
+    pub fn from_python(
+        ref_mode: Option<&str>,
+        alt_mode: Option<&str>,
+        flank_len: Option<i64>,
+        token_lut_u8: Option<Array1<u8>>,
+        token_lut_i32: Option<Array1<i32>>,
+    ) -> Result<Option<Self>, String> {
+        match (ref_mode, alt_mode, flank_len) {
+            (None, None, None) => {
+                if token_lut_u8.is_some() || token_lut_i32.is_some() {
+                    return Err(
+                        "win_token_lut_u8/win_token_lut_i32 given without win_ref_mode/\
+                         win_alt_mode/win_flank_len"
+                            .to_string(),
+                    );
+                }
+                Ok(None)
+            }
+            (Some(rm), Some(am), Some(fl)) => {
+                let ref_mode = Self::parse_mode(rm, "win_ref_mode")?;
+                let alt_mode = Self::parse_mode(am, "win_alt_mode")?;
+                let token_lut = match (token_lut_u8, token_lut_i32) {
+                    (Some(lut), None) => TokenLut::U8(lut),
+                    (None, Some(lut)) => TokenLut::I32(lut),
+                    _ => {
+                        return Err(
+                            "exactly one of win_token_lut_u8/win_token_lut_i32 must be \
+                             given to configure variant-windows output"
+                                .to_string(),
+                        );
+                    }
+                };
+                Ok(Some(WindowModeConfig {
+                    ref_mode,
+                    alt_mode,
+                    flank_len: fl,
+                    token_lut,
+                }))
+            }
+            _ => Err(
+                "win_ref_mode/win_alt_mode/win_flank_len must all be given together (or \
+                 all omitted) to configure variant-windows output"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn parse_mode(s: &str, which: &str) -> Result<WindowMode, String> {
+        match s {
+            "window" => Ok(WindowMode::Window),
+            "allele" => Ok(WindowMode::Allele),
+            other => Err(format!(
+                "{which} must be \"window\" or \"allele\", got {other:?}"
+            )),
+        }
+    }
+}
+
 /// One `variant-windows` output token buffer, dtype-tagged to match the backend's
 /// `TokenLut` (Wave B PR-B4, #304). `(data, seq_offsets)` — ragged, one entry per selected
 /// variant.
@@ -781,5 +858,92 @@ mod tests {
         );
         assert!(rd.is_none());
         assert!(ro.is_none());
+    }
+
+    // --- WindowModeConfig::from_python (Wave B PR-B4 Task 9) --------------------
+
+    #[test]
+    fn window_mode_config_from_python_all_none_is_disabled() {
+        let out = WindowModeConfig::from_python(None, None, None, None, None).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_builds_u8_lut() {
+        let lut = Array1::from_vec(vec![0u8, 1, 2, 3]);
+        let out = WindowModeConfig::from_python(
+            Some("window"),
+            Some("allele"),
+            Some(4),
+            Some(lut.clone()),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.ref_mode, WindowMode::Window);
+        assert_eq!(out.alt_mode, WindowMode::Allele);
+        assert_eq!(out.flank_len, 4);
+        match out.token_lut {
+            TokenLut::U8(l) => assert_eq!(l, lut),
+            TokenLut::I32(_) => panic!("expected TokenLut::U8"),
+        }
+    }
+
+    #[test]
+    fn window_mode_config_from_python_builds_i32_lut() {
+        let lut = Array1::from_vec(vec![300i32, 1, 2, 3]);
+        let out =
+            WindowModeConfig::from_python(Some("window"), Some("window"), Some(2), None, Some(lut.clone()))
+                .unwrap()
+                .unwrap();
+        match out.token_lut {
+            TokenLut::I32(l) => assert_eq!(l, lut),
+            TokenLut::U8(_) => panic!("expected TokenLut::I32"),
+        }
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_partial_config() {
+        // ref_mode given without alt_mode/flank_len -- a caller bug, not silently
+        // defaulted.
+        assert!(WindowModeConfig::from_python(Some("window"), None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_lut_without_modes() {
+        let lut = Array1::from_vec(vec![0u8, 1]);
+        assert!(WindowModeConfig::from_python(None, None, None, Some(lut), None).is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_invalid_mode_string() {
+        assert!(WindowModeConfig::from_python(
+            Some("bogus"),
+            Some("window"),
+            Some(1),
+            Some(Array1::from_vec(vec![0u8])),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_both_lut_dtypes() {
+        assert!(WindowModeConfig::from_python(
+            Some("window"),
+            Some("window"),
+            Some(1),
+            Some(Array1::from_vec(vec![0u8])),
+            Some(Array1::from_vec(vec![0i32])),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_neither_lut_dtype() {
+        assert!(
+            WindowModeConfig::from_python(Some("window"), Some("window"), Some(1), None, None)
+                .is_err()
+        );
     }
 }

@@ -623,6 +623,11 @@ impl Svar1StreamEngine {
         max_af: Option<f32>,
         want_ref: bool,
         call_fields: Vec<(String, CallVals)>,
+        // Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration, forwarded
+        // from the `#[new]` pymethod (`_Svar1Backend.build_engine`, Task 9) -- `None`
+        // (every pre-Task-9 caller, including every Rust test call site) disables
+        // `next_batch_variant_windows` exactly like the old hardcoded default did.
+        win_mode: Option<crate::variants::WindowModeConfig>,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -648,11 +653,7 @@ impl Svar1StreamEngine {
             ref_offsets,
             want_ref,
             call_fields,
-            // Wave B PR-B4 (#304): not yet reachable from Python (a later task wires the
-            // `with_seqs("variant-windows")` surface through) -- every `build` caller
-            // (the `#[new]` pymethod below; tests build `Svar1Backend` literals directly)
-            // gets the disabled default.
-            win_mode: None,
+            win_mode,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -674,6 +675,15 @@ impl Svar1StreamEngine {
     #[cfg(test)]
     fn next_batch_variants_core(&self) -> Option<anyhow::Result<crate::variants::VariantsBatch>> {
         self.core.next_batch_variants_core()
+    }
+
+    /// Test-only accessor mirroring the pyclass's `next_batch_variant_windows`, minus
+    /// the numpy/PyDict marshaling — used directly by the `#[cfg(test)]` module below.
+    #[cfg(test)]
+    fn next_batch_variant_windows_core(
+        &self,
+    ) -> Option<anyhow::Result<crate::variants::VariantWindowsBatch>> {
+        self.core.next_batch_variant_windows_core()
     }
 }
 
@@ -702,6 +712,8 @@ impl Svar1StreamEngine {
         call_field_f32_names=Vec::new(), call_field_f32=Vec::new(),
         call_field_i32_names=Vec::new(), call_field_i32=Vec::new(),
         call_field_i16_names=Vec::new(), call_field_i16=Vec::new(),
+        win_ref_mode=None, win_alt_mode=None, win_flank_len=None,
+        win_token_lut_u8=None, win_token_lut_i32=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -763,8 +775,29 @@ impl Svar1StreamEngine {
         // why this can't just upcast into `call_field_i32`.
         call_field_i16_names: Vec<String>,
         call_field_i16: Vec<PyReadonlyArray1<i16>>,
+        // Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration, forwarded
+        // by `_Svar1Backend.build_engine` (Task 9) -- `"window"`/`"allele"` mode
+        // strings plus a dtype-tagged token LUT (exactly one of the u8/i32 buckets
+        // populated), parsed into a `WindowModeConfig` by the single shared
+        // `WindowModeConfig::from_python` conversion point (see its doc comment for
+        // why this parsing lives in `crate::variants`, not duplicated per backend).
+        // All `None` (the default) disables `next_batch_variant_windows`.
+        win_ref_mode: Option<String>,
+        win_alt_mode: Option<String>,
+        win_flank_len: Option<i64>,
+        win_token_lut_u8: Option<PyReadonlyArray1<u8>>,
+        win_token_lut_i32: Option<PyReadonlyArray1<i32>>,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
+
+        let win_mode = crate::variants::WindowModeConfig::from_python(
+            win_ref_mode.as_deref(),
+            win_alt_mode.as_deref(),
+            win_flank_len,
+            win_token_lut_u8.map(|a| a.as_array().to_owned()),
+            win_token_lut_i32.map(|a| a.as_array().to_owned()),
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         if call_field_f32_names.len() != call_field_f32.len()
             || call_field_i32_names.len() != call_field_i32.len()
@@ -921,6 +954,7 @@ impl Svar1StreamEngine {
             // (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`).
             want_ref,
             call_fields,
+            win_mode,
         ))
     }
 
@@ -1022,6 +1056,61 @@ impl Svar1StreamEngine {
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
         }
     }
+
+    /// `variant-windows`-output counterpart of `next_batch_variants` (Wave B PR-B4,
+    /// #304): returns a `dict` with keys `start` (i32), `ilen` (i32), `offsets` (i64,
+    /// per-`(row, ploid)` variant-count boundaries), plus `<name>`/`<name>_offsets`
+    /// per emitted token buffer (`ref_window`/`alt_window`/`ref`/`alt`, whichever the
+    /// engine's `WindowModeConfig` selected) -- or `None` when the plan is exhausted.
+    /// Only valid when the engine was constructed with variant-windows configuration
+    /// (`win_ref_mode`/`win_alt_mode`/`win_flank_len`/a token LUT) -- otherwise this
+    /// raises `RuntimeError` (a caller bug, not a data condition; `StreamingDataset
+    /// ._iter_batches` never calls this unless `with_seqs("variant-windows", ...)` was
+    /// selected). Mirrors `RecordStreamEngine::next_batch_variant_windows`
+    /// (`crate::record_stream::engine`) exactly -- see that method's doc comment for
+    /// why the two must stay symmetric.
+    fn next_batch_variant_windows<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let out = py.detach(|| self.core.next_batch_variant_windows_core());
+        match out {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let dict = PyDict::new(py);
+                dict.set_item("start", batch.scalars.start.into_pyarray(py))?;
+                dict.set_item("ilen", batch.scalars.ilen.into_pyarray(py))?;
+                dict.set_item("offsets", batch.scalars.row_offsets.into_pyarray(py))?;
+                for (name, buf) in batch.tok_bufs {
+                    match buf {
+                        crate::variants::TokBuf::U8(d, o) => {
+                            dict.set_item(format!("{name}_offsets"), o.into_pyarray(py))?;
+                            dict.set_item(name, d.into_pyarray(py))?;
+                        }
+                        crate::variants::TokBuf::I32(d, o) => {
+                            dict.set_item(format!("{name}_offsets"), o.into_pyarray(py))?;
+                            dict.set_item(name, d.into_pyarray(py))?;
+                        }
+                    }
+                }
+                for (name, vals) in batch.scalars.info_out {
+                    match vals {
+                        InfoVals::I32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::I16(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                    }
+                }
+                Ok(Some(dict))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1029,7 +1118,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    use crate::variants::{TokenLut, WindowMode, WindowModeConfig};
+    use crate::variants::{TokBuf, TokenLut, WindowMode, WindowModeConfig};
 
     fn write_raw<T: bytemuck::NoUninit>(dir: &std::path::Path, name: &str, data: &[T]) {
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
@@ -1154,6 +1243,45 @@ mod tests {
             None,  // max_af
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
+        )
+    }
+
+    /// `build_engine` variant configured for `with_seqs("variant-windows")` output
+    /// (Wave B PR-B4 Task 9) -- exercises the SAME producer/consumer engine path
+    /// `build_engine` above does, but with `win_mode: Some(...)` so
+    /// `next_batch_variant_windows_core` is reachable (unlike `build_engine`, which
+    /// always disables it).
+    fn build_engine_windows(
+        f: &Fixture,
+        jobs: Vec<WindowJob>,
+        batch_size: usize,
+        win_mode: WindowModeConfig,
+    ) -> Svar1StreamEngine {
+        let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        Svar1StreamEngine::build(
+            store,
+            vec![chr1_contig(f)],
+            jobs,
+            vec![0usize, 1],
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
+            b'N',
+            false,
+            batch_size,
+            -1,    // ragged
+            false, // annotated
+            false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            Some(win_mode),
         )
     }
 
@@ -1314,6 +1442,7 @@ mod tests {
             None,  // max_af
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
         );
 
         match engine.next_batch_core() {
@@ -1467,6 +1596,7 @@ mod tests {
             None,  // max_af
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1598,6 +1728,7 @@ mod tests {
             None,  // max_af
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1674,6 +1805,7 @@ mod tests {
             None,
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
         );
         let batch_a = engine_a
             .next_batch_variants_core()
@@ -1722,6 +1854,7 @@ mod tests {
             None,
             false, // want_ref
             Vec::new(), // call_fields
+            None, // win_mode
         );
         let batch_b = engine_b
             .next_batch_variants_core()
@@ -1836,6 +1969,64 @@ mod tests {
             &[0.1f32, 0.2, 0.3, 0.4],
             "DS must be gathered by CSR position (kept_o), in kept_o's order -- \
              a variant-id gather or a dropped gather would not reproduce this exactly"
+        );
+    }
+
+    /// Wave B PR-B4 Task 9: `next_batch_variant_windows_core` (the FFI-adjacent core
+    /// accessor `next_batch_variant_windows` marshals) end-to-end through the REAL
+    /// producer/consumer engine (`Svar1StreamEngine::build` + `next_batch_*_core`),
+    /// not just `Svar1Backend::generate_variant_windows` directly (Task 8's test
+    /// above). Confirms the engine plumbing (win_mode threaded through `build`,
+    /// `EngineBackend::generate_variant_windows` dispatch) actually reaches a live
+    /// engine instance, and exhausts cleanly afterward.
+    #[test]
+    fn svar1_engine_next_batch_variant_windows_core_yields_tok_bufs() {
+        let f = fixture();
+        let jobs = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 30)],
+            s_lo: 0,
+            s_hi: 2,
+        }];
+        let win_mode = WindowModeConfig {
+            ref_mode: WindowMode::Window,
+            alt_mode: WindowMode::Window,
+            flank_len: 2,
+            token_lut: TokenLut::U8(Array1::from_vec((0..=255u8).collect())),
+        };
+        let engine = build_engine_windows(&f, jobs, 1000, win_mode);
+
+        let batch = engine
+            .next_batch_variant_windows_core()
+            .expect("engine has one window queued")
+            .expect("window decode must not error");
+
+        assert_eq!(
+            batch.scalars.start.as_slice().unwrap(),
+            &[10, 10, 20, 20],
+            "same kept-variant selection as the direct-backend test above"
+        );
+        let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ref_window", "alt_window"],
+            "WindowMode::Window on both sides emits exactly ref_window/alt_window"
+        );
+        for (_, buf) in &batch.tok_bufs {
+            let TokBuf::U8(data, offsets) = buf else {
+                panic!("u8 LUT must yield TokBuf::U8, not TokBuf::I32");
+            };
+            assert_eq!(
+                offsets.len(),
+                batch.scalars.start.len() + 1,
+                "one window per kept variant"
+            );
+            assert!(!data.is_empty());
+        }
+
+        assert!(
+            engine.next_batch_variant_windows_core().is_none(),
+            "a single-window plan must exhaust cleanly, not hang or repeat"
         );
     }
 }

@@ -192,8 +192,9 @@ def test_pgen_var_fields_limited_to_ref(streaming_case):
     assert sds.available_var_fields == ["alt", "ilen", "start", "ref"]
 
 
-def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
+def test_with_seqs_accepts_annotated_variants_and_variant_windows():
     sds = _tiny_sds()
+    from genvarloader._dataset._flat_variants import VarWindowOpt
     from genvarloader._dataset._rag_variants import RaggedVariants
     from genvarloader._ragged import RaggedAnnotatedHaps
 
@@ -204,9 +205,20 @@ def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     # raises NotImplementedError, and that raises later at iterate time
     # (`_iter_batches`), not here at the config layer.
     assert sds.with_seqs("variants")._seq_kind is RaggedVariants
-    # "variant-windows"/"reference" remain later Wave B / follow-up work.
-    with pytest.raises(NotImplementedError):
+    # Wave B PR-B4 (#304): "variant-windows" is now accepted at the config layer
+    # too (requires an `opt`); its `_seq_kind` sentinel is plain `dict` (there is
+    # no dedicated ragged-container class for it -- see `_SEQ_KIND_NAMES`).
+    opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    assert sds.with_seqs("variant-windows", opt)._seq_kind is dict
+    # Missing `opt` is a config-time `ValueError`, not deferred to iterate time.
+    with pytest.raises(ValueError):
         sds.with_seqs("variant-windows")
+    # `opt` is rejected for every OTHER kind.
+    with pytest.raises(ValueError):
+        sds.with_seqs("haplotypes", opt)
+    # "reference" remains later follow-up work.
+    with pytest.raises(NotImplementedError):
+        sds.with_seqs("reference")
 
 
 # --- Wave B PR-B3a review (code-review fix pass) -----------------------------
@@ -346,3 +358,32 @@ def test_var_fields_ref_is_forwarded_svar1(streaming_case):
         "all-empty pass would not prove ref data actually arrived"
     )
     assert saw_nonempty_ref, "expected at least one non-empty ref allele byte"
+
+
+def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    regions, reference, variants, _written = streaming_case("svar1")
+    opt = VarWindowOpt(
+        flank_length=4,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="window",
+    )
+    sds = gvl.StreamingDataset(
+        regions, reference=reference, variants=variants
+    ).with_seqs("variant-windows", opt)
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2)))
+    assert isinstance(data, dict)
+    assert {"ref_window", "alt_window", "start"} <= set(data)
+
+
+def test_variant_windows_rejected_on_svar2(streaming_svar2_case):
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    regions, reference, variants = streaming_svar2_case
+    opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    with pytest.raises(NotImplementedError):
+        sds.with_seqs("variant-windows", opt)

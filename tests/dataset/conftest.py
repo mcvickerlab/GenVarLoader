@@ -1275,3 +1275,16 @@ def streaming_case(request, tmp_path_factory):
         raise ValueError(f"streaming_case: unknown backend {backend!r}")
 
     return _case
+
+
+@pytest.fixture
+def streaming_svar2_case(svar2_multicontig_fixture):
+    """``(regions, reference, variants)`` over a live ``.svar2`` store (Wave B
+    PR-B4, #304): used by the ``with_seqs("variant-windows")`` SVAR2-rejection
+    test -- variant-windows output is Rust-wired for SVAR1/VCF/PGEN only, so
+    constructing a `StreamingDataset` over a `.svar2` source and requesting it
+    must raise `NotImplementedError` immediately from `with_seqs`, not at
+    iterate time.
+    """
+    f = svar2_multicontig_fixture
+    return f.bed, f.reference_path, f.svar2_path

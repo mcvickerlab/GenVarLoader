@@ -399,4 +399,30 @@ impl<B: EngineBackend> StreamEngineCore<B> {
             NextSlice::Failed(e) => Some(Err(e)),
         }
     }
+
+    /// `variant-windows`-output counterpart of `next_batch_variants_core` (Wave B
+    /// PR-B4, #304): same iteration state, same `advance` cursor walk, but yields
+    /// `VariantWindowsBatch` via `EngineBackend::generate_variant_windows` instead of
+    /// `VariantsBatch`. Sibling method, not an overload, for the same reason
+    /// `next_batch_variants_core` is a sibling of `next_batch_core`.
+    pub(crate) fn next_batch_variant_windows_core(
+        &self,
+    ) -> Option<anyhow::Result<VariantWindowsBatch>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match self.advance(&mut state) {
+            NextSlice::Ready {
+                job_idx,
+                row_lo,
+                row_hi,
+            } => {
+                let filled = &state.current.as_ref().unwrap().filled;
+                Some(
+                    self.backend
+                        .generate_variant_windows(job_idx, filled, row_lo, row_hi),
+                )
+            }
+            NextSlice::Done => None,
+            NextSlice::Failed(e) => Some(Err(e)),
+        }
+    }
 }

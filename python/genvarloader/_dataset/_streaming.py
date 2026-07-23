@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     import torch.utils.data as td
     import genoray
 
+    from ._flat_variants import VarWindowOpt
+
 # Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
 # report a `with_seqs(...)` value back in error messages (`_iter_batches`'s
 # var_fields/non-variants guard) -- the inverse of `with_seqs`'s own `kind_map`.
@@ -30,6 +32,10 @@ _SEQ_KIND_NAMES: dict[type, str] = {
     RaggedSeqs: "haplotypes",
     RaggedAnnotatedHaps: "annotated",
     RaggedVariants: "variants",
+    # Wave B PR-B4 (#304): `with_seqs("variant-windows")` output is a plain `dict[str,
+    # Ragged]` (there is no dedicated ragged-container class for it, unlike the other
+    # three kinds), so `dict` itself is the `_seq_kind` sentinel -- see `with_seqs`.
+    dict: "variant-windows",
 }
 
 # Wave B PR-B3a (#304) name-collision guard: `next_batch_variants()`'s FFI dict
@@ -75,6 +81,34 @@ def _normalize_var_fields(var_fields: "list[str] | None") -> list[str]:
     `build_engine` and `StreamingDataset.active_var_fields` so the default list
     literal exists in exactly one place."""
     return list(var_fields) if var_fields is not None else list(_DEFAULT_VAR_FIELDS)
+
+
+def _win_mode_kwargs(
+    var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None",
+) -> dict[str, object]:
+    """Build the `win_*` keyword arguments every record-style backend's
+    `build_engine` (SVAR1/VCF/PGEN) forwards to its Rust engine constructor for
+    `with_seqs("variant-windows")` (Wave B PR-B4, #304). `var_window` is the
+    `(lut, lut_dtype, opt)` bundle `StreamingDataset._iter_batches` threads through
+    (`None` when variant-windows output was not requested); one shared builder here
+    -- rather than duplicating the same dtype dispatch three times -- keeps the
+    three backends' `#[new]` calls symmetric, matching
+    `WindowModeConfig::from_python` (`src/variants/mod.rs`), the single Rust-side
+    decode point for this exact wire format.
+    """
+    if var_window is None:
+        return {}
+    lut, lut_dtype, opt = var_window
+    kwargs: dict[str, object] = {
+        "win_ref_mode": opt.ref,
+        "win_alt_mode": opt.alt,
+        "win_flank_len": int(opt.flank_length),
+    }
+    if lut_dtype == np.uint8:
+        kwargs["win_token_lut_u8"] = np.ascontiguousarray(lut, np.uint8)
+    else:
+        kwargs["win_token_lut_i32"] = np.ascontiguousarray(lut, np.int32)
+    return kwargs
 
 
 # SVAR2 reconstruct super-batch: the rayon dispatch grain. Sized to saturate cores
@@ -250,6 +284,14 @@ class StreamingDataset:
     # Requested variant fields for `with_seqs("variants")` output (PR-B3a, #304).
     # `None` means the default `["alt", "ilen", "start"]` -- see `active_var_fields`.
     _var_fields: "list[str] | None" = None
+    # `with_seqs("variant-windows")` configuration (Wave B PR-B4, #304): `_var_window_opt`
+    # is the caller's `VarWindowOpt` (only meaningful when `_seq_kind is dict`); the LUT
+    # is derived from it ONCE in `with_seqs` (via `build_token_lut`, exactly like
+    # `_impl.py`'s written-path `with_seqs`) and cached alongside it here so
+    # `_iter_batches` never rebuilds it per `to_iter` call.
+    _var_window_opt: "VarWindowOpt | None" = None
+    _var_window_lut: "NDArray | None" = None
+    _var_window_lut_dtype: "np.dtype | None" = None
 
     def __init__(
         self,
@@ -389,6 +431,9 @@ class StreamingDataset:
             "_min_af",
             "_max_af",
             "_var_fields",
+            "_var_window_opt",
+            "_var_window_lut",
+            "_var_window_lut_dtype",
         ):
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
@@ -617,6 +662,11 @@ class StreamingDataset:
             # -- threaded through `build_engine`/the engine constructor and selects the
             # `next_batch_variants` puller below.
             _variants = self._seq_kind is RaggedVariants
+            # Wave B PR-B4 (#304): whether to request tokenized variant-window
+            # buffers instead of reconstructed haplotype bytes. Resolved ONCE here,
+            # mirroring `_variants` -- threaded through `build_engine`/the engine
+            # constructor and selects the `next_batch_variant_windows` puller below.
+            _variant_windows = self._seq_kind is dict
             # Minor (Wave B PR-B3a review): resolve ONCE per `_iter_batches` call, not
             # once per batch inside the packing loop below -- `active_var_fields`
             # allocates a new list every call.
@@ -762,6 +812,19 @@ class StreamingDataset:
                     min_af=self._min_af,
                     max_af=self._max_af,
                     var_fields=self._var_fields,
+                    # Wave B PR-B4 (#304): `(lut, lut_dtype, opt)` cached by `with_seqs`
+                    # -- `None` unless `_variant_windows`, matching how `min_af`/
+                    # `max_af`/`var_fields` stay at their no-op defaults for every
+                    # other output kind.
+                    var_window=(
+                        (
+                            self._var_window_lut,
+                            self._var_window_lut_dtype,
+                            self._var_window_opt,
+                        )
+                        if _variant_windows
+                        else None
+                    ),
                 )
                 del engine_jobs
                 # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
@@ -775,9 +838,16 @@ class StreamingDataset:
                 # `dict` (keys `alt`/`alt_offsets`/`start`/`ilen`/`offsets`) instead of
                 # a tuple and packs a `RaggedVariants` -- mirrors `_FlatAlleles.to_ragged`
                 # (`_flat_variants.py`) for the ragged `alt` field and `_Flat.to_ragged`
-                # for the scalar `start`/`ilen` fields.
+                # for the scalar `start`/`ilen` fields. Wave B PR-B4 (#304):
+                # variant-windows output also pulls a `dict` (keys `start`/`ilen`/
+                # `offsets` plus `<name>`/`<name>_offsets` per emitted token buffer)
+                # and packs a plain `dict[str, Ragged]` -- mirrors
+                # `_FlatWindow.to_ragged` (two ragged axes) and `_Flat.to_ragged` (one),
+                # `_flat_variants.py`.
                 if _variants:
                     next_batch = engine.next_batch_variants
+                elif _variant_windows:
+                    next_batch = engine.next_batch_variant_windows
                 elif _annotated:
                     next_batch = engine.next_batch_annotated
                 else:
@@ -881,6 +951,44 @@ class StreamingDataset:
                                 ref=ref_rag,
                                 **extra,
                             )
+                        elif _variant_windows:
+                            # Wave B PR-B4 (#304): `nxt` carries `start`/`ilen`/
+                            # `offsets` (one entry per kept variant, same
+                            # `(row, ploid)`-boundary `offsets` every other output
+                            # kind uses) plus `<name>`/`<name>_offsets` for whichever
+                            # of `ref_window`/`alt_window`/`ref`/`alt` the engine's
+                            # `WindowModeConfig` emitted (`ref`/`alt` mode "allele";
+                            # `ref_window`/`alt_window` mode "window" -- the unused
+                            # pair member is simply absent from `nxt`, never `None`).
+                            # Token buffers have TWO ragged axes (variant count AND
+                            # window length: `(b, p, ~v, ~w)`) -- mirrors
+                            # `_FlatWindow.to_ragged` (`_flat_variants.py`); the
+                            # scalars have one (`(b, p, ~v)`) -- mirrors
+                            # `_Flat.to_ragged`.
+                            b_times_p = (hi - lo) * backend.ploidy
+                            row_off = np.asarray(nxt["offsets"], np.int64)
+                            out: dict[str, Ragged] = {}
+                            for _name in ("ref_window", "alt_window", "ref", "alt"):
+                                if _name not in nxt:
+                                    continue
+                                out[_name] = Ragged.from_offsets(
+                                    np.asarray(nxt[_name]),
+                                    (hi - lo, backend.ploidy, None, None),
+                                    [
+                                        row_off,
+                                        np.asarray(nxt[f"{_name}_offsets"], np.int64),
+                                    ],
+                                )
+                            out["start"] = Ragged.from_offsets(
+                                np.asarray(nxt["start"], np.int32),
+                                (b_times_p, None),
+                                row_off,
+                            ).reshape(hi - lo, backend.ploidy, None)
+                            out["ilen"] = Ragged.from_offsets(
+                                np.asarray(nxt["ilen"], np.int32),
+                                (b_times_p, None),
+                                row_off,
+                            ).reshape(hi - lo, backend.ploidy, None)
                         elif _annotated:
                             data, annot_v, annot_pos, offsets = nxt
                             shape = (hi - lo, backend.ploidy, None)
@@ -1215,33 +1323,90 @@ class StreamingDataset:
                 yield min(lo + batch_size, n_rows) - lo
 
     def with_seqs(
-        self, kind: Literal["haplotypes", "annotated", "variants"]
+        self,
+        kind: Literal["haplotypes", "annotated", "variants", "variant-windows"],
+        opt: "VarWindowOpt | None" = None,
     ) -> "StreamingDataset":
         """Select the sequence output kind. ``"haplotypes"`` (default),
         ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
-        variant indices and reference coordinates), or ``"variants"`` (no
-        sequences, just variants as :class:`RaggedVariants` -- supported for the
-        SVAR1, VCF, and PGEN backends; not yet wired for ``.svar2``).
-        ``"variant-windows"`` / ``"reference"`` are later Wave B / follow-ups.
+        variant indices and reference coordinates), ``"variants"`` (no
+        sequences, just variants as :class:`RaggedVariants`), or
+        ``"variant-windows"`` (no reconstructed sequences; instead, per-variant
+        tokenized ref/alt windows -- or bare tokenized alleles -- as a
+        ``dict[str, Ragged]``, matching the written path's
+        ``Dataset.with_seqs("variant-windows")`` output shape). All four are
+        supported for the SVAR1, VCF, and PGEN backends; none is yet wired for
+        ``.svar2``. ``"reference"`` is a later follow-up.
 
         ``"annotated"`` is **not supported for the VCF backend** (its
         ``var_idxs`` are dataset-global variant ids a VCF source cannot produce
         cheaply; issues #305, #311) -- materializing such a dataset raises
         :class:`NotImplementedError`. Use a PGEN or SVAR source for annotated
         output.
+
+        Args:
+            kind: The sequence output kind.
+            opt: Required for, and only accepted with, ``kind="variant-windows"``
+                (Wave B PR-B4, #304): a
+                :class:`~genvarloader._dataset._flat_variants.VarWindowOpt`
+                configuring the flank length, token alphabet, unknown token, and
+                per-side (``ref``/``alt``) window-vs-allele mode. Passing ``opt``
+                with any other ``kind``, or omitting it for ``"variant-windows"``,
+                raises :class:`ValueError`.
+
+        Raises:
+            NotImplementedError: ``kind`` is unrecognized, or
+                ``kind="variant-windows"`` was requested against the SVAR2
+                (``.svar2``) backend (not yet wired; see the SVAR1/VCF/PGEN
+                engines).
+            ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
+                supplied for any other ``kind``.
         """
         kind_map = {
             "haplotypes": RaggedSeqs,
             "annotated": RaggedAnnotatedHaps,
             "variants": RaggedVariants,
+            "variant-windows": dict,
         }
         if kind not in kind_map:
             raise NotImplementedError(
                 f"StreamingDataset.with_seqs({kind!r}) is not implemented; "
-                'supported: "haplotypes", "annotated", "variants". '
-                '"variant-windows" and "reference" are later Wave B / follow-ups.'
+                'supported: "haplotypes", "annotated", "variants", '
+                '"variant-windows". "reference" is a later follow-up.'
+            )
+        if kind != "variant-windows" and opt is not None:
+            raise ValueError(
+                f"StreamingDataset.with_seqs({kind!r}, opt=...) is not supported; "
+                '`opt` is only accepted for with_seqs("variant-windows", opt).'
             )
         out = copy.copy(self)
+        if kind == "variant-windows":
+            if opt is None:
+                raise ValueError(
+                    'StreamingDataset.with_seqs("variant-windows") requires a '
+                    'VarWindowOpt, e.g. with_seqs("variant-windows", '
+                    "VarWindowOpt(flank_length=..., token_alphabet=..., "
+                    "unknown_token=...))."
+                )
+            if isinstance(self._backend, _Svar2Backend):
+                raise NotImplementedError(
+                    'StreamingDataset.with_seqs("variant-windows") is not supported '
+                    "for the SVAR2 (.svar2) backend; it is wired only through the "
+                    "SVAR1/VCF/PGEN engines (Wave B PR-B4, #304)."
+                )
+            from ._flat_flanks import build_token_lut
+
+            lut, lut_dtype = build_token_lut(opt.token_alphabet, opt.unknown_token)
+            object.__setattr__(out, "_var_window_opt", opt)
+            object.__setattr__(out, "_var_window_lut", lut)
+            object.__setattr__(out, "_var_window_lut_dtype", lut_dtype)
+        else:
+            # Hygiene: clear a previously-set variant-windows configuration when
+            # switching away from it, so a stale `_var_window_opt` never lingers on
+            # a dataset that no longer requests that output kind.
+            object.__setattr__(out, "_var_window_opt", None)
+            object.__setattr__(out, "_var_window_lut", None)
+            object.__setattr__(out, "_var_window_lut_dtype", None)
         object.__setattr__(out, "_seq_kind", kind_map[kind])
         return out
 
@@ -1741,6 +1906,7 @@ class _Svar1Backend:
         min_af: "float | None" = None,
         max_af: "float | None" = None,
         var_fields: "list[str] | None" = None,
+        var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -1807,6 +1973,13 @@ class _Svar1Backend:
         field); the failure only surfaces when the field is actually requested,
         matching the written path's lazy-load contract (`_haps.py`'s `Haps` only
         memmaps a var_field file `if name in var_fields`).
+
+        `var_window` (Wave B PR-B4, #304) is the `(lut, lut_dtype, opt)` bundle
+        `StreamingDataset.with_seqs("variant-windows", opt)` cached -- `None` (the
+        default) disables `next_batch_variant_windows` exactly like every other
+        trailing no-op default above. When set, `_win_mode_kwargs` translates it into
+        the engine constructor's `win_ref_mode`/`win_alt_mode`/`win_flank_len`/
+        `win_token_lut_{u8,i32}` keyword arguments.
         """
         from ..genvarloader import Svar1StreamEngine
 
@@ -1946,6 +2119,7 @@ class _Svar1Backend:
             call_field_i32=call_field_i32,
             call_field_i16_names=call_field_i16_names,
             call_field_i16=call_field_i16,
+            **_win_mode_kwargs(var_window),
         )
 
     def read_window(
@@ -2452,6 +2626,7 @@ class _VcfBackend:
         min_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
         max_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
         var_fields: "list[str] | None" = None,
+        var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -2485,6 +2660,10 @@ class _VcfBackend:
         engine constructor's trailing `info_fields`/`want_ref` parameters, which the
         Rust `VcfWindowFiller` stages as additional `FieldSpec`s alongside `AF`
         (`vcf.rs`).
+
+        `var_window` (Wave B PR-B4, #304): see `_Svar1Backend.build_engine`'s
+        matching parameter -- same `(lut, lut_dtype, opt)` bundle, same
+        `_win_mode_kwargs` translation into `win_*` keyword arguments.
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -2539,6 +2718,7 @@ class _VcfBackend:
             max_af,
             info_fields=info_fields,
             want_ref=want_ref,
+            **_win_mode_kwargs(var_window),
         )
 
 
@@ -2636,6 +2816,7 @@ class _PgenBackend:
         min_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
         max_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
         var_fields: "list[str] | None" = None,
+        var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -2660,6 +2841,10 @@ class _PgenBackend:
         var_fields`, default `["alt", "ilen", "start"]` when `None`) -- PGEN has no
         INFO path, so `available_var_fields` never offers anything beyond `ref` and
         no `info_fields` are forwarded here.
+
+        `var_window` (Wave B PR-B4, #304): see `_Svar1Backend.build_engine`'s
+        matching parameter -- same `(lut, lut_dtype, opt)` bundle, same
+        `_win_mode_kwargs` translation into `win_*` keyword arguments.
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -2711,4 +2896,5 @@ class _PgenBackend:
             min_af,
             max_af,
             want_ref=want_ref,
+            **_win_mode_kwargs(var_window),
         )
