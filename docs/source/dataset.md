@@ -303,22 +303,29 @@ schema, since there is no written artifact:
 
 | Backend | `available_var_fields` |
 |---|---|
-| SVAR1 (`.svar`) | `alt`, `ilen`, `start`, every numeric index column except `POS`/`ILEN` (e.g. `AF`), `ref` |
+| SVAR1 (`.svar`) | `alt`, `ilen`, `start`, every numeric index column except `POS`/`ILEN` (e.g. `AF`), `ref`, `dosage` (iff the store has a cached `dosages.npy`), every genoray custom Number=G FORMAT column the store carries |
 | VCF/BCF | `alt`, `ilen`, `start`, every numeric INFO field the live header declares, `ref` |
 | PGEN | `alt`, `ilen`, `start`, `ref` (a PGEN record stream has no INFO path) |
+
+**`dosage` and custom per-call FORMAT fields are SVAR1-only**, on both the streaming and written
+paths: `gvl.write()` never persists per-call dosage for a VCF/PGEN source, so a *written* dataset
+built from one can't serve `dosage` either — streaming declines it with the same `ValueError`
+(`"not available"`) a VCF/PGEN-backed `Dataset.with_settings(var_fields=[..., "dosage"])` raises.
 
 Field names that collide with the underlying FFI dict's fixed keys (`alt`, `alt_offsets`, `start`,
 `ilen`, `offsets`, `ref`, `ref_offsets`) are never advertised — a same-named source column simply
 cannot be requested via `var_fields`.
 
 `available_var_fields` is not always fully **servable**: `StreamingDataset.servable_var_fields`
-narrows it to fields the streaming engine can actually gather today. On SVAR1, an index column
-like `AF` is advertised (it is a real on-disk numeric column) but not yet servable — the Rust
-engine doesn't gather arbitrary SVAR1 index columns yet (deferred to PR-B3b); requesting it via
-`with_settings(var_fields=[..., "AF"])` raises `NotImplementedError` immediately, rather than
-failing later at iterate time. On VCF/BCF, every advertised field is servable (`servable_var_fields
-== available_var_fields`) — the Rust `VcfWindowFiller` wires every declared numeric INFO field
-through directly.
+narrows it to fields the streaming engine can actually gather today. On SVAR1, a numeric INDEX
+column like `AF` is advertised (it is a real on-disk numeric column) but not yet servable — the
+Rust engine doesn't gather arbitrary SVAR1 index columns yet (deferred follow-up work); requesting
+it via `with_settings(var_fields=[..., "AF"])` raises `NotImplementedError` immediately, rather
+than failing later at iterate time. `dosage` and custom per-call FORMAT fields ARE servable (Wave B
+PR-B3b) — they live parallel to the store's sparse genotype CSR, so the Rust engine gathers them
+the same way it gathers genotypes, by CSR position rather than variant id. On VCF/BCF, every
+advertised field is servable (`servable_var_fields == available_var_fields`) — the Rust
+`VcfWindowFiller` wires every declared numeric INFO field through directly.
 
 `StreamingDataset.active_var_fields` reports the currently-configured list — the requested
 `var_fields`, or the builtin default `["alt", "ilen", "start"]` when never set (reproduced

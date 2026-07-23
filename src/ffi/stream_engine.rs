@@ -60,7 +60,20 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
+use crate::record_stream::transpose::InfoVals;
 use crate::svar1::store::Svar1Store;
+
+/// Storage for a per-call FORMAT/dosage column (Wave B PR-B3b, #304), crossed ONCE at
+/// engine construction (`Svar1StreamEngine::new`, a full copy via
+/// `PyReadonlyArray1::to_owned()` -- see that constructor's doc comment for the
+/// scale caveat). Distinct from [`InfoVals`], which holds the small per-BATCH OUTPUT
+/// buffer `generate_variants` assembles (one value per kept row); this holds the FULL
+/// per-call column, indexed by CSR POSITION -- the same `variant_idxs.npy` position
+/// space `Svar1Store::geno_v_idxs()` itself uses -- not by global variant id.
+enum CallVals {
+    F32(Array1<f32>),
+    I32(Array1<i32>),
+}
 
 /// Per-contig data the engine needs to serve `read_window` and generation for jobs on
 /// that contig. `contig_start`/`n_local`/`max_v_len` are registered on the engine's own
@@ -164,6 +177,14 @@ struct Svar1Backend {
     /// PR-B3a, #304); `false` (default) preserves pre-Task-3 behavior exactly (no
     /// extra allocation/work).
     want_ref: bool,
+    /// Wave B PR-B3b (#304): per-call FORMAT/dosage columns REQUESTED via
+    /// `var_fields` (`_Svar1Backend.build_engine` filters `self._call_fields` down to
+    /// the active request before crossing), parallel to the store's `variant_idxs`
+    /// CSR -- indexed by CSR POSITION `o`, NOT by variant id (the opposite of
+    /// `v_starts`/`ilens`/etc. above). Empty (default) costs no extra allocation/work
+    /// in `generate_variants`, preserving the byte-unchanged default `var_fields`
+    /// path exactly.
+    call_fields: Vec<(String, CallVals)>,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -306,6 +327,23 @@ impl EngineBackend for Svar1Backend {
         let mut kept: Vec<i32> = Vec::new();
         let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
         row_offsets.push(0);
+        // Wave B PR-B3b (#304): one accumulator per REQUESTED per-call field
+        // (`self.call_fields`), empty (default `var_fields`) costs nothing extra.
+        // Pushed in lockstep with `kept` inside the SAME keep branch below, so each
+        // buffer ends up the same length as `kept`/`start`/`ilen` -- but gathered by
+        // CSR POSITION `o` (the loop variable indexing `geno`/`self.call_fields`'
+        // arrays), NOT by the variant id `gvi` those `v_starts`/`ilens` lookups use.
+        // A per-call field can legitimately differ across two calls of the SAME
+        // variant (e.g. per-sample dosage), so indexing it by `gvi` instead of `o`
+        // would silently collapse those distinct values -- wrong output, no error.
+        let mut call_bufs: Vec<InfoVals> = self
+            .call_fields
+            .iter()
+            .map(|(_, v)| match v {
+                CallVals::F32(_) => InfoVals::F32(Vec::new()),
+                CallVals::I32(_) => InfoVals::I32(Vec::new()),
+            })
+            .collect();
         for r in 0..(n_rows * ploidy) {
             let bi = row_lo + r / ploidy;
             let ri = bi / n_samples;
@@ -329,10 +367,25 @@ impl EngineBackend for Svar1Backend {
                 };
                 if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
                     kept.push(gvi);
+                    for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
+                        match (vals, &mut call_bufs[fi]) {
+                            (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
+                            (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
+                            _ => unreachable!(
+                                "call_fields/call_bufs dtype pairing is fixed at construction"
+                            ),
+                        }
+                    }
                 }
             }
             row_offsets.push(kept.len() as i64);
         }
+        let info_out: Vec<(String, InfoVals)> = self
+            .call_fields
+            .iter()
+            .zip(call_bufs)
+            .map(|((name, _), buf)| (name.clone(), buf))
+            .collect();
 
         let v_idxs = Array1::from_vec(kept);
         // PR-B3a: pass the GLOBAL REF table through iff requested -- `None` (the
@@ -358,10 +411,11 @@ impl EngineBackend for Svar1Backend {
             start,
             ilen,
             row_offsets: Array1::from_vec(row_offsets),
-            // PR-B3a: SVAR1 has no window INFO columns (VCF/PGEN-only per-window INFO;
-            // SVAR1's per-call FORMAT/dosage fields are separate, deferred to Wave B
-            // PR-B3b).
-            info_out: Vec::new(),
+            // Wave B PR-B3b (#304): SVAR1 still has no window INDEX/INFO columns
+            // (VCF/PGEN-only per-window INFO; that forwarding is still deferred, see
+            // the `_info` comment in `_Svar1Backend.__init__`) -- but per-call
+            // FORMAT/dosage fields now ride this same channel, gathered above.
+            info_out,
             ref_data,
             ref_seq_offsets,
         })
@@ -400,6 +454,7 @@ impl Svar1StreamEngine {
         min_af: Option<f32>,
         max_af: Option<f32>,
         want_ref: bool,
+        call_fields: Vec<(String, CallVals)>,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -424,6 +479,7 @@ impl Svar1StreamEngine {
             ref_alleles,
             ref_offsets,
             want_ref,
+            call_fields,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -470,6 +526,8 @@ impl Svar1StreamEngine {
         v_starts, ilens, alt_alleles, alt_offsets, ref_alleles, ref_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
         variants=false, afs=None, min_af=None, max_af=None, want_ref=false,
+        call_field_f32_names=Vec::new(), call_field_f32=Vec::new(),
+        call_field_i32_names=Vec::new(), call_field_i32=Vec::new(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -511,8 +569,59 @@ impl Svar1StreamEngine {
         min_af: Option<f32>,
         max_af: Option<f32>,
         want_ref: bool,
+        // Wave B PR-B3b (#304): per-call FORMAT/dosage columns REQUESTED via
+        // `var_fields` (`_Svar1Backend.build_engine` filters, splits by dtype, and
+        // forwards only the active subset -- see that method's doc comment). Two
+        // parallel dtype-homogeneous name/array list pairs, since PyO3 has no
+        // ergonomic mixed-dtype numpy list type. Each array must have exactly one
+        // entry per `variant_idxs.npy` entry (validated below) -- it is indexed by
+        // CSR position in `Svar1Backend::generate_variants`, the SAME position space
+        // `store.geno_v_idxs()` uses.
+        call_field_f32_names: Vec<String>,
+        call_field_f32: Vec<PyReadonlyArray1<f32>>,
+        call_field_i32_names: Vec<String>,
+        call_field_i32: Vec<PyReadonlyArray1<i32>>,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
+
+        if call_field_f32_names.len() != call_field_f32.len()
+            || call_field_i32_names.len() != call_field_i32.len()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Svar1StreamEngine: call_field_{f32,i32}_names must match \
+                 call_field_{f32,i32} in length",
+            ));
+        }
+        let n_calls = store.geno_v_idxs().len();
+        for (name, arr) in call_field_f32_names.iter().zip(&call_field_f32) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
+        for (name, arr) in call_field_i32_names.iter().zip(&call_field_i32) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
+        let call_fields: Vec<(String, CallVals)> = call_field_f32_names
+            .into_iter()
+            .zip(call_field_f32)
+            .map(|(name, a)| (name, CallVals::F32(a.as_array().to_owned())))
+            .chain(
+                call_field_i32_names
+                    .into_iter()
+                    .zip(call_field_i32)
+                    .map(|(name, a)| (name, CallVals::I32(a.as_array().to_owned()))),
+            )
+            .collect();
 
         let n_contigs = contig_names.len();
         if [
@@ -613,6 +722,7 @@ impl Svar1StreamEngine {
             // Wave B PR-B3a (#304): forwarded from the Python `var_fields` surface
             // (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`).
             want_ref,
+            call_fields,
         ))
     }
 
@@ -698,10 +808,10 @@ impl Svar1StreamEngine {
                 }
                 for (name, vals) in batch.info_out {
                     match vals {
-                        crate::record_stream::transpose::InfoVals::I32(v) => {
+                        InfoVals::I32(v) => {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
-                        crate::record_stream::transpose::InfoVals::F32(v) => {
+                        InfoVals::F32(v) => {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
                     }
@@ -840,6 +950,7 @@ mod tests {
             None,  // min_af
             None,  // max_af
             false, // want_ref
+            Vec::new(), // call_fields
         )
     }
 
@@ -999,6 +1110,7 @@ mod tests {
             None,  // min_af
             None,  // max_af
             false, // want_ref
+            Vec::new(), // call_fields
         );
 
         match engine.next_batch_core() {
@@ -1151,6 +1263,7 @@ mod tests {
             None,  // min_af
             None,  // max_af
             false, // want_ref
+            Vec::new(), // call_fields
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1281,6 +1394,7 @@ mod tests {
             None,  // min_af
             None,  // max_af
             false, // want_ref
+            Vec::new(), // call_fields
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1356,6 +1470,7 @@ mod tests {
             Some(0.1f32),
             None,
             false, // want_ref
+            Vec::new(), // call_fields
         );
         let batch_a = engine_a
             .next_batch_variants_core()
@@ -1403,6 +1518,7 @@ mod tests {
             Some(0.1f32),
             None,
             false, // want_ref
+            Vec::new(), // call_fields
         );
         let batch_b = engine_b
             .next_batch_variants_core()

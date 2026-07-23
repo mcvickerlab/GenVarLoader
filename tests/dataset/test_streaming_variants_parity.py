@@ -19,6 +19,7 @@ import numpy as np
 import polars as pl
 import pytest
 from genoray import SparseVar
+from genoray._types import DOSAGE_TYPE, V_IDX_TYPE
 
 import genvarloader as gvl
 
@@ -620,3 +621,97 @@ def test_streaming_vcf_available_var_fields_superset_of_written(af_vcf_case):
     )
     assert "AF" in written_set and "AF" in streaming_set
     assert "DP" in streaming_set and "DP" not in written_set
+
+
+# --- Wave B PR-B3b: SVAR1 per-call FORMAT/dosage var_fields parity (issue #304) ---
+
+
+def _build_svar1_dosage_case(
+    streaming_case, tmp_path: Path
+) -> tuple[pl.DataFrame, Path, str, "gvl.Dataset"]:
+    """SVAR1 store with cached AF (so the AF-filtered parametrization of
+    `test_streaming_svar1_dosage_matches_written` actually compacts something --
+    same store `_build_af_cached_svar1_case` builds) PLUS a synthetic per-call
+    `dosages.npy`.
+
+    None of the shared `streaming_case` fixtures declare a VCF dosage FORMAT
+    field, so `SparseVar.from_vcf(with_dosages=True)` isn't an option here --
+    this instead synthesizes `dosages.npy` directly on a copy of the store, the
+    same trick `tests/integration/dataset/test_issue_191_var_fields.py`'s
+    `svar_with_dosages_ds` fixture uses. `dosages.npy` is parallel to
+    `variant_idxs.npy` (one float32 value per genotype CALL, NOT per variant);
+    `arange`-valued so every CSR position gets a DISTINCT dosage -- this is what
+    lets the test actually prove CSR-POSITION (not variant-id) indexing: a
+    variant carried by more than one sample/hap gets a DIFFERENT dosage at each
+    occurrence, so an indexing bug that gathered by variant id instead of CSR
+    position would produce the wrong value, not just the right value in the
+    wrong place.
+    """
+    regions, reference, variants, _ = streaming_case("svar1")
+    svar = tmp_path / "dosage.svar"
+    shutil.copytree(variants, svar)
+    SparseVar(str(svar)).cache_afs()
+
+    n_calls = (svar / "variant_idxs.npy").stat().st_size // np.dtype(
+        V_IDX_TYPE
+    ).itemsize
+    mm = np.memmap(svar / "dosages.npy", dtype=DOSAGE_TYPE, mode="w+", shape=(n_calls,))
+    mm[:] = np.arange(n_calls, dtype=DOSAGE_TYPE)
+    mm.flush()
+    del mm
+
+    out = tmp_path / "ds"
+    gvl.write(out, regions, variants=str(svar), overwrite=True)
+    written = gvl.Dataset.open(
+        out, reference=reference, var_fields=["alt", "ilen", "start", "AF"]
+    )
+    return regions, reference, str(svar), written
+
+
+@pytest.mark.parametrize("min_af,max_af", [(None, None), (0.2, 0.8)])
+def test_streaming_svar1_dosage_matches_written(
+    streaming_case, tmp_path, min_af, max_af
+):
+    """SVAR1 `dosage` rides along byte-identically, and is compacted by the SAME
+    AF/region keep mask as `start`/`ilen` (hence the AF-filtered parametrization).
+
+    `dosage` is stored parallel to `variant_idxs.npy` on the SAME hap-major CSR
+    offsets -- i.e. indexed by CSR POSITION, not by variant id (the opposite of
+    Task 5/PR-B3a's INFO columns, which ARE indexed by variant id). See
+    `_build_svar1_dosage_case` for how the fixture's `arange`-valued dosages make
+    this test actually discriminate the two indexing schemes rather than merely
+    exercise the code path.
+    """
+    regions, reference, svar, written = _build_svar1_dosage_case(
+        streaming_case, tmp_path
+    )
+    fields = ["alt", "ilen", "start", "dosage"]
+    ds = written.with_settings(
+        var_fields=fields, min_af=min_af, max_af=max_af
+    ).with_seqs("variants")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=svar)
+        .with_settings(var_fields=fields, min_af=min_af, max_af=max_af)
+        .with_seqs("variants")
+    )
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            expected = ds[int(r_idx[k]), int(s_idx[k])]
+            for h in range(sds.ploidy):
+                got = np.asarray(data[k].dosage[h])
+                np.testing.assert_array_equal(got, np.asarray(expected.dosage[h]))
+                total += np.atleast_1d(got).shape[0]
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+@pytest.mark.parametrize("backend", ["vcf", "pgen"])
+def test_dosage_var_field_rejected_on_record_backends(streaming_case, backend):
+    """`gvl.write` never persists dosage for VCF/PGEN sources, so a written dataset
+    from the same source cannot serve it either -- streaming declines symmetrically.
+    """
+    regions, reference, variants, _written = streaming_case(backend)
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert "dosage" not in sds.available_var_fields
+    with pytest.raises(ValueError, match="not available"):
+        sds.with_settings(var_fields=["alt", "start", "dosage"])

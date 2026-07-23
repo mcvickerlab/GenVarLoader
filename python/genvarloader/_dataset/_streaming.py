@@ -1447,9 +1447,14 @@ class _Svar1Backend:
         bed: pl.DataFrame | str | Path,
     ) -> None:
         from genoray import SparseVar
+        from genoray._types import DOSAGE_TYPE, V_IDX_TYPE
 
         from ..genvarloader import Svar1Store
-        from ._haps import _canonicalize_variant_table, _variant_arrays_from_table
+        from ._haps import (
+            _canonicalize_variant_table,
+            _svar_format_fields,
+            _variant_arrays_from_table,
+        )
         from ._write import _reject_unsupported_variants
         from ._reference import Reference
 
@@ -1546,13 +1551,14 @@ class _Svar1Backend:
         # `cache_afs()` has written a top-level `AF` column (genoray nests any other
         # declared INFO under a single `INFO` Struct column, which is not
         # `is_numeric()`). `ref` is always available -- the store is rejected above
-        # if it has no REF column. NOTE: the current `Svar1StreamEngine` only wires
-        # `ref` through `next_batch_variants` (its `generate_variants` hardcodes
-        # `info_out: Vec::new()` -- forwarding arbitrary numeric index columns like a
-        # cached `AF` is deferred follow-up work); the packing loop in
+        # if it has no REF column. NOTE: forwarding an arbitrary numeric INDEX column
+        # like a cached `AF` through `next_batch_variants` is still deferred follow-up
+        # work (unlike the per-call FORMAT/dosage fields just below, PR-B3b, which
+        # travel the SAME `info_out` channel but ARE wired); the packing loop in
         # `_iter_batches` raises a clear `NotImplementedError` rather than a bare
-        # `KeyError` if such a field is ever actually requested. Reuses `_raw_schema`
-        # (read once above, for `_has_cached_af`) instead of re-scanning the file.
+        # `KeyError` if such an INDEX column is ever actually requested. Reuses
+        # `_raw_schema` (read once above, for `_has_cached_af`) instead of re-scanning
+        # the file.
         _info = [
             k
             for k, v in _raw_schema.items()
@@ -1562,11 +1568,58 @@ class _Svar1Backend:
         ]
         self.available_var_fields = [*_DEFAULT_VAR_FIELDS, *_info, "ref"]
         # Important 1 (Wave B PR-B3a review): servability is a static per-backend fact,
-        # separate from `available_var_fields` above -- `Svar1StreamEngine::generate_variants`
-        # only ever gathers `ref` beyond the three defaults (see the comment above); any
-        # numeric index column in `_info` (e.g. a cached `AF`) is advertised but not yet
-        # servable. `with_settings` fails fast on the gap instead of the packing loop.
+        # separate from `available_var_fields` above -- any numeric INDEX column in
+        # `_info` (e.g. a cached `AF`) is advertised but not yet servable (see the NOTE
+        # above); `with_settings` fails fast on the gap instead of the packing loop.
         self.servable_var_fields = [*_DEFAULT_VAR_FIELDS, "ref"]
+
+        # Wave B PR-B3b (#304): per-call FORMAT fields (dosage + any genoray custom
+        # Number=G FORMAT column) live PARALLEL to `variant_idxs.npy` on the SAME
+        # hap-major CSR offsets -- i.e. indexed by CSR POSITION, not by variant id (the
+        # opposite of the `_info` numeric INDEX columns above, which are indexed by
+        # variant id). Each is therefore a plain memmap the Rust walk can index with
+        # the SAME `o` it already uses to read `geno_v_idxs()[o]` -- no new search, no
+        # new offsets. Field discovery reuses the written path's helper verbatim
+        # (`_svar_format_fields`); reserved names are excluded for the same FFI-dict-
+        # collision reason `_info` excludes them above (a custom FORMAT field named
+        # e.g. "start" must not be requestable -- it would shadow the builtin).
+        # `dosage`/custom-fmt fields ARE wired through `next_batch_variants`'s
+        # `info_out` (unlike the `_info` INDEX columns above), so both
+        # `available_var_fields` and `servable_var_fields` gain them here.
+        self._call_fields: dict[str, np.memmap] = {}
+        _dosage_path = Path(svar_path) / "dosages.npy"
+        if _dosage_path.exists():
+            self._call_fields["dosage"] = np.memmap(
+                _dosage_path, dtype=DOSAGE_TYPE, mode="r"
+            )
+        for _name, _dt in _svar_format_fields(Path(svar_path)).items():
+            if _name in _RESERVED_VAR_FIELD_NAMES or _name in self._call_fields:
+                continue
+            self._call_fields[_name] = np.memmap(
+                Path(svar_path) / f"{_name}.npy", dtype=_dt, mode="r"
+            )
+        # Guard against a stale/corrupt field file silently misaligning with the
+        # store's CSR (issue #304 review): every per-call field must have exactly one
+        # entry per `variant_idxs.npy` entry, or indexing it by CSR position `o` in the
+        # Rust walk would silently read garbage/out-of-range values instead of raising.
+        _n_calls = (Path(svar_path) / "variant_idxs.npy").stat().st_size // np.dtype(
+            V_IDX_TYPE
+        ).itemsize
+        for _name, _arr in self._call_fields.items():
+            if _arr.shape[0] != _n_calls:
+                raise ValueError(
+                    f"SVAR1 per-call field {_name!r} at {svar_path} has "
+                    f"{_arr.shape[0]} entries but the store's variant_idxs CSR has "
+                    f"{_n_calls}; the field file is stale or corrupt."
+                )
+        self.available_var_fields = [
+            *self.available_var_fields,
+            *[f for f in self._call_fields if f not in self.available_var_fields],
+        ]
+        self.servable_var_fields = [
+            *self.servable_var_fields,
+            *[f for f in self._call_fields if f not in self.servable_var_fields],
+        ]
 
         self._svar_path = str(svar_path)
         self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
@@ -1701,16 +1754,49 @@ class _Svar1Backend:
         `want_ref = "ref" in var_fields` (default `["alt", "ilen", "start"]` when
         `None`) forwards to the engine constructor's trailing `want_ref` parameter,
         which gates whether `generate_variants` gathers `ref_data`/`ref_seq_offsets`
-        (`stream_engine.rs`). Any other requested field (a numeric index column) is
-        NOT forwarded here -- `Svar1Backend::generate_variants` has no general
-        INFO/index-column gather yet (`info_out` is unconditionally empty); such a
-        field is deferred follow-up work, and the caller (`_iter_batches`) raises a
-        clear error rather than silently omitting it.
+        (`stream_engine.rs`). A numeric INDEX column (e.g. a cached `AF`) is NOT
+        forwarded here -- `Svar1Backend::generate_variants` has no general
+        INFO/index-column gather yet; such a field is deferred follow-up work, and
+        the caller (`_iter_batches`) raises a clear error rather than silently
+        omitting it.
+
+        `var_fields` also selects which per-call FORMAT fields (`dosage` and any
+        genoray custom Number=G FORMAT column, `self._call_fields`) are forwarded
+        (Wave B PR-B3b, #304): only the REQUESTED ones cross into Rust, split by
+        dtype into the constructor's `call_field_{f32,i32}[_names]` parameters --
+        an unrequested field costs no extra allocation/work, matching the `want_ref`/
+        `afs=None` no-op-fast-path convention above. Each is a full copy into Rust
+        residency (`PyReadonlyArray1::to_owned()`, the same pattern already used for
+        `v_starts`/`ilens`/`alt_alleles`), unlike `variant_idxs.npy` itself (which
+        stays a zero-copy mmap inside `Svar1Store`) -- per-call fields are CSR-scale
+        (one entry per genotype call, not per variant), so this is a real cost at
+        whole-cohort scale; a follow-up could open them as their own Rust-side mmap
+        instead, mirroring `Svar1Store`'s `variant_idxs.npy` handling.
         """
         from ..genvarloader import Svar1StreamEngine
 
         _active_fields = _normalize_var_fields(var_fields)
         want_ref = "ref" in _active_fields
+        # Wave B PR-B3b (#304): only cross the per-call fields actually requested --
+        # `self._call_fields` may hold every discovered field (dosage + every custom
+        # FORMAT column), but forwarding one the caller never asked for would be
+        # wasted allocation/work for no benefit. Split by dtype (kind) since the
+        # engine's constructor takes two dtype-homogeneous parallel lists, not one
+        # heterogeneous one -- PyO3 has no ergonomic mixed-dtype numpy list type.
+        call_field_f32_names: list[str] = []
+        call_field_f32: list[NDArray[np.float32]] = []
+        call_field_i32_names: list[str] = []
+        call_field_i32: list[NDArray[np.int32]] = []
+        for _name in _active_fields:
+            _arr = self._call_fields.get(_name)
+            if _arr is None:
+                continue
+            if np.issubdtype(_arr.dtype, np.floating):
+                call_field_f32_names.append(_name)
+                call_field_f32.append(np.ascontiguousarray(_arr, np.float32))
+            else:
+                call_field_i32_names.append(_name)
+                call_field_i32.append(np.ascontiguousarray(_arr, np.int32))
 
         contig_names = list(self._contigs)
         contig_starts: list[int] = []
@@ -1783,6 +1869,10 @@ class _Svar1Backend:
             min_af=min_af,
             max_af=max_af,
             want_ref=want_ref,
+            call_field_f32_names=call_field_f32_names,
+            call_field_f32=call_field_f32,
+            call_field_i32_names=call_field_i32_names,
+            call_field_i32=call_field_i32,
         )
 
     def read_window(

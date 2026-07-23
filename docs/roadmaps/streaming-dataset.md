@@ -550,9 +550,9 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
   streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
   byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
-  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**) and
-  non-default `var_fields` (**PR-B3a, done — see below**) are wired; per-call FORMAT fields
-  (PR-B3b) and `"variant-windows"` (PR-B4) remain. Plan:
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**),
+  non-default `var_fields` (**PR-B3a, done — see below**), and SVAR1 per-call FORMAT/dosage
+  `var_fields` (**PR-B3b, done — see below**) are wired; `"variant-windows"` (PR-B4) remains. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -619,8 +619,8 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
   `servable_var_fields` narrows `available_var_fields` to what the engine can actually gather
   today — SVAR1 index columns like `AF` are advertised but not yet servable (requesting one
-  raises `NotImplementedError` at `with_settings` time, deferred to **PR-B3b**, per-call FORMAT
-  fields); VCF/BCF and PGEN are fully servable. Byte-identical parity gated against the written
+  raises `NotImplementedError` at `with_settings` time, still deferred follow-up work); VCF/BCF
+  and PGEN are fully servable. Byte-identical parity gated against the written
   oracle on `ref` (all three backends) and on VCF INFO fields (`AF`). **Measured, permanent
   divergence (not a bug):** for a VCF/BCF source, `written.available_var_fields ⊊
   streaming.available_var_fields` — `gvl.write()` only ever persists one numeric INFO column
@@ -633,6 +633,34 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `docs/source/faq.md`, `skills/genvarloader/SKILL.md`. Design:
   `docs/superpowers/specs/2026-07-22-streaming-variants-wave-b-b3-b4-design.md`; plan:
   `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md`. Branch:
+  `spec/streaming-waveb-b3b4`.
+- ✅ **Variants-output surface, Wave B PR-B3b (SVAR1 per-call FORMAT/dosage `var_fields`) —
+  issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Extends PR-B3a's
+  `var_fields` surface with the remaining field class: per-call FORMAT fields (`dosage` + any
+  genoray custom Number=G FORMAT column), **SVAR1-only** — VCF/PGEN decline them symmetrically
+  with the written path (`gvl.write()` never persists per-call dosage for those sources).
+  `_Svar1Backend` discovers `dosage`/custom-fmt fields the same way the written path's
+  `_svar_format_fields` helper does, extends both `available_var_fields` AND
+  `servable_var_fields` (unlike PR-B3a's numeric INDEX columns, these ARE servable), and only
+  crosses the REQUESTED subset into the Rust engine (split by dtype into `CallVals::{F32,I32}`).
+  **Key correctness point:** per-call fields are stored parallel to `variant_idxs.npy` on the
+  SAME hap-major CSR — indexed by CSR POSITION, not by variant id (the opposite of PR-B3a's INFO
+  columns) — `Svar1Backend::generate_variants` gathers them inside the SAME keep branch that
+  pushes `kept.push(gvi)`, using the loop's CSR-position variable `o`, and rides the existing
+  `VariantsBatch.info_out` channel (no new FFI). Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_svar1_dosage_matches_written`
+  (parametrized over AF filtering, proving the per-call column is compacted by the SAME
+  AF/region keep mask as `start`/`ilen`, with `arange`-valued synthetic dosages that make a
+  CSR-position-vs-variant-id indexing bug fail loudly) and
+  `::test_dosage_var_field_rejected_on_record_backends` (VCF/PGEN). **Known scale caveat:**
+  per-call fields cross into Rust as a full `PyReadonlyArray1::to_owned()` copy (the same
+  pattern already used for `v_starts`/`ilens`/`alt_alleles`), but unlike those (variant-scale),
+  per-call fields are CSR-scale (one entry per genotype call) — the same order of magnitude as
+  `variant_idxs.npy` itself, which stays a zero-copy mmap inside `Svar1Store`. A whole-cohort
+  `dosages.npy` could be large; a follow-up could open per-call fields as their own Rust-side
+  mmap instead. Not a blocker for this task (correctness-first, flagged for follow-up). Docs
+  updated: `docs/source/dataset.md`, `skills/genvarloader/SKILL.md`. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 7). Branch:
   `spec/streaming-waveb-b3b4`.
 
 ## Sequencing
