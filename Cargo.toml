@@ -23,6 +23,16 @@ seqpro-core = "0.1"
 # genoray crates are pulled straight from GitHub (no crates.io publish). Cargo finds
 # each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
 # to pull newer genoray code; both crates must share the same rev (one clone, one repo).
+#
+# LIBDEFLATE INVARIANT (Wave B PR-B2, #319): the streaming VCF/BCF INFO/AF read rides
+# genoray's htslib reader, which must stay built with the `libdeflate` feature for
+# performance. genoray's own Cargo.toml enables `rust-htslib { features = ["libdeflate"] }`,
+# so the dependency chain is libdeflate-sys -> hts-sys -> rust-htslib -> genoray. If you
+# bump the `rev` below, verify libdeflate is still linked:
+#   pixi run -e dev cargo tree -i libdeflate-sys
+# expected: libdeflate-sys ... └── hts-sys ... └── rust-htslib ... └── genoray (this rev).
+# An empty result means genoray dropped the feature and the htslib bgzf path regressed to
+# zlib — do NOT land such a bump without restoring the feature upstream.
 svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "73d25cbb848168470adef9c4edd571f0a35f4204" }
 genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "73d25cbb848168470adef9c4edd571f0a35f4204", package = "genoray", default-features = false, features = ["conversion"] }
 
