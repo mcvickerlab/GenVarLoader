@@ -159,9 +159,10 @@ struct Svar1Backend {
     ref_alleles: Array1<u8>,
     ref_offsets: Array1<i64>,
     /// When `true`, `generate_variants` passes `Some((ref_alleles, ref_offsets))` to
-    /// `assemble_variants_window`. No Python-facing `var_fields`/`ref` surface requests
-    /// this yet (a later task wires that); `false` (default) preserves pre-Task-3
-    /// behavior exactly (no extra allocation/work).
+    /// `assemble_variants_window`. Set from the Python-facing `var_fields` surface
+    /// (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`, Wave B
+    /// PR-B3a, #304); `false` (default) preserves pre-Task-3 behavior exactly (no
+    /// extra allocation/work).
     want_ref: bool,
 }
 
