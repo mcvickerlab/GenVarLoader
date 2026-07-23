@@ -468,9 +468,16 @@ impl RecordStreamEngine {
         match source_kind {
             "vcf" => {
                 let sample_refs: Vec<&str> = sample_names.iter().map(String::as_str).collect();
-                let filler =
-                    VcfWindowFiller::new(&vcf_path, &sample_refs, ploidy, fasta_path.as_deref())
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                // want_af: false for now — Task 8 wires the real min_af/max_af-derived
+                // flag from Python (Wave B PR-B2, #319).
+                let filler = VcfWindowFiller::new(
+                    &vcf_path,
+                    &sample_refs,
+                    ploidy,
+                    fasta_path.as_deref(),
+                    /* want_af */ false,
+                )
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(Self::new_rs(
                     Box::new(filler),
                     contigs,
@@ -1032,6 +1039,7 @@ mod tests {
             geno_v_idxs: vec![0, 1], // hap 0 has both local variants
             geno_offsets: vec![0, 2], // one hap, CSR [0,2)
             global_v_idxs: vec![100, 101], // ignored for variants output
+            afs: Vec::new(), // no AF filter in this fixture
         };
         let backend = RecordBackend {
             filler: Box::new(StubFiller),

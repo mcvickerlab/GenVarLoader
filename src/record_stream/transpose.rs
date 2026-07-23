@@ -42,6 +42,11 @@ pub struct DecodedWindow {
     /// window-local annotation id through this array to its dataset-global id — see
     /// [`crate::ffi::remap_annot_local_to_global`].
     pub global_v_idxs: Vec<i32>,
+    /// Per-variant AF, parallel to `v_starts` (Wave B PR-B2, #319). Copied from
+    /// `chunk.info_staged[0]` (the single requested `AF` INFO field) when present,
+    /// else left EMPTY. `afs.is_empty()` ⇒ no AF filter (matches SVAR1's `afs: None`
+    /// no-op and the PGEN path, whose `info_staged` is always empty).
+    pub afs: Vec<f32>,
 }
 
 /// Fill `slot` (reusing its allocations) from a window's `DenseChunk`. The static table
@@ -66,6 +71,15 @@ pub fn fill_decoded_window(
         .extend(chunk.alt_offsets.iter().map(|&o| o as i64));
     slot.global_v_idxs.clear();
     slot.global_v_idxs.extend_from_slice(&chunk.global_idx);
+
+    // AF channel (Wave B PR-B2, #319): copy the single requested AF INFO column
+    // (info_staged[0], a per-variant Float) when present; leave empty otherwise
+    // (no AF requested, or PGEN which stages no INFO). gvl only ever requests the
+    // one AF field, so index 0 is AF.
+    slot.afs.clear();
+    if let Some(genoray_core::types::StagedColumn::Float(v)) = chunk.info_staged.first() {
+        slot.afs.extend_from_slice(v);
+    }
 
     // Word-level two-pass counting-sort transpose. Instead of calling get_bit once per
     // (v,s,p) cell (V*S*P reads), walk the packed `words` in flat v-major order — this is
@@ -128,7 +142,7 @@ pub fn fill_decoded_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genoray_core::types::BitGrid3;
+    use genoray_core::types::{BitGrid3, StagedColumn};
 
     fn dense_fixture() -> DenseChunk {
         // 2 variants, 2 samples, ploidy 2. BitGrid3 dims (V, S, P), C-order flat index
@@ -294,5 +308,51 @@ mod tests {
         fill_decoded_window(&chunk, n_samples, ploidy, &mut slot);
         assert_eq!(slot.geno_offsets, ref_offsets);
         assert_eq!(slot.geno_v_idxs, ref_idxs);
+    }
+
+    /// `info_staged[0]` (a `StagedColumn::Float`, the sole requested `AF` field)
+    /// is copied verbatim into `slot.afs`, parallel to `v_starts`.
+    #[test]
+    fn afs_copied_from_info_staged_float_column() {
+        let _guard = FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut chunk = dense_fixture();
+        chunk.info_staged = vec![StagedColumn::Float(vec![0.1f32, 0.9])];
+        let mut slot = DecodedWindow::default();
+        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        assert_eq!(slot.afs, vec![0.1f32, 0.9]);
+    }
+
+    /// No AF requested (or PGEN, which never stages INFO) ⇒ `info_staged` is
+    /// empty ⇒ `slot.afs` stays empty (the no-filter no-op contract).
+    #[test]
+    fn afs_empty_when_info_staged_empty() {
+        let _guard = FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let chunk = dense_fixture(); // info_staged: Vec::new()
+        let mut slot = DecodedWindow::default();
+        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        assert!(slot.afs.is_empty());
+    }
+
+    /// Recycling a slot across windows must not leak a stale AF vector: filling
+    /// once with a Float `info_staged`, then again with an empty one on the SAME
+    /// slot, must clear `afs` (catches a missing `.clear()`).
+    #[test]
+    fn afs_cleared_on_recycle_across_windows() {
+        let _guard = FILLER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut with_af = dense_fixture();
+        with_af.info_staged = vec![StagedColumn::Float(vec![0.1f32, 0.9])];
+        let mut slot = DecodedWindow::default();
+        fill_decoded_window(&with_af, 2, 2, &mut slot);
+        assert_eq!(slot.afs, vec![0.1f32, 0.9]);
+
+        let without_af = dense_fixture(); // info_staged: Vec::new()
+        fill_decoded_window(&without_af, 2, 2, &mut slot);
+        assert!(slot.afs.is_empty());
     }
 }
