@@ -60,7 +60,32 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
+use crate::record_stream::transpose::InfoVals;
 use crate::svar1::store::Svar1Store;
+
+/// Storage for a per-call FORMAT/dosage column (Wave B PR-B3b, #304), crossed ONCE at
+/// engine construction (`Svar1StreamEngine::new`, a full copy via
+/// `PyReadonlyArray1::to_owned()` -- see that constructor's doc comment for the
+/// scale caveat). Distinct from [`InfoVals`], which holds the small per-BATCH OUTPUT
+/// buffer `generate_variants` assembles (one value per kept row); this holds the FULL
+/// per-call column, indexed by CSR POSITION -- the same `variant_idxs.npy` position
+/// space `Svar1Store::geno_v_idxs()` itself uses -- not by global variant id.
+///
+/// `I16` (PR-B3b review, #304) exists so a custom FORMAT field registered with a
+/// native `int16` dtype (genoray's one real one, `mutcat`) can be forwarded WITHOUT
+/// the dtype-breaking upcast to `I32` a written-vs-streamed byte-identical-parity
+/// contract can't tolerate (an `int16` field must come back as `int16`, not a
+/// value-equal-but-differently-typed `int32`). `_Svar1Backend.__init__` only ever
+/// marks a field "servable" (see `servable_var_fields`) when its dtype is exactly
+/// one of `float32`/`int32`/`int16` -- anything else is advertised
+/// (`available_var_fields`) but rejected loudly by `with_settings` before a
+/// `CallVals` is ever built for it, so this enum does not need a fourth "give up"
+/// variant.
+enum CallVals {
+    F32(Array1<f32>),
+    I32(Array1<i32>),
+    I16(Array1<i16>),
+}
 
 /// Per-contig data the engine needs to serve `read_window` and generation for jobs on
 /// that contig. `contig_start`/`n_local`/`max_v_len` are registered on the engine's own
@@ -150,6 +175,147 @@ struct Svar1Backend {
     /// Inclusive upper AF bound (`af <= max_af` kept); `None` disables the upper bound.
     /// Only meaningful when `afs` is `Some`.
     max_af: Option<f32>,
+    /// Wave B PR-B3a (#304): GLOBAL per-variant REF allele byte table, indexed by the
+    /// same global variant id as `v_starts`/`ilens`/`alt_alleles`/`alt_offsets` --
+    /// same layout, same gather (`assemble_variants_window` reuses `gather_alleles`
+    /// for both). Always populated (`_Svar1Backend.__init__` reads it unconditionally
+    /// -- an SVAR1 store with no REF column fails construction there), but only
+    /// gathered into `VariantsBatch.ref_data`/`ref_seq_offsets` when `want_ref` is set.
+    ref_alleles: Array1<u8>,
+    ref_offsets: Array1<i64>,
+    /// When `true`, `generate_variants` passes `Some((ref_alleles, ref_offsets))` to
+    /// `assemble_variants_window`. Set from the Python-facing `var_fields` surface
+    /// (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`, Wave B
+    /// PR-B3a, #304); `false` (default) preserves pre-Task-3 behavior exactly (no
+    /// extra allocation/work).
+    want_ref: bool,
+    /// Wave B PR-B3b (#304): per-call FORMAT/dosage columns REQUESTED via
+    /// `var_fields` (`_Svar1Backend.build_engine` filters `self._call_fields` down to
+    /// the active request before crossing), parallel to the store's `variant_idxs`
+    /// CSR -- indexed by CSR POSITION `o`, NOT by variant id (the opposite of
+    /// `v_starts`/`ilens`/etc. above). Empty (default) costs no extra allocation/work
+    /// in `generate_variants`, preserving the byte-unchanged default `var_fields`
+    /// path exactly.
+    call_fields: Vec<(String, CallVals)>,
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration. `None` (the
+    /// default, and every pre-Task-8 construction site) means the backend was not built
+    /// for variant-windows output; [`Svar1Backend::generate_variant_windows`] bails in
+    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is
+    /// reachable from Python since Task 9: `Svar1StreamEngine::build`'s `#[new]`
+    /// constructor decodes the Python-facing `with_seqs("variant-windows")` surface
+    /// (`win_ref_mode`/`win_alt_mode`/`win_flank_len`/`win_token_lut_{u8,i32}`) via
+    /// `WindowModeConfig::from_python` and threads it through here.
+    win_mode: Option<crate::variants::WindowModeConfig>,
+}
+
+impl Svar1Backend {
+    /// The per-row CSR walk + region/AF keep shared by `generate_variants` and
+    /// `generate_variant_windows` (Wave B PR-B4, #304) — factored out of what was
+    /// previously `generate_variants`'s own inline loop so BOTH output modes select and
+    /// order GLOBAL variant ids IDENTICALLY by construction, rather than risking two
+    /// independent copies silently diverging. Same CSR/region mapping as `generate`
+    /// (`slot.o_starts`/`slot.o_stops` are already region-expanded — see
+    /// `generate_variants`'s doc comment point 1), same overlap-keep predicate ANDed with
+    /// the PR-B2 AF keep. Returns the kept GLOBAL variant ids (`v_idxs`, in walk order),
+    /// the CSR positions `o` each one was read from (`kept_o`, same order — needed by
+    /// `generate_variants`'s per-call FORMAT/dosage gather, which is keyed by CSR
+    /// position, not variant id), and `row_offsets` delimiting them per `(row, ploid)`
+    /// output row (length `(row_hi-row_lo)*ploidy + 1`).
+    fn kept_v_idxs(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> (Array1<i32>, Vec<usize>, Array1<i64>) {
+        let ploidy = self.store.ploidy();
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+        let geno = self.store.geno_v_idxs();
+
+        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy) — already
+        // region-expanded (see `generate_variants`'s doc comment point 1), same flat
+        // slice `generate` uses.
+        let o_lo = row_lo * ploidy;
+
+        let mut kept: Vec<i32> = Vec::new();
+        let mut kept_o: Vec<usize> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
+        row_offsets.push(0);
+        for r in 0..(n_rows * ploidy) {
+            let bi = row_lo + r / ploidy;
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let os = slot.o_starts[o_lo + r] as usize;
+            let oe = slot.o_stops[o_lo + r] as usize;
+            for o in os..oe {
+                let gvi = geno[o];
+                let v_start = self.v_starts[gvi as usize] as i64;
+                let v_ilen = self.ilens[gvi as usize] as i64;
+                let v_end = v_start - v_ilen.min(0) + 1;
+                // Wave B PR-B2: AND an AF keep-term onto the region-overlap keep.
+                // `afs=None` makes this a pure no-op (`af_keep` always `true`),
+                // preserving pre-PR-B2 parity exactly.
+                let af_keep = match &self.afs {
+                    Some(a) => {
+                        let af = a[gvi as usize];
+                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
+                    }
+                    None => true,
+                };
+                if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
+                    kept.push(gvi);
+                    kept_o.push(o);
+                }
+            }
+            row_offsets.push(kept.len() as i64);
+        }
+
+        (
+            Array1::from_vec(kept),
+            kept_o,
+            Array1::from_vec(row_offsets),
+        )
+    }
+
+    /// The per-call FORMAT/dosage gather shared by `generate_variants` and
+    /// `generate_variant_windows` (Wave B PR-B4 review, Important 1) -- factored out of
+    /// what was previously `generate_variants`'s own inline loop, exactly the same DRY
+    /// move `kept_v_idxs` already made for the selection walk, so BOTH output modes gather
+    /// per-call fields identically instead of risking a second, independently-wrong copy.
+    /// Indexed by CSR POSITION (`kept_o`, from `kept_v_idxs`), NOT by variant id -- a
+    /// per-call field can legitimately differ across two calls of the SAME variant (e.g.
+    /// per-sample dosage), so indexing by variant id instead would silently collapse
+    /// those distinct values into one (wrong output, no error, no crash).
+    fn gather_call_bufs(&self, kept_o: &[usize]) -> Vec<(String, InfoVals)> {
+        let mut call_bufs: Vec<InfoVals> = self
+            .call_fields
+            .iter()
+            .map(|(_, v)| match v {
+                CallVals::F32(_) => InfoVals::F32(Vec::new()),
+                CallVals::I32(_) => InfoVals::I32(Vec::new()),
+                CallVals::I16(_) => InfoVals::I16(Vec::new()),
+            })
+            .collect();
+        for &o in kept_o {
+            for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
+                match (vals, &mut call_bufs[fi]) {
+                    (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
+                    (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
+                    (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
+                    _ => {
+                        unreachable!("call_fields/call_bufs dtype pairing is fixed at construction")
+                    }
+                }
+            }
+        }
+        self.call_fields
+            .iter()
+            .zip(call_bufs)
+            .map(|((name, _), buf)| (name.clone(), buf))
+            .collect()
+    }
 }
 
 impl EngineBackend for Svar1Backend {
@@ -279,62 +445,149 @@ impl EngineBackend for Svar1Backend {
                  with variants=false"
             );
         }
-        let ploidy = self.store.ploidy();
-        let job = &self.jobs[job_idx];
-        let n_samples = job.s_hi - job.s_lo;
-        let n_rows = row_hi - row_lo;
-        let geno = self.store.geno_v_idxs();
+        let (v_idxs, kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
-        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy) — already
-        // region-expanded (see point 1 above), same flat slice `generate` uses.
-        let o_lo = row_lo * ploidy;
+        // Wave B PR-B3b (#304): per-call FORMAT/dosage columns, gathered by the SAME CSR
+        // positions `kept_v_idxs` kept (`kept_o`) via the shared `gather_call_bufs` helper.
+        let info_out = self.gather_call_bufs(&kept_o);
 
-        let mut kept: Vec<i32> = Vec::new();
-        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
-        row_offsets.push(0);
-        for r in 0..(n_rows * ploidy) {
-            let bi = row_lo + r / ploidy;
-            let ri = bi / n_samples;
-            let (r_s, r_e) = job.regions[ri];
-            let os = slot.o_starts[o_lo + r] as usize;
-            let oe = slot.o_stops[o_lo + r] as usize;
-            for o in os..oe {
-                let gvi = geno[o];
-                let v_start = self.v_starts[gvi as usize] as i64;
-                let v_ilen = self.ilens[gvi as usize] as i64;
-                let v_end = v_start - v_ilen.min(0) + 1;
-                // Wave B PR-B2: AND an AF keep-term onto the region-overlap keep.
-                // `afs=None` makes this a pure no-op (`af_keep` always `true`),
-                // preserving pre-PR-B2 parity exactly.
-                let af_keep = match &self.afs {
-                    Some(a) => {
-                        let af = a[gvi as usize];
-                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
-                    }
-                    None => true,
-                };
-                if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
-                    kept.push(gvi);
-                }
-            }
-            row_offsets.push(kept.len() as i64);
-        }
-
-        let v_idxs = Array1::from_vec(kept);
-        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
-            v_idxs.view(),
-            self.v_starts.view(),
-            self.ilens.view(),
-            self.alt_alleles.view(),
-            self.alt_offsets.view(),
-        );
+        // PR-B3a: pass the GLOBAL REF table through iff requested -- `None` (the
+        // default) costs no extra allocation/work, matching `RecordBackend`'s gate.
+        let ref_src = if self.want_ref {
+            Some((self.ref_alleles.view(), self.ref_offsets.view()))
+        } else {
+            None
+        };
+        let (alt_data, alt_seq_offsets, start, ilen, ref_data, ref_seq_offsets) =
+            crate::variants::assemble_variants_window(
+                v_idxs.view(),
+                self.v_starts.view(),
+                self.ilens.view(),
+                self.alt_alleles.view(),
+                self.alt_offsets.view(),
+                ref_src,
+            );
 
         Ok(crate::variants::VariantsBatch {
             alt_data,
             alt_seq_offsets,
             start,
             ilen,
-            row_offsets: Array1::from_vec(row_offsets),
+            row_offsets,
+            // Wave B PR-B3b (#304): SVAR1 still has no window INDEX/INFO columns
+            // (VCF/PGEN-only per-window INFO; that forwarding is still deferred, see
+            // the `_info` comment in `_Svar1Backend.__init__`) -- but per-call
+            // FORMAT/dosage fields now ride this same channel, gathered above.
+            info_out,
+            ref_data,
+            ref_seq_offsets,
+        })
+    }
+
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` counterpart of
+    /// `generate_variants` above. Reuses the SAME `kept_v_idxs` selection walk (so the two
+    /// output modes can never silently diverge on which variants -- or what order -- they
+    /// select), then feeds the GLOBAL static tables through
+    /// `crate::variants::windows::assemble_windows_mode` instead of
+    /// `assemble_variants_window`'s plain ALT/REF gather. `scalars` still carries
+    /// `start`/`ilen`/`row_offsets`/`info_out` for the identical kept `v_idxs`, but never
+    /// raw `ref_data`/`ref_seq_offsets` (variant-windows only exposes REF as a tokenized
+    /// buffer).
+    ///
+    /// **Review fix (Important 1, PR-B4 review): `info_out` is populated here too.** The
+    /// original implementation left it `Vec::new()` on the theory that variant-windows has
+    /// "no per-call-position slot" for per-call FORMAT/dosage fields to ride on -- that was
+    /// wrong: `scalars` shares the exact same per-kept-variant axis `start`/`ilen` already
+    /// use (the written path's `_FlatVariantWindows.fields` is documented as
+    /// `start`/`ilen`/`dosage`/`info`, `_flat_variants.py:277`), and `kept_v_idxs` already
+    /// returns the CSR positions (`kept_o`) needed to gather it -- the SAME gather
+    /// `generate_variants` performs, via the shared `gather_call_bufs` helper. Dropping it
+    /// here silently produced empty ride-along columns for SVAR1 while `RecordBackend`'s
+    /// `generate_variant_windows` (which gathers window INFO columns) returned real data --
+    /// a backend parity divergence on a surface contracted to be byte-identical to the
+    /// written path.
+    fn generate_variant_windows(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<crate::variants::VariantWindowsBatch> {
+        let win = self.win_mode.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Svar1StreamEngine.next_batch_variant_windows() called on an engine not \
+                 configured for variant-windows output"
+            )
+        })?;
+        let job = &self.jobs[job_idx];
+        let (v_idxs, kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
+
+        // ref_mode==Allele (bare allele) needs REF bytes -- SVAR1 already has a GLOBAL REF
+        // table (`self.ref_alleles`/`self.ref_offsets`, same layout `generate_variants`'s
+        // `want_ref` branch reuses), unlike `RecordBackend` which must slice the contig
+        // reference to build a window-local one. ref_mode==Window (flanked window) instead
+        // reads the whole contig reference directly via `windows::fetch_windows` below,
+        // no per-variant table needed.
+        let (ref_g, ref_o) = if win.ref_mode == crate::variants::WindowMode::Allele {
+            (Some(self.ref_alleles.view()), Some(self.ref_offsets.view()))
+        } else {
+            (None, None)
+        };
+
+        let n_v = v_idxs.len();
+        // Single-contig window by construction: every selected variant maps to the SAME
+        // per-contig reference below, so its "contig id" is always 0.
+        let v_contigs = Array1::<i32>::zeros(n_v);
+        let c = &self.contigs[job.contig_idx];
+        let reference = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
+        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
+
+        let tok_bufs = crate::variants::windows_tok_bufs(
+            v_idxs.view(),
+            row_offsets.view(),
+            win.ref_mode,
+            win.alt_mode,
+            self.alt_alleles.view(),
+            self.alt_offsets.view(),
+            ref_g,
+            ref_o,
+            win.flank_len,
+            &win.token_lut,
+            v_contigs.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+            reference,
+            ref_offsets.view(),
+            self.pad_char,
+        );
+
+        // Wave B PR-B4 review, Minor 3: only `start`/`ilen` are needed for `scalars` here
+        // -- avoid `assemble_variants_window`'s redundant ALT-byte gather (already done,
+        // separately, by `windows_tok_bufs` above). `alt_data`/`alt_seq_offsets` are left
+        // as empty placeholders, never read for this output mode.
+        let (start, ilen) = crate::variants::windows::gather_starts_ilens(
+            v_idxs.view(),
+            self.v_starts.view(),
+            self.ilens.view(),
+        );
+
+        // Important 1 fix: gather the SAME per-call FORMAT/dosage columns
+        // `generate_variants` does, via the shared `kept_o` CSR positions -- see this
+        // method's doc comment.
+        let info_out = self.gather_call_bufs(&kept_o);
+
+        Ok(crate::variants::VariantWindowsBatch {
+            scalars: crate::variants::VariantsBatch {
+                alt_data: Array1::from_vec(Vec::new()),
+                alt_seq_offsets: Array1::from_vec(vec![0i64]),
+                start,
+                ilen,
+                row_offsets,
+                info_out,
+                ref_data: None,
+                ref_seq_offsets: None,
+            },
+            tok_bufs,
         })
     }
 }
@@ -359,6 +612,8 @@ impl Svar1StreamEngine {
         ilens: Array1<i32>,
         alt_alleles: Array1<u8>,
         alt_offsets: Array1<i64>,
+        ref_alleles: Array1<u8>,
+        ref_offsets: Array1<i64>,
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
@@ -368,6 +623,13 @@ impl Svar1StreamEngine {
         afs: Option<Array1<f32>>,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        want_ref: bool,
+        call_fields: Vec<(String, CallVals)>,
+        // Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration, forwarded
+        // from the `#[new]` pymethod (`_Svar1Backend.build_engine`, Task 9) -- `None`
+        // (every pre-Task-9 caller, including every Rust test call site) disables
+        // `next_batch_variant_windows` exactly like the old hardcoded default did.
+        win_mode: Option<crate::variants::WindowModeConfig>,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -389,6 +651,11 @@ impl Svar1StreamEngine {
             afs,
             min_af,
             max_af,
+            ref_alleles,
+            ref_offsets,
+            want_ref,
+            call_fields,
+            win_mode,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -411,6 +678,15 @@ impl Svar1StreamEngine {
     fn next_batch_variants_core(&self) -> Option<anyhow::Result<crate::variants::VariantsBatch>> {
         self.core.next_batch_variants_core()
     }
+
+    /// Test-only accessor mirroring the pyclass's `next_batch_variant_windows`, minus
+    /// the numpy/PyDict marshaling — used directly by the `#[cfg(test)]` module below.
+    #[cfg(test)]
+    fn next_batch_variant_windows_core(
+        &self,
+    ) -> Option<anyhow::Result<crate::variants::VariantWindowsBatch>> {
+        self.core.next_batch_variant_windows_core()
+    }
 }
 
 #[pymethods]
@@ -432,9 +708,14 @@ impl Svar1StreamEngine {
         contig_names, contig_starts, n_locals, max_v_lens, v_starts_c, v_ends_c,
         contig_ref_bytes, phys_sample_idx,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
-        v_starts, ilens, alt_alleles, alt_offsets,
+        v_starts, ilens, alt_alleles, alt_offsets, ref_alleles, ref_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
-        variants=false, afs=None, min_af=None, max_af=None,
+        variants=false, afs=None, min_af=None, max_af=None, want_ref=false,
+        call_field_f32_names=Vec::new(), call_field_f32=Vec::new(),
+        call_field_i32_names=Vec::new(), call_field_i32=Vec::new(),
+        call_field_i16_names=Vec::new(), call_field_i16=Vec::new(),
+        win_ref_mode=None, win_alt_mode=None, win_flank_len=None,
+        win_token_lut_u8=None, win_token_lut_i32=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -458,6 +739,14 @@ impl Svar1StreamEngine {
         ilens: PyReadonlyArray1<i32>,
         alt_alleles: PyReadonlyArray1<u8>,
         alt_offsets: PyReadonlyArray1<i64>,
+        // Wave B PR-B3a (#304): GLOBAL per-variant REF allele byte table -- same
+        // layout as `alt_alleles`/`alt_offsets`. Always required (an SVAR1 store with
+        // no REF column already fails construction in `_Svar1Backend.__init__`), but
+        // only gathered into a batch's `ref_data`/`ref_seq_offsets` when the engine is
+        // built with `want_ref=true` (the Python `var_fields` surface sets this via
+        // `_Svar1Backend.build_engine`).
+        ref_alleles: PyReadonlyArray1<u8>,
+        ref_offsets: PyReadonlyArray1<i64>,
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
@@ -467,8 +756,105 @@ impl Svar1StreamEngine {
         afs: Option<PyReadonlyArray1<f32>>,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        want_ref: bool,
+        // Wave B PR-B3b (#304): per-call FORMAT/dosage columns REQUESTED via
+        // `var_fields` (`_Svar1Backend.build_engine` filters, splits by dtype, and
+        // forwards only the active subset -- see that method's doc comment). THREE
+        // parallel dtype-homogeneous name/array list pairs (f32/i32/i16), since PyO3
+        // has no ergonomic mixed-dtype numpy list type -- one bucket per `CallVals`
+        // variant, so every field crosses with its dtype preserved exactly (PR-B3b
+        // review: a byte-identical-parity contract can't tolerate an int16 field
+        // silently upcasting to int32). Each array must have exactly one entry per
+        // `variant_idxs.npy` entry (validated below) -- it is indexed by CSR position
+        // in `Svar1Backend::generate_variants`, the SAME position space
+        // `store.geno_v_idxs()` uses.
+        call_field_f32_names: Vec<String>,
+        call_field_f32: Vec<PyReadonlyArray1<f32>>,
+        call_field_i32_names: Vec<String>,
+        call_field_i32: Vec<PyReadonlyArray1<i32>>,
+        // Wave B PR-B3b review (#304): the int16 bucket -- genoray's one real custom
+        // FORMAT field, `mutcat`, is always `int16`; see `CallVals`'s doc comment for
+        // why this can't just upcast into `call_field_i32`.
+        call_field_i16_names: Vec<String>,
+        call_field_i16: Vec<PyReadonlyArray1<i16>>,
+        // Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration, forwarded
+        // by `_Svar1Backend.build_engine` (Task 9) -- `"window"`/`"allele"` mode
+        // strings plus a dtype-tagged token LUT (exactly one of the u8/i32 buckets
+        // populated), parsed into a `WindowModeConfig` by the single shared
+        // `WindowModeConfig::from_python` conversion point (see its doc comment for
+        // why this parsing lives in `crate::variants`, not duplicated per backend).
+        // All `None` (the default) disables `next_batch_variant_windows`.
+        win_ref_mode: Option<String>,
+        win_alt_mode: Option<String>,
+        win_flank_len: Option<i64>,
+        win_token_lut_u8: Option<PyReadonlyArray1<u8>>,
+        win_token_lut_i32: Option<PyReadonlyArray1<i32>>,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
+
+        let win_mode = crate::variants::WindowModeConfig::from_python(
+            win_ref_mode.as_deref(),
+            win_alt_mode.as_deref(),
+            win_flank_len,
+            win_token_lut_u8.map(|a| a.as_array().to_owned()),
+            win_token_lut_i32.map(|a| a.as_array().to_owned()),
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        if call_field_f32_names.len() != call_field_f32.len()
+            || call_field_i32_names.len() != call_field_i32.len()
+            || call_field_i16_names.len() != call_field_i16.len()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Svar1StreamEngine: call_field_{f32,i32,i16}_names must match \
+                 call_field_{f32,i32,i16} in length",
+            ));
+        }
+        let n_calls = store.geno_v_idxs().len();
+        for (name, arr) in call_field_f32_names.iter().zip(&call_field_f32) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
+        for (name, arr) in call_field_i32_names.iter().zip(&call_field_i32) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
+        for (name, arr) in call_field_i16_names.iter().zip(&call_field_i16) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
+        let call_fields: Vec<(String, CallVals)> = call_field_f32_names
+            .into_iter()
+            .zip(call_field_f32)
+            .map(|(name, a)| (name, CallVals::F32(a.as_array().to_owned())))
+            .chain(
+                call_field_i32_names
+                    .into_iter()
+                    .zip(call_field_i32)
+                    .map(|(name, a)| (name, CallVals::I32(a.as_array().to_owned()))),
+            )
+            .chain(
+                call_field_i16_names
+                    .into_iter()
+                    .zip(call_field_i16)
+                    .map(|(name, a)| (name, CallVals::I16(a.as_array().to_owned()))),
+            )
+            .collect();
 
         let n_contigs = contig_names.len();
         if [
@@ -555,6 +941,8 @@ impl Svar1StreamEngine {
             ilens.as_array().to_owned(),
             alt_alleles.as_array().to_owned(),
             alt_offsets.as_array().to_owned(),
+            ref_alleles.as_array().to_owned(),
+            ref_offsets.as_array().to_owned(),
             pad_char,
             parallel,
             batch_size,
@@ -564,6 +952,11 @@ impl Svar1StreamEngine {
             afs,
             min_af,
             max_af,
+            // Wave B PR-B3a (#304): forwarded from the Python `var_fields` surface
+            // (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`).
+            want_ref,
+            call_fields,
+            win_mode,
         ))
     }
 
@@ -643,6 +1036,78 @@ impl Svar1StreamEngine {
                 dict.set_item("start", batch.start.into_pyarray(py))?;
                 dict.set_item("ilen", batch.ilen.into_pyarray(py))?;
                 dict.set_item("offsets", batch.row_offsets.into_pyarray(py))?;
+                if let (Some(rd), Some(ro)) = (batch.ref_data, batch.ref_seq_offsets) {
+                    dict.set_item("ref", rd.into_pyarray(py))?;
+                    dict.set_item("ref_offsets", ro.into_pyarray(py))?;
+                }
+                for (name, vals) in batch.info_out {
+                    match vals {
+                        InfoVals::I32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::I16(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                    }
+                }
+                Ok(Some(dict))
+            }
+            Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// `variant-windows`-output counterpart of `next_batch_variants` (Wave B PR-B4,
+    /// #304): returns a `dict` with keys `start` (i32), `ilen` (i32), `offsets` (i64,
+    /// per-`(row, ploid)` variant-count boundaries), plus `<name>`/`<name>_offsets`
+    /// per emitted token buffer (`ref_window`/`alt_window`/`ref`/`alt`, whichever the
+    /// engine's `WindowModeConfig` selected) -- or `None` when the plan is exhausted.
+    /// Only valid when the engine was constructed with variant-windows configuration
+    /// (`win_ref_mode`/`win_alt_mode`/`win_flank_len`/a token LUT) -- otherwise this
+    /// raises `RuntimeError` (a caller bug, not a data condition; `StreamingDataset
+    /// ._iter_batches` never calls this unless `with_seqs("variant-windows", ...)` was
+    /// selected). Mirrors `RecordStreamEngine::next_batch_variant_windows`
+    /// (`crate::record_stream::engine`) exactly -- see that method's doc comment for
+    /// why the two must stay symmetric.
+    fn next_batch_variant_windows<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let out = py.detach(|| self.core.next_batch_variant_windows_core());
+        match out {
+            None => Ok(None),
+            Some(Ok(batch)) => {
+                let dict = PyDict::new(py);
+                dict.set_item("start", batch.scalars.start.into_pyarray(py))?;
+                dict.set_item("ilen", batch.scalars.ilen.into_pyarray(py))?;
+                dict.set_item("offsets", batch.scalars.row_offsets.into_pyarray(py))?;
+                for (name, buf) in batch.tok_bufs {
+                    match buf {
+                        crate::variants::TokBuf::U8(d, o) => {
+                            dict.set_item(format!("{name}_offsets"), o.into_pyarray(py))?;
+                            dict.set_item(name, d.into_pyarray(py))?;
+                        }
+                        crate::variants::TokBuf::I32(d, o) => {
+                            dict.set_item(format!("{name}_offsets"), o.into_pyarray(py))?;
+                            dict.set_item(name, d.into_pyarray(py))?;
+                        }
+                    }
+                }
+                for (name, vals) in batch.scalars.info_out {
+                    match vals {
+                        InfoVals::I32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::I16(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                    }
+                }
                 Ok(Some(dict))
             }
             Some(Err(e)) => Err(PyRuntimeError::new_err(e.to_string())),
@@ -654,6 +1119,8 @@ impl Svar1StreamEngine {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    use crate::variants::{TokBuf, TokenLut, WindowMode, WindowModeConfig};
 
     fn write_raw<T: bytemuck::NoUninit>(dir: &std::path::Path, name: &str, data: &[T]) {
         let mut f = std::fs::File::create(dir.join(name)).unwrap();
@@ -671,6 +1138,10 @@ mod tests {
         ilens: Array1<i32>,
         alt_alleles: Array1<u8>,
         alt_offsets: Array1<i64>,
+        /// PR-B3a: GLOBAL per-variant REF byte table (var0 REF='G', var1 REF='T'),
+        /// same layout as `alt_alleles`/`alt_offsets`.
+        ref_alleles: Array1<u8>,
+        ref_offsets: Array1<i64>,
         ref_bytes: Vec<u8>,
     }
 
@@ -686,6 +1157,8 @@ mod tests {
             ilens: Array1::from(vec![0i32, 0]),
             alt_alleles: Array1::from(vec![b'A', b'C']),
             alt_offsets: Array1::from(vec![0i64, 1, 2]),
+            ref_alleles: Array1::from(vec![b'G', b'T']),
+            ref_offsets: Array1::from(vec![0i64, 1, 2]),
             ref_bytes: vec![b'T'; 30],
         }
     }
@@ -759,6 +1232,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             batch_size,
@@ -768,6 +1243,47 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
+        )
+    }
+
+    /// `build_engine` variant configured for `with_seqs("variant-windows")` output
+    /// (Wave B PR-B4 Task 9) -- exercises the SAME producer/consumer engine path
+    /// `build_engine` above does, but with `win_mode: Some(...)` so
+    /// `next_batch_variant_windows_core` is reachable (unlike `build_engine`, which
+    /// always disables it).
+    fn build_engine_windows(
+        f: &Fixture,
+        jobs: Vec<WindowJob>,
+        batch_size: usize,
+        win_mode: WindowModeConfig,
+    ) -> Svar1StreamEngine {
+        let store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        Svar1StreamEngine::build(
+            store,
+            vec![chr1_contig(f)],
+            jobs,
+            vec![0usize, 1],
+            f.v_starts.clone(),
+            f.ilens.clone(),
+            f.alt_alleles.clone(),
+            f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
+            b'N',
+            false,
+            batch_size,
+            -1,    // ragged
+            false, // annotated
+            false, // variants
+            None,  // afs
+            None,  // min_af
+            None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            Some(win_mode),
         )
     }
 
@@ -915,6 +1431,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             8,
@@ -924,6 +1442,9 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
         );
 
         match engine.next_batch_core() {
@@ -1013,6 +1534,9 @@ mod tests {
         let ilens = Array1::from(vec![0i32, 0]);
         let alt_alleles = Array1::from(vec![b'A', b'C']);
         let alt_offsets = Array1::from(vec![0i64, 1, 2]);
+        // PR-B3a: GLOBAL per-variant REF table, same layout as alt_alleles/alt_offsets.
+        let ref_alleles = Array1::from(vec![b'T', b'G']);
+        let ref_offsets = Array1::from(vec![0i64, 1, 2]);
         let chr1_ref = vec![b'G'; 20];
         let chr2_ref = vec![b'T'; 20];
 
@@ -1061,6 +1585,8 @@ mod tests {
             ilens.clone(),
             alt_alleles.clone(),
             alt_offsets.clone(),
+            ref_alleles.clone(),
+            ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1070,6 +1596,9 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1188,6 +1717,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1197,6 +1728,9 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1260,6 +1794,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1269,6 +1805,9 @@ mod tests {
             afs.clone(),
             Some(0.1f32),
             None,
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
         );
         let batch_a = engine_a
             .next_batch_variants_core()
@@ -1304,6 +1843,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1313,6 +1854,9 @@ mod tests {
             afs,
             Some(0.1f32),
             None,
+            false, // want_ref
+            Vec::new(), // call_fields
+            None, // win_mode
         );
         let batch_b = engine_b
             .next_batch_variants_core()
@@ -1324,5 +1868,172 @@ mod tests {
             "var1 fails the position clip and var0 fails the AF clip -> nothing kept"
         );
         assert_eq!(batch_b.start.len(), 0, "no variants survive either clip");
+    }
+
+    /// Wave B PR-B4 review (Important 1): `Svar1Backend::generate_variant_windows` must
+    /// gather per-call FORMAT/dosage fields the SAME way `generate_variants` does -- via
+    /// `kept_v_idxs`'s `kept_o` CSR positions -- not silently drop them (`info_out:
+    /// Vec::new()`, the pre-fix behavior). Constructs `Svar1Backend` directly (mirroring
+    /// how `RecordBackend`'s variant-windows tests bypass the engine/threading wrapper),
+    /// since `Svar1StreamEngine` has no `next_batch_variant_windows_core` test accessor.
+    ///
+    /// Fixture: `fixture()`'s 2-sample/ploidy-2/2-SNP layout (var0@10, var1@20;
+    /// `variant_idxs=[0,0,1,1]`, per-hap sorted global ids hap0=[0], hap1=[], hap2=[0,1],
+    /// hap3=[1]) with a full-window region `(0,30)` so every CSR position `o` in
+    /// `variant_idxs` survives the region-overlap keep. A synthetic F32 "DS" call field
+    /// holds a DISTINCT value per CSR position (`[0.1, 0.2, 0.3, 0.4]` for o=0..3) so a
+    /// wrong gather (dropped entirely, indexed by variant id instead of CSR position, or
+    /// misordered) is distinguishable from the correct one -- not just "some value came
+    /// back". Constructs `Svar1Backend` directly (mirroring how `RecordBackend`'s
+    /// variant-windows tests bypass the engine/threading wrapper) even though
+    /// `Svar1StreamEngine` now has its own `next_batch_variant_windows_core` test
+    /// accessor (added alongside this test) -- going through the backend directly
+    /// keeps this test focused on `generate_variant_windows`'s gather logic without
+    /// the producer/consumer channel machinery in the way.
+    #[test]
+    fn svar1_generate_variant_windows_gathers_call_fields() {
+        let f = fixture();
+        let call_fields = vec![(
+            "DS".to_string(),
+            CallVals::F32(Array1::from(vec![0.1f32, 0.2, 0.3, 0.4])),
+        )];
+
+        let mut store = Svar1Store::open_meta(&f.path, 2, 2).unwrap();
+        store.set_contig_meta_rs("chr1", 0, 2, 1);
+        let regions = vec![(0u32, 30u32)];
+        let w = store
+            .read_window("chr1", &[10, 20], &[11, 21], &regions, &[0, 1])
+            .unwrap();
+        let slot = FilledWindow {
+            o_starts: w.o_starts,
+            o_stops: w.o_stops,
+        };
+
+        let lut: Vec<u8> = (0..=255u8).collect();
+        let backend = Svar1Backend {
+            store,
+            contigs: vec![chr1_contig(&f)],
+            jobs: vec![WindowJob {
+                contig_idx: 0,
+                regions,
+                s_lo: 0,
+                s_hi: 2,
+            }],
+            phys_sample_idx: vec![0, 1],
+            v_starts: f.v_starts.clone(),
+            ilens: f.ilens.clone(),
+            alt_alleles: f.alt_alleles.clone(),
+            alt_offsets: f.alt_offsets.clone(),
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: false,
+            afs: None,
+            min_af: None,
+            max_af: None,
+            ref_alleles: f.ref_alleles.clone(),
+            ref_offsets: f.ref_offsets.clone(),
+            want_ref: false,
+            call_fields,
+            win_mode: Some(WindowModeConfig {
+                ref_mode: WindowMode::Window,
+                alt_mode: WindowMode::Window,
+                flank_len: 2,
+                token_lut: TokenLut::U8(Array1::from_vec(lut)),
+            }),
+        };
+
+        let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
+        let batch = backend
+            .generate_variant_windows(0, &slot, 0, n_rows)
+            .unwrap();
+
+        // Sanity: all four CSR positions (both variants, all haps that carry them)
+        // survive the full-window region-overlap keep.
+        assert_eq!(
+            batch.scalars.start.as_slice().unwrap(),
+            &[10, 10, 20, 20],
+            "kept variant order must match the CSR walk (var0 twice, then var1 twice)"
+        );
+
+        assert_eq!(
+            batch.scalars.info_out.len(),
+            1,
+            "the DS call field must ride along, not be silently dropped"
+        );
+        assert_eq!(batch.scalars.info_out[0].0, "DS");
+        let InfoVals::F32(ds) = &batch.scalars.info_out[0].1 else {
+            panic!("expected F32 column");
+        };
+        assert_eq!(
+            ds.len(),
+            batch.scalars.start.len(),
+            "one DS value per kept variant -- same length as scalars.start"
+        );
+        assert_eq!(
+            ds.as_slice(),
+            &[0.1f32, 0.2, 0.3, 0.4],
+            "DS must be gathered by CSR position (kept_o), in kept_o's order -- \
+             a variant-id gather or a dropped gather would not reproduce this exactly"
+        );
+    }
+
+    /// Wave B PR-B4 Task 9: `next_batch_variant_windows_core` (the FFI-adjacent core
+    /// accessor `next_batch_variant_windows` marshals) end-to-end through the REAL
+    /// producer/consumer engine (`Svar1StreamEngine::build` + `next_batch_*_core`),
+    /// not just `Svar1Backend::generate_variant_windows` directly (Task 8's test
+    /// above). Confirms the engine plumbing (win_mode threaded through `build`,
+    /// `EngineBackend::generate_variant_windows` dispatch) actually reaches a live
+    /// engine instance, and exhausts cleanly afterward.
+    #[test]
+    fn svar1_engine_next_batch_variant_windows_core_yields_tok_bufs() {
+        let f = fixture();
+        let jobs = vec![WindowJob {
+            contig_idx: 0,
+            regions: vec![(0, 30)],
+            s_lo: 0,
+            s_hi: 2,
+        }];
+        let win_mode = WindowModeConfig {
+            ref_mode: WindowMode::Window,
+            alt_mode: WindowMode::Window,
+            flank_len: 2,
+            token_lut: TokenLut::U8(Array1::from_vec((0..=255u8).collect())),
+        };
+        let engine = build_engine_windows(&f, jobs, 1000, win_mode);
+
+        let batch = engine
+            .next_batch_variant_windows_core()
+            .expect("engine has one window queued")
+            .expect("window decode must not error");
+
+        assert_eq!(
+            batch.scalars.start.as_slice().unwrap(),
+            &[10, 10, 20, 20],
+            "same kept-variant selection as the direct-backend test above"
+        );
+        let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ref_window", "alt_window"],
+            "WindowMode::Window on both sides emits exactly ref_window/alt_window"
+        );
+        for (_, buf) in &batch.tok_bufs {
+            let TokBuf::U8(data, offsets) = buf else {
+                panic!("u8 LUT must yield TokBuf::U8, not TokBuf::I32");
+            };
+            assert_eq!(
+                offsets.len(),
+                batch.scalars.start.len() + 1,
+                "one window per kept variant"
+            );
+            assert!(!data.is_empty());
+        }
+
+        assert!(
+            engine.next_batch_variant_windows_core().is_none(),
+            "a single-window plan must exhaust cleanly, not hang or repeat"
+        );
     }
 }

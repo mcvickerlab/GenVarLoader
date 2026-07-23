@@ -106,6 +106,14 @@ pub struct VcfWindowFiller {
     check_ref: CheckRef,
     overlap: OverlapMode,
     fields: Vec<FieldSpec>,
+    /// Whether the `AF` INFO `FieldSpec` was requested (Wave B PR-B2, #319); threaded
+    /// through to `fill_decoded_window` so it knows whether `info_staged[0]` is AF or
+    /// the first requested `var_fields` column (Wave B PR-B3a).
+    want_af: bool,
+    /// Names of the requested non-AF INFO `var_fields` columns, in request order —
+    /// parallel to the tail of `fields` (Wave B PR-B3a). Passed to
+    /// `fill_decoded_window` so it can label `DecodedWindow.info_cols`.
+    info_names: Vec<String>,
     htslib_threads: usize,
     chunk_size: usize,
 }
@@ -118,26 +126,49 @@ impl VcfWindowFiller {
     /// `want_af`: request the `AF` INFO `FieldSpec` (Wave B PR-B2, #319), so
     /// `fill` populates `DecodedWindow.afs`. Pass `false` when no AF filter is
     /// configured — no-filter jobs then pay no INFO-decode cost.
+    ///
+    /// `info_fields`: additional `(name, is_float)` INFO fields requested via
+    /// `var_fields` (Wave B PR-B3a), staged after AF (when requested) in the
+    /// given order and surfaced on `DecodedWindow.info_cols`. Pass `&[]` when no
+    /// `var_fields` INFO column is configured.
     pub fn new(
         vcf_path: &str,
         samples: &[&str],
         ploidy: usize,
         fasta_path: Option<&str>,
         want_af: bool,
+        info_fields: &[(String, bool)],
     ) -> anyhow::Result<Self> {
         let sample_indices = VcfRecordSource::resolve_sample_indices(vcf_path, samples)?;
         VCF_SAMPLE_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
-        let fields = if want_af {
-            vec![FieldSpec {
+        let mut fields: Vec<FieldSpec> = Vec::new();
+        if want_af {
+            fields.push(FieldSpec {
                 name: "AF".into(),
                 category: FieldCategory::Info,
                 htype: HtslibType::Float,
                 dtype: StorageDtype::F32,
                 default: None,
-            }]
-        } else {
-            Vec::new()
-        };
+            });
+        }
+        for (name, is_float) in info_fields {
+            fields.push(FieldSpec {
+                name: name.clone().into(),
+                category: FieldCategory::Info,
+                htype: if *is_float {
+                    HtslibType::Float
+                } else {
+                    HtslibType::Int
+                },
+                dtype: if *is_float {
+                    StorageDtype::F32
+                } else {
+                    StorageDtype::I32
+                },
+                default: None,
+            });
+        }
+        let info_names: Vec<String> = info_fields.iter().map(|(n, _)| n.clone()).collect();
         Ok(Self {
             vcf_path: vcf_path.to_string(),
             sample_indices,
@@ -146,6 +177,8 @@ impl VcfWindowFiller {
             check_ref: CheckRef::Exclude,
             overlap: OverlapMode::Variant,
             fields,
+            want_af,
+            info_names,
             htslib_threads: 1,
             chunk_size: DEFAULT_CHUNK_SIZE,
         })
@@ -214,7 +247,14 @@ impl WindowFiller for VcfWindowFiller {
                     job.regions,
                     self.chunk_size,
                 );
-                fill_decoded_window(&chunk, n_local_samples, self.ploidy, slot);
+                fill_decoded_window(
+                    &chunk,
+                    n_local_samples,
+                    self.ploidy,
+                    self.want_af,
+                    &self.info_names,
+                    slot,
+                );
             }
             None => {
                 // Empty window (no variants in range): decode an empty `DenseChunk`
@@ -234,7 +274,14 @@ impl WindowFiller for VcfWindowFiller {
                     carriers: None,
                     format_by_carrier: None,
                 };
-                fill_decoded_window(&empty, n_local_samples, self.ploidy, slot);
+                fill_decoded_window(
+                    &empty,
+                    n_local_samples,
+                    self.ploidy,
+                    self.want_af,
+                    &self.info_names,
+                    slot,
+                );
             }
         }
         Ok(())
@@ -264,7 +311,7 @@ mod tests {
         vcf_sample_resolutions_reset();
         assert_eq!(vcf_sample_resolutions(), 0);
 
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false, &[]).unwrap();
         assert_eq!(
             vcf_sample_resolutions(),
             1,
@@ -321,7 +368,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false, &[]).unwrap();
         let job = RecordJob {
             contig_idx: 0,
             regions: vec![(0, 100)],
@@ -350,7 +397,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false, &[]).unwrap();
         let job = RecordJob {
             contig_idx: 0,
             regions: vec![(500, 600)],
@@ -381,7 +428,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false, &[]).unwrap();
         // s_lo=1,s_hi=2 selects only s2.
         let job = RecordJob {
             contig_idx: 0,
@@ -409,7 +456,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false)
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false, &[])
             .unwrap()
             .with_chunk_size(1);
         let job = RecordJob {

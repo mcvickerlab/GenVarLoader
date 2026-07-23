@@ -241,7 +241,7 @@ super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iterat
 stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
 with each batch identify every row.
 
-### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`, `with_seqs("variants")`
+### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`, `with_seqs("variants")`, `with_seqs("variant-windows")`
 
 `StreamingDataset` supports the following read-time knobs (issue
 [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
@@ -283,13 +283,86 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   `Dataset.open(...).with_seqs("variants")[r, s]` at `jitter=0`. Streamed variant records carry
   no dataset-global variant id (unlike `AnnotatedHaps.var_idxs`) — each `RaggedVariants` entry is
   self-contained. `min_af`/`max_af` filtering (Wave B PR-B2, below) is wired for this output
-  kind; non-default `var_fields` (e.g. `dosage`/FORMAT columns) on the streaming variants path is
-  not yet wired (**PR-B3**).
+  kind; non-default `var_fields` (Wave B PR-B3a, below) selects which extra fields ride along.
+- **`with_seqs("variant-windows", opt)`** (Wave B PR-B4, issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) — requires an `opt`
+  ([`VarWindowOpt`](api.md#genvarloader.VarWindowOpt)), same as the written path.
+  Unlike the written path's `Dataset.with_seqs("variant-windows", opt)[r, s]`, which returns a
+  [`FlatVariantWindows`](api.md#genvarloader.FlatVariantWindows), `StreamingDataset` yields a
+  plain `dict[str, Ragged]` per batch: keys `start`/`ilen` (one ragged axis, shape
+  `(batch, ploidy, ~variants)`) plus whichever of `ref_window`/`alt_window` (`opt.ref`/`opt.alt
+  == "window"`) or `ref`/`alt` (`== "allele"`) the options selected — those token buffers carry
+  a SECOND ragged axis (`(batch, ploidy, ~variants, ~window_len)`, since window/allele length
+  varies per variant). Token dtype (`uint8` or `int32`, from `build_token_lut`) is preserved
+  exactly. Byte-identical to `Dataset.open(...).with_output_format("flat")
+  .with_seqs("variant-windows", opt)[r, s].to_ragged()` at `jitter=0`, on the SVAR1, VCF, and
+  PGEN backends (`.svar2` raises `NotImplementedError` immediately, at `with_seqs` config time).
+  **Not combinable with `var_fields`, `min_af`/`max_af`, `unphased_union`, or
+  `dummy_variant`** — `VarWindowOpt` has no `var_fields`-equivalent knob of its own for
+  streaming yet, and `StreamingDataset.with_settings` has no `unphased_union`/`dummy_variant`
+  parameter at all (unlike `Dataset.with_settings`, which supports both for
+  `"variant-windows"` output) — passing either raises a plain `TypeError` (unexpected keyword
+  argument), not a documented `NotImplementedError` guard.
 
-`"variant-windows"`/`"reference"` output kinds and non-default `var_fields` remain **not yet
-implemented** for `StreamingDataset` — later Wave B follow-ups (issue
-[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B3–B4); `with_seqs` raises
-`NotImplementedError` for `"variant-windows"`/`"reference"`.
+`"reference"` output remains **not yet implemented** for `StreamingDataset` — a later Wave B
+follow-up (issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs`
+raises `NotImplementedError` for `"reference"`.
+
+#### Variant fields on streaming output (`var_fields`, Wave B PR-B3a)
+
+`StreamingDataset.with_settings(var_fields=[...])` (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) selects which per-variant fields
+ride along on `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`
+(see "Variant fields (`var_fields`)" above) but valid **only** for `with_seqs("variants")` —
+combining `var_fields` with any other output kind raises `NotImplementedError` (stricter than the
+written path, which also allows `var_fields` on `"variant-windows"` — streaming's
+`"variant-windows"` output (Wave B PR-B4, above) has no `var_fields`-equivalent knob of its own
+yet). The requestable set is **backend-derived**, not read from an on-disk
+schema, since there is no written artifact:
+
+| Backend | `available_var_fields` |
+|---|---|
+| SVAR1 (`.svar`) | `alt`, `ilen`, `start`, every numeric index column except `POS`/`ILEN` (e.g. `AF`), `ref`, `dosage` (iff the store has a cached `dosages.npy`), every genoray custom Number=G FORMAT column the store carries |
+| VCF/BCF | `alt`, `ilen`, `start`, every numeric INFO field the live header declares, `ref` |
+| PGEN | `alt`, `ilen`, `start`, `ref` (a PGEN record stream has no INFO path) |
+
+**`dosage` and custom per-call FORMAT fields are SVAR1-only**, on both the streaming and written
+paths: `gvl.write()` never persists per-call dosage for a VCF/PGEN source, so a *written* dataset
+built from one can't serve `dosage` either — streaming declines it with the same `ValueError`
+(`"not available"`) a VCF/PGEN-backed `Dataset.with_settings(var_fields=[..., "dosage"])` raises.
+
+Field names that collide with the underlying FFI dict's fixed keys (`alt`, `alt_offsets`, `start`,
+`ilen`, `offsets`, `ref`, `ref_offsets`) are never advertised — a same-named source column simply
+cannot be requested via `var_fields`.
+
+`available_var_fields` is not always fully **servable**: `StreamingDataset.servable_var_fields`
+narrows it to fields the streaming engine can actually gather today. On SVAR1, a numeric INDEX
+column like `AF` is advertised (it is a real on-disk numeric column) but not yet servable — the
+Rust engine doesn't gather arbitrary SVAR1 index columns yet (deferred follow-up work); requesting
+it via `with_settings(var_fields=[..., "AF"])` raises `NotImplementedError` immediately, rather
+than failing later at iterate time. `dosage` and custom per-call FORMAT fields ARE servable (Wave B
+PR-B3b) — they live parallel to the store's sparse genotype CSR, so the Rust engine gathers them
+the same way it gathers genotypes, by CSR position rather than variant id, and the field's
+registered dtype is preserved **exactly** (not coerced) for `float32`/`int32`/`int16` — the three
+dtypes genoray custom FORMAT fields use today — matching the written path byte-for-byte. On
+VCF/BCF, every advertised field is servable (`servable_var_fields == available_var_fields`) — the
+Rust `VcfWindowFiller` wires every declared numeric INFO field through directly.
+
+`StreamingDataset.active_var_fields` reports the currently-configured list — the requested
+`var_fields`, or the builtin default `["alt", "ilen", "start"]` when never set (reproduced
+byte-for-byte so unconfigured streaming output matches `with_seqs("variants")`'s pre-`var_fields`
+behavior).
+
+```{caution}
+For a VCF/BCF source, streaming's `available_var_fields` can be a **strict superset** of the
+written path's: `gvl.write()` only ever persists one numeric INFO column into a written dataset's
+queryable schema (`AF`, when the header declares it — see the AF-filtering section below). Any
+*other* declared numeric INFO field (e.g. an `Integer DP`) is something streaming can serve live,
+but the written path cannot expose at all (it stays buried in a nested `INFO` struct column that
+the written-path schema scan never surfaces as a top-level field) — requesting it via
+`Dataset.with_settings(var_fields=[..., "DP"])` raises `ValueError: Missing variant fields: ['DP']`.
+This is a permanent asymmetry between the two paths for VCF/BCF sources, not a bug.
+```
 
 #### Allele-frequency filtering (`min_af`/`max_af`, Wave B PR-B2)
 
@@ -297,8 +370,8 @@ implemented** for `StreamingDataset` — later Wave B follow-ups (issue
 [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317)) mirrors
 `Dataset.with_settings(min_af=, max_af=)`: inclusive AF bounds applied as a per-variant filter,
 supported **only** for `with_seqs("variants")` output — combining `min_af`/`max_af` with any
-other output kind (`"haplotypes"`, `"annotated"`, `"reference"`) raises `NotImplementedError`,
-matching the written path. Where the AF comes from depends on the backend:
+other output kind (`"haplotypes"`, `"annotated"`, `"reference"`, `"variant-windows"`) raises
+`NotImplementedError`, matching the written path. Where the AF comes from depends on the backend:
 
 | Backend | AF source | If unavailable |
 |---|---|---|

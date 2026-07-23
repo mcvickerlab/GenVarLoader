@@ -1,4 +1,6 @@
 import shutil
+import subprocess
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -152,8 +154,47 @@ def test_af_missing_guard_raises_vcf_without_info_af(streaming_case):
         next(iter(sds.to_iter(batch_size=4)))
 
 
-def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
+def test_available_var_fields_svar1_includes_ref(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert "ref" in sds.available_var_fields
+    assert {"alt", "ilen", "start"} <= set(sds.available_var_fields)
+
+
+def test_active_var_fields_defaults_to_alt_ilen_start(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert sds.active_var_fields == ["alt", "ilen", "start"]
+
+
+def test_unknown_var_field_raises(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    with pytest.raises(ValueError, match="not available"):
+        sds.with_settings(var_fields=["alt", "start", "NOPE"])
+
+
+def test_var_fields_with_haplotypes_output_raises(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=["alt", "start", "ref"])
+        .with_seqs("haplotypes")
+    )
+    with pytest.raises(NotImplementedError, match="var_fields"):
+        next(iter(sds.to_iter(batch_size=2)))
+
+
+def test_pgen_var_fields_limited_to_ref(streaming_case):
+    regions, reference, variants, _written = streaming_case("pgen")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert "ref" in sds.available_var_fields
+    assert sds.available_var_fields == ["alt", "ilen", "start", "ref"]
+
+
+def test_with_seqs_accepts_annotated_variants_and_variant_windows():
     sds = _tiny_sds()
+    from genvarloader import VarWindowOpt
     from genvarloader._dataset._rag_variants import RaggedVariants
     from genvarloader._ragged import RaggedAnnotatedHaps
 
@@ -164,6 +205,225 @@ def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     # raises NotImplementedError, and that raises later at iterate time
     # (`_iter_batches`), not here at the config layer.
     assert sds.with_seqs("variants")._seq_kind is RaggedVariants
-    # "variant-windows"/"reference" remain later Wave B / follow-up work.
-    with pytest.raises(NotImplementedError):
+    # Wave B PR-B4 (#304): "variant-windows" is now accepted at the config layer
+    # too (requires an `opt`); its `_seq_kind` sentinel is plain `dict` (there is
+    # no dedicated ragged-container class for it -- see `_SEQ_KIND_NAMES`).
+    opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    assert sds.with_seqs("variant-windows", opt)._seq_kind is dict
+    # Missing `opt` is a config-time `ValueError`, not deferred to iterate time.
+    with pytest.raises(ValueError):
         sds.with_seqs("variant-windows")
+    # `opt` is rejected for every OTHER kind.
+    with pytest.raises(ValueError):
+        sds.with_seqs("haplotypes", opt)
+    # "reference" remains later follow-up work.
+    with pytest.raises(NotImplementedError):
+        sds.with_seqs("reference")
+
+
+# --- Wave B PR-B3a review (code-review fix pass) -----------------------------
+
+_RESERVED_COLLISION_REF_SEQ = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"  # 40bp
+
+# A VCF INFO field named `alt_offsets` -- the same name as the FFI dict's fixed
+# `alt_offsets` key (`next_batch_variants`'s `dict.set_item("alt_offsets", ...)`
+# in both `record_stream/engine.rs` and `ffi/stream_engine.rs`). Deliberately
+# collides to regression-guard `_RESERVED_VAR_FIELD_NAMES` (Critical 1).
+_VCF_RESERVED_NAME_COLLISION = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##INFO=<ID=alt_offsets,Number=1,Type=Integer,Description="Deliberately collides with the FFI dict's fixed alt_offsets key">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\talt_offsets=999\tGT\t1|0\t0|0
+chr1\t16\t.\tT\tC\t.\t.\talt_offsets=777\tGT\t1|1\t0|1
+"""
+
+
+def _write_reserved_name_collision_vcf(tmp_path: Path) -> tuple[Path, Path]:
+    ref = tmp_path / "ref.fa"
+    ref.write_text(f">chr1\n{_RESERVED_COLLISION_REF_SEQ}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+    vcf = tmp_path / "in.vcf"
+    vcf.write_text(_VCF_RESERVED_NAME_COLLISION)
+    vcf_gz = tmp_path / "in.vcf.gz"
+    subprocess.run(["bcftools", "view", "-Oz", "-o", str(vcf_gz), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", "-t", str(vcf_gz)], check=True)
+    return vcf_gz, ref
+
+
+def test_reserved_name_collision_not_advertised_and_rejected(tmp_path):
+    """Regression for Critical 1 (Wave B PR-B3a review, #304): a VCF INFO field
+    named `alt_offsets` collides with the FFI dict's fixed `alt_offsets` key --
+    `PyDict::set_item` silently overwrites, so before the fix
+    (`_RESERVED_VAR_FIELD_NAMES` omitted `alt_offsets`, guarding only
+    `start`/`ilen`/`ref`/`offsets`/`ref_offsets`) this name was advertised via
+    `available_var_fields`, accepted by `with_settings`, and would silently
+    overwrite the ALT sequence offsets array with the INFO column's values at
+    read time -- wrong ALT bytes, no exception (confirmed empirically in the
+    review on a 2-variant fixture: ALT changed from `[b'C', b'AGG']` to
+    `[b'G', b'']`).
+
+    This test would FAIL against the unfixed frozenset in BOTH ways checked
+    below: `alt_offsets` would appear in `available_var_fields` (assertion 1),
+    and requesting it via `with_settings` would not raise (assertion 2) --
+    verified by running this test before applying the fix (see the fix-pass
+    report).
+    """
+    vcf_gz, ref = _write_reserved_name_collision_vcf(tmp_path)
+    regions = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [0],
+            "chromEnd": [len(_RESERVED_COLLISION_REF_SEQ)],
+        }
+    )
+    sds = gvl.StreamingDataset(regions, reference=str(ref), variants=str(vcf_gz))
+
+    # 1. The reserved (FFI-fixed-key-colliding) name must never be advertised as
+    #    a requestable var_field.
+    assert "alt_offsets" not in sds.available_var_fields
+
+    # 2. Explicitly requesting it must fail loudly and clearly (ValueError, "not
+    #    available"), never silently succeed and corrupt output.
+    with pytest.raises(ValueError, match="not available"):
+        sds.with_settings(var_fields=["alt", "start", "alt_offsets"])
+
+
+def test_af_cached_svar1_af_field_unservable_raises_early(streaming_case, tmp_path):
+    """Regression for Important 1 (Wave B PR-B3a review): an AF-cached SVAR1
+    store advertises "AF" via `available_var_fields` (a real on-disk numeric
+    index column) but the SVAR1 Rust engine has no general INFO/index-column
+    gather yet -- unlike per-call FORMAT/dosage fields, which PR-B3b wired
+    through (see `test_streaming_variants_parity.py`'s
+    `test_streaming_svar1_dosage_matches_written`/
+    `test_streaming_svar1_custom_format_field_matches_written`). Before the
+    fix, this failure only surfaced from inside the per-batch packing loop
+    after a full `build_engine` + producer thread + first window read;
+    `with_settings` must now reject it immediately, at configuration time,
+    naming the field and that this is still deferred follow-up work -- never
+    silently building an engine that can't serve the request. (Minor 1, PR-B3b
+    review, #304: the message no longer says "deferred to PR-B3b" -- PR-B3b IS
+    this task, and it did NOT close this particular gap.)
+    """
+    regions, reference, svar, _af = _af_cached_svar(streaming_case, tmp_path)
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=svar)
+    assert "AF" in sds.available_var_fields
+    assert "AF" not in sds.servable_var_fields
+    with pytest.raises(NotImplementedError, match="numeric INDEX column"):
+        sds.with_settings(var_fields=["alt", "ilen", "start", "AF"])
+
+
+def test_var_fields_ref_is_forwarded_svar1(streaming_case):
+    """Smoke test (Important 3, Wave B PR-B3a review): pins that `want_ref` is
+    actually forwarded from `var_fields` through `build_engine` to the Rust
+    engine and packed into real output. All five of Task 5's original tests
+    were config-surface only (never iterated a batch with `ref` requested), so
+    the suite would still have passed if `_Svar1Backend.build_engine` never
+    read `"ref" in _active_fields` at all -- `ref_rag` would then just stay
+    `None` in the packing loop with nothing to catch it. This is a SMOKE test,
+    not byte-identical parity against the written path (a later task's job):
+    it only proves non-empty `ref` data actually arrives, with one entry per
+    variant (same count as the already-covered `start`).
+
+    NOTE: `RaggedVariants.ref[h]` (a single-hap opaque-string index) collapses
+    ALL of that hap's REF alleles into ONE concatenated `bytes` object
+    (verified empirically: `seqpro.rag.Ragged.to_strings()` merges the whole
+    ragged group, not just the character dimension within each variant) -- so
+    counting "entries" must go through the field's own string-boundary layout
+    (`._rl.str_offsets`, the same primitive `RaggedVariants.ilen` itself uses
+    to derive REF-allele lengths), not a naive `len(field[h])`.
+    """
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_seqs("variants")
+        .with_settings(var_fields=["alt", "ilen", "start", "ref"])
+    )
+    total_variants = 0
+    saw_nonempty_ref = False
+    for data, r_idx, _s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            cell = data[k]
+            n_variants = len(cell.start.data)  # one scalar start per variant, all haps
+            n_ref_entries = len(np.diff(cell.ref._rl.str_offsets))
+            assert n_ref_entries == n_variants, (
+                "ref must have exactly one string entry per variant, same count as start"
+            )
+            total_variants += n_variants
+            if cell.ref.data.size > 0:
+                saw_nonempty_ref = True
+    assert total_variants > 0, (
+        "streaming_case('svar1')'s fixture must carry >=1 variant -- a vacuous "
+        "all-empty pass would not prove ref data actually arrived"
+    )
+    assert saw_nonempty_ref, "expected at least one non-empty ref allele byte"
+
+
+def test_with_seqs_variant_windows_returns_dict_of_ragged(streaming_case):
+    """Config-level test (Wave B PR-B4 review, Minor 4): despite the name, the
+    original version of this test only checked dict keys -- it would have
+    survived a transposed-offsets bug or a dtype-coercing implementation.
+    Strengthen it with cheap, still config-level assertions: every value is a
+    real `seqpro.rag.Ragged` (not e.g. a plain numpy array masquerading as
+    one), token buffers carry the four-level ragged shape `(batch, ploidy,
+    None, None)` while scalars carry the three-level `(batch, ploidy, None)`,
+    and the token dtype matches the LUT dtype `with_seqs` built from `opt`.
+    Full byte-identical parity against the written path is the next task's
+    job, not this one.
+    """
+    from seqpro.rag import Ragged
+
+    from genvarloader import VarWindowOpt
+
+    regions, reference, variants, _written = streaming_case("svar1")
+    opt = VarWindowOpt(
+        flank_length=4,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="window",
+    )
+    sds = gvl.StreamingDataset(
+        regions, reference=reference, variants=variants
+    ).with_seqs("variant-windows", opt)
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2)))
+    assert isinstance(data, dict)
+    assert {"ref_window", "alt_window", "start", "ilen"} <= set(data)
+
+    batch_size = len(r_idx)
+    ploidy = sds._backend.ploidy  # pyright: ignore[reportOptionalMemberAccess]
+    lut_dtype = sds._var_window_lut_dtype
+    assert lut_dtype is not None
+
+    for name, value in data.items():
+        assert isinstance(value, Ragged), (
+            f"{name!r} must be a Ragged, got {type(value)!r}"
+        )
+        if name in ("ref_window", "alt_window"):
+            # Token buffers are ragged over both variant count and window
+            # length: (batch, ploidy, ~variants, ~window_len).
+            assert value.shape == (batch_size, ploidy, None, None), (
+                f"{name!r} shape {value.shape} != expected token-buffer shape "
+                f"({batch_size}, {ploidy}, None, None)"
+            )
+            assert value.dtype == lut_dtype, (
+                f"{name!r} dtype {value.dtype} != token LUT dtype {lut_dtype}"
+            )
+        else:
+            # Scalar per-variant fields (`start`/`ilen`) are ragged only over
+            # variant count: (batch, ploidy, ~variants).
+            assert value.shape == (batch_size, ploidy, None), (
+                f"{name!r} shape {value.shape} != expected scalar shape "
+                f"({batch_size}, {ploidy}, None)"
+            )
+
+
+def test_variant_windows_rejected_on_svar2(streaming_svar2_case):
+    from genvarloader import VarWindowOpt
+
+    regions, reference, variants = streaming_svar2_case
+    opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    with pytest.raises(NotImplementedError):
+        sds.with_seqs("variant-windows", opt)

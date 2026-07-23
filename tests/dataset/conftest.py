@@ -1275,3 +1275,61 @@ def streaming_case(request, tmp_path_factory):
         raise ValueError(f"streaming_case: unknown backend {backend!r}")
 
     return _case
+
+
+@pytest.fixture
+def streaming_svar2_case(svar2_multicontig_fixture):
+    """``(regions, reference, variants)`` over a live ``.svar2`` store (Wave B
+    PR-B4, #304): used by the ``with_seqs("variant-windows")`` SVAR2-rejection
+    test -- variant-windows output is Rust-wired for SVAR1/VCF/PGEN only, so
+    constructing a `StreamingDataset` over a `.svar2` source and requesting it
+    must raise `NotImplementedError` immediately from `with_seqs`, not at
+    iterate time.
+    """
+    f = svar2_multicontig_fixture
+    return f.bed, f.reference_path, f.svar2_path
+
+
+@pytest.fixture
+def empty_region_case(request, tmp_path_factory):
+    """Shape-matched to ``streaming_case`` (``(regions, reference, variants,
+    written)``), but the returned bed is guaranteed to contain at least one
+    region with ZERO in-window variants for every sample/haplotype -- needed to
+    exercise the ``with_seqs("variant-windows")`` empty-group path (Wave B
+    PR-B4, #304 parity gate) at the default ``dummy_variant=None`` (no sentinel
+    fill on either side).
+
+    Reuses each backend's plain ``streaming_case`` variant source, but swaps in
+    a bed that actually has an empty region:
+      - svar1: `svar1_multicontig_fixture`'s OWN bed already has one --
+        contig `chr1`'s window `[20, 40)` -- every `chr1` variant sits at
+        0-based pos < 20 (see that fixture's VCF), so this window is
+        pure-reference for all 3 samples/both haps. No new bed needed.
+      - vcf/pgen: `vcf_snp_ins_del_multi_regions`'s region 2 (`[170, 250)`) is
+        documented as "no variants -- pure-reference region"; that fixture's
+        own docstring says it is reusable unmodified for PGEN too (same
+        underlying VCF, same contig/fasta).
+    """
+
+    def _case(backend: str):
+        if backend == "svar1":
+            f = request.getfixturevalue("svar1_multicontig_fixture")
+            written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+            return f.bed, f.reference_path, f.svar_path, written
+        elif backend == "vcf":
+            f = request.getfixturevalue("vcf_snp_ins_del_multi")
+            regions = request.getfixturevalue("vcf_snp_ins_del_multi_regions")
+            out = tmp_path_factory.mktemp("erc_vcf") / "ds"
+            gvl.write(out, regions, variants=str(f.vcf), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return regions, str(f.fasta), str(f.vcf), written
+        elif backend == "pgen":
+            f = request.getfixturevalue("pgen_snp_ins_del_multi")
+            regions = request.getfixturevalue("vcf_snp_ins_del_multi_regions")
+            out = tmp_path_factory.mktemp("erc_pgen") / "ds"
+            gvl.write(out, regions, variants=str(f.pgen), overwrite=True)
+            written = gvl.Dataset.open(out, reference=f.fasta)
+            return regions, str(f.fasta), str(f.pgen), written
+        raise ValueError(f"empty_region_case: unknown backend {backend!r}")
+
+    return _case

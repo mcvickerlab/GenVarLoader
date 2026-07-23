@@ -44,7 +44,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::bounded;
 use ndarray::Array1;
 
-use crate::variants::VariantsBatch;
+use crate::variants::{VariantWindowsBatch, VariantsBatch};
 
 /// The two per-backend divergence points of the producer/consumer engine, plus the
 /// plan shape. A backend bundles whatever state it needs (store handles, global
@@ -77,7 +77,11 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
     ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>;
 
     /// Variants-output counterpart of `generate` (Wave B PR-B1). Default: unsupported.
-    /// RecordBackend overrides it; Svar1Backend overrides it in Task 4.
+    /// RecordBackend overrides it; Svar1Backend overrides it in Task 4. The returned
+    /// `VariantsBatch.info_out` (Wave B PR-B3a) carries ride-along per-variant INFO
+    /// columns gathered by the same kept `v_idxs` as `start`/`ilen` — `RecordBackend`
+    /// populates it from `DecodedWindow.info_cols`; `Svar1Backend` leaves it empty
+    /// until a later task.
     fn generate_variants(
         &self,
         _job_idx: usize,
@@ -86,6 +90,22 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
         _row_hi: usize,
     ) -> anyhow::Result<VariantsBatch> {
         anyhow::bail!("variants output is not supported by this backend")
+    }
+
+    /// `variant-windows`-output counterpart of `generate_variants` (Wave B PR-B4, #304):
+    /// same `[row_lo, row_hi)` slice of the same filled window, but returns tokenized
+    /// ref/alt window (or bare-allele) buffers via `crate::variants::windows::assemble_windows_mode`
+    /// instead of (or alongside) `generate_variants`'s ride-along scalar fields. Default:
+    /// unsupported, exactly like `generate_variants`'s default — `RecordBackend` and
+    /// `Svar1Backend` both override it.
+    fn generate_variant_windows(
+        &self,
+        _job_idx: usize,
+        _slot: &Self::Slot,
+        _row_lo: usize,
+        _row_hi: usize,
+    ) -> anyhow::Result<VariantWindowsBatch> {
+        anyhow::bail!("variant-windows output is not supported by this backend")
     }
 }
 
@@ -373,6 +393,32 @@ impl<B: EngineBackend> StreamEngineCore<B> {
                 Some(
                     self.backend
                         .generate_variants(job_idx, filled, row_lo, row_hi),
+                )
+            }
+            NextSlice::Done => None,
+            NextSlice::Failed(e) => Some(Err(e)),
+        }
+    }
+
+    /// `variant-windows`-output counterpart of `next_batch_variants_core` (Wave B
+    /// PR-B4, #304): same iteration state, same `advance` cursor walk, but yields
+    /// `VariantWindowsBatch` via `EngineBackend::generate_variant_windows` instead of
+    /// `VariantsBatch`. Sibling method, not an overload, for the same reason
+    /// `next_batch_variants_core` is a sibling of `next_batch_core`.
+    pub(crate) fn next_batch_variant_windows_core(
+        &self,
+    ) -> Option<anyhow::Result<VariantWindowsBatch>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match self.advance(&mut state) {
+            NextSlice::Ready {
+                job_idx,
+                row_lo,
+                row_hi,
+            } => {
+                let filled = &state.current.as_ref().unwrap().filled;
+                Some(
+                    self.backend
+                        .generate_variant_windows(job_idx, filled, row_lo, row_hi),
                 )
             }
             NextSlice::Done => None,

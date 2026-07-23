@@ -16,6 +16,248 @@ pub struct VariantsBatch {
     pub start: Array1<i32>,
     pub ilen: Array1<i32>,
     pub row_offsets: Array1<i64>,
+    /// Ride-along per-variant INFO columns (Wave B PR-B3a), one entry per requested
+    /// `var_fields` INFO column, each with exactly one value per kept variant — i.e.
+    /// the same length as `start`/`ilen`, gathered by the same kept `v_idxs`.
+    pub info_out: Vec<(String, crate::record_stream::transpose::InfoVals)>,
+    /// Ragged per-variant REF allele bytes (Wave B PR-B3a `var_fields`/`ref="allele"`
+    /// input), gathered by the SAME kept `v_idxs` as `alt_data`/`start`/`ilen` — i.e.
+    /// element-for-element aligned with them. `Some` only when REF was requested
+    /// (`want_ref`); `None` (both fields) is the default `var_fields` path and must
+    /// stay byte-unchanged (no allocation, no behavior change).
+    pub ref_data: Option<Array1<u8>>,
+    /// Ragged-array offsets for `ref_data` (length `start.len() + 1`). `Some` iff
+    /// `ref_data` is `Some`.
+    pub ref_seq_offsets: Option<Array1<i64>>,
+}
+
+/// Dtype-tag for the `variant-windows` token LUT (Wave B PR-B4, #304): backends
+/// (`RecordBackend`/`Svar1Backend`) are not generic over `windows::assemble_windows_mode`'s
+/// `Tok` parameter, so the LUT crosses into backend construction as this enum instead —
+/// tagged by whichever numpy dtype `_flat_flanks.build_token_lut` picked for the caller's
+/// token alphabet (`u8` for small alphabets, `i32` once more than 256 distinct tokens are
+/// packed). Mirrors the `assemble_variant_buffers_u8`/`_i32` FFI entry-point split
+/// (`src/ffi/mod.rs`) one level up, at the backend-construction boundary instead of the
+/// PyO3 boundary.
+pub enum TokenLut {
+    U8(Array1<u8>),
+    I32(Array1<i32>),
+}
+
+/// Per-side `with_seqs("variant-windows")` mode (Wave B PR-B4 review, Minor 4): makes the
+/// invalid "unset" and "out-of-range" states unrepresentable, rather than leaving
+/// `ref_mode`/`alt_mode` as a bare `i64` where `0` silently emits no buffer for that side
+/// and an out-of-range value (confirmed by probe: e.g. `3`) ALSO silently emits nothing —
+/// both indistinguishable from a real "no buffer" choice. `windows::assemble_windows_mode`
+/// is an FFI-adjacent kernel and genuinely needs the `i64` encoding (`0`/`1`/`2`); [`as_i64`]
+/// is the single, obvious conversion point — Task 9 (constructing this from Python) should
+/// convert into a `WindowMode` as early as possible and never pass a raw `i64` further than
+/// that boundary.
+///
+/// [`as_i64`]: WindowMode::as_i64
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMode {
+    /// No buffer emitted for this side.
+    None,
+    /// Flanked window: `[start-L, end+L)` reference read (ref) or `flank5 . alt . flank3`
+    /// (alt).
+    Window,
+    /// Bare tokenized allele, no flanks.
+    Allele,
+}
+
+impl WindowMode {
+    /// The single conversion point into `windows::assemble_windows_mode`'s `i64` encoding.
+    pub fn as_i64(self) -> i64 {
+        match self {
+            WindowMode::None => 0,
+            WindowMode::Window => 1,
+            WindowMode::Allele => 2,
+        }
+    }
+}
+
+/// `with_seqs("variant-windows")` configuration (Wave B PR-B4, #304): the ref/alt mode
+/// knobs `windows::assemble_windows_mode` needs plus the dtype-tagged token LUT. Bundled
+/// into one struct — rather than four loose backend fields — so a backend only grows by
+/// one `Option<WindowModeConfig>` field; `None` means "not configured for variant-windows
+/// output" (mirrors how `variants: bool` gates `generate_variants`).
+pub struct WindowModeConfig {
+    pub ref_mode: WindowMode,
+    pub alt_mode: WindowMode,
+    pub flank_len: i64,
+    pub token_lut: TokenLut,
+}
+
+impl WindowModeConfig {
+    /// Parse `with_seqs("variant-windows")` configuration crossing the PyO3 boundary
+    /// (Wave B PR-B4 Task 9) into a `WindowModeConfig`, or `None` if the caller passed
+    /// no variant-windows configuration at all (every pre-Task-9 engine construction
+    /// path). This is the ONE shared conversion point for BOTH `Svar1StreamEngine::new`
+    /// (`crate::ffi::stream_engine`) and `RecordStreamEngine::new`
+    /// (`crate::record_stream::engine`) -- one parsing implementation, rather than two
+    /// independently-maintained copies, so the two backends' `#[new]` cannot silently
+    /// diverge in how they decode the SAME wire format (`"window"`/`"allele"` mode
+    /// strings plus a dtype-tagged token LUT) -- the asymmetry risk the Task 9 brief
+    /// calls out explicitly.
+    ///
+    /// `ref_mode`/`alt_mode`/`flank_len` must be all-`Some` or all-`None` together
+    /// (partial configuration is a caller bug, not a data condition, so it is an `Err`
+    /// rather than silently defaulting); exactly one of `token_lut_u8`/`token_lut_i32`
+    /// must be `Some` in the all-`Some` case (mirrors the `call_field_{f32,i32,i16}`
+    /// three-bucket convention already used for per-call FORMAT fields: one dtype-
+    /// homogeneous slot per possible token dtype, "exactly one populated" enforced
+    /// here rather than left to the caller).
+    pub fn from_python(
+        ref_mode: Option<&str>,
+        alt_mode: Option<&str>,
+        flank_len: Option<i64>,
+        token_lut_u8: Option<Array1<u8>>,
+        token_lut_i32: Option<Array1<i32>>,
+    ) -> Result<Option<Self>, String> {
+        match (ref_mode, alt_mode, flank_len) {
+            (None, None, None) => {
+                if token_lut_u8.is_some() || token_lut_i32.is_some() {
+                    return Err(
+                        "win_token_lut_u8/win_token_lut_i32 given without win_ref_mode/\
+                         win_alt_mode/win_flank_len"
+                            .to_string(),
+                    );
+                }
+                Ok(None)
+            }
+            (Some(rm), Some(am), Some(fl)) => {
+                let ref_mode = Self::parse_mode(rm, "win_ref_mode")?;
+                let alt_mode = Self::parse_mode(am, "win_alt_mode")?;
+                let token_lut = match (token_lut_u8, token_lut_i32) {
+                    (Some(lut), None) => TokenLut::U8(lut),
+                    (None, Some(lut)) => TokenLut::I32(lut),
+                    _ => {
+                        return Err(
+                            "exactly one of win_token_lut_u8/win_token_lut_i32 must be \
+                             given to configure variant-windows output"
+                                .to_string(),
+                        );
+                    }
+                };
+                Ok(Some(WindowModeConfig {
+                    ref_mode,
+                    alt_mode,
+                    flank_len: fl,
+                    token_lut,
+                }))
+            }
+            _ => Err(
+                "win_ref_mode/win_alt_mode/win_flank_len must all be given together (or \
+                 all omitted) to configure variant-windows output"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn parse_mode(s: &str, which: &str) -> Result<WindowMode, String> {
+        match s {
+            "window" => Ok(WindowMode::Window),
+            "allele" => Ok(WindowMode::Allele),
+            other => Err(format!(
+                "{which} must be \"window\" or \"allele\", got {other:?}"
+            )),
+        }
+    }
+}
+
+/// One `variant-windows` output token buffer, dtype-tagged to match the backend's
+/// `TokenLut` (Wave B PR-B4, #304). `(data, seq_offsets)` — ragged, one entry per selected
+/// variant.
+pub enum TokBuf {
+    U8(Array1<u8>, Array1<i64>),
+    I32(Array1<i32>, Array1<i64>),
+}
+
+/// `with_seqs("variant-windows")` batch output (Wave B PR-B4, #304): `scalars` carries the
+/// SAME `start`/`ilen`/`row_offsets`/`info_out` a plain `generate_variants` call would
+/// return for the identical kept `v_idxs` — guaranteed by both output modes sharing the
+/// same `kept_v_idxs` selection walk, so the two never silently diverge in which variants
+/// or what order they select. `ref_data`/`ref_seq_offsets` are always `None` here: raw REF
+/// bytes are not part of the variant-windows surface, only the tokenized `ref`/`ref_window`
+/// buffer (in `tok_bufs`) is. `tok_bufs` carries the tokenized window/allele buffers
+/// `windows::assemble_windows_mode` produced, named per its own field-naming
+/// (`ref_window`/`alt_window` for flanked windows, `ref`/`alt` for bare alleles).
+pub struct VariantWindowsBatch {
+    pub scalars: VariantsBatch,
+    pub tok_bufs: Vec<(String, TokBuf)>,
+}
+
+/// Collapse the four duplicated `assemble_windows_mode::<u8>`/`::<i32>` call sites (Wave B
+/// PR-B4 review, Minor 2) — `RecordBackend` and `Svar1Backend` each had their own u8/i32
+/// match arm spelling out the same 16-argument call, so a mis-ordered argument in one copy
+/// would have been a silent divergence between the two backends. One call site,
+/// monomorphizing on `token_lut`'s tagged variant, replaces all four.
+#[allow(clippy::too_many_arguments)]
+pub fn windows_tok_bufs(
+    v_idxs: ArrayView1<i32>,
+    row_offsets: ArrayView1<i64>,
+    ref_mode: WindowMode,
+    alt_mode: WindowMode,
+    alt_alleles: ArrayView1<u8>,
+    alt_offsets: ArrayView1<i64>,
+    ref_bytes: Option<ArrayView1<u8>>,
+    ref_offsets: Option<ArrayView1<i64>>,
+    flank_len: i64,
+    token_lut: &TokenLut,
+    v_contigs: ArrayView1<i32>,
+    v_starts: ArrayView1<i32>,
+    ilens: ArrayView1<i32>,
+    reference: ArrayView1<u8>,
+    contig_ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+) -> Vec<(String, TokBuf)> {
+    match token_lut {
+        TokenLut::U8(lut) => windows::assemble_windows_mode::<u8>(
+            v_idxs,
+            row_offsets,
+            ref_mode.as_i64(),
+            alt_mode.as_i64(),
+            alt_alleles,
+            alt_offsets,
+            ref_bytes,
+            ref_offsets,
+            flank_len,
+            lut.view(),
+            v_contigs,
+            v_starts,
+            ilens,
+            reference,
+            contig_ref_offsets,
+            pad_char,
+        )
+        .tok_bufs
+        .into_iter()
+        .map(|(name, data, offs)| (name.to_string(), TokBuf::U8(data, offs)))
+        .collect(),
+        TokenLut::I32(lut) => windows::assemble_windows_mode::<i32>(
+            v_idxs,
+            row_offsets,
+            ref_mode.as_i64(),
+            alt_mode.as_i64(),
+            alt_alleles,
+            alt_offsets,
+            ref_bytes,
+            ref_offsets,
+            flank_len,
+            lut.view(),
+            v_contigs,
+            v_starts,
+            ilens,
+            reference,
+            contig_ref_offsets,
+            pad_char,
+        )
+        .tok_bufs
+        .into_iter()
+        .map(|(name, data, offs)| (name.to_string(), TokBuf::I32(data, offs)))
+        .collect(),
+    }
 }
 
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
@@ -102,17 +344,38 @@ pub fn gather_alleles(
 /// `_assemble_variant_buffers_rust` (`_flat_variants.py`) byte-for-byte given
 /// byte-identical inputs — no dataset-global id is produced here (variants output is
 /// self-contained, per #313).
+///
+/// `ref_src` (Wave B PR-B3a) is an optional per-variant REF byte table
+/// `(bytes, offsets)`, gathered by the SAME `v_idxs` via [`gather_alleles`] — the same
+/// gather ALT uses, so REF stays element-for-element aligned with `start`/`ilen`/ALT.
+/// `None` (the default `var_fields` path) yields `(None, None)` with no extra
+/// allocation or work — byte-unchanged behavior.
 pub fn assemble_variants_window(
     v_idxs: ArrayView1<i32>,
     v_starts: ArrayView1<i32>,
     ilens: ArrayView1<i32>,
     alt_alleles: ArrayView1<u8>,
     alt_offsets: ArrayView1<i64>,
-) -> (Array1<u8>, Array1<i64>, Array1<i32>, Array1<i32>) {
+    ref_src: Option<(ArrayView1<u8>, ArrayView1<i64>)>,
+) -> (
+    Array1<u8>,
+    Array1<i64>,
+    Array1<i32>,
+    Array1<i32>,
+    Option<Array1<u8>>,
+    Option<Array1<i64>>,
+) {
     let (alt_data, alt_seq_offsets) = gather_alleles(v_idxs, alt_alleles, alt_offsets);
     let start: Array1<i32> = v_idxs.iter().map(|&vi| v_starts[vi as usize]).collect();
     let ilen: Array1<i32> = v_idxs.iter().map(|&vi| ilens[vi as usize]).collect();
-    (alt_data, alt_seq_offsets, start, ilen)
+    let (ref_data, ref_seq_offsets) = match ref_src {
+        Some((bytes, offs)) => {
+            let (d, o) = gather_alleles(v_idxs, bytes, offs);
+            (Some(d), Some(o))
+        }
+        None => (None, None),
+    };
+    (alt_data, alt_seq_offsets, start, ilen, ref_data, ref_seq_offsets)
 }
 
 /// Reverse-complement the alleles of mask-selected `(b*p)` rows, in place.
@@ -549,5 +812,138 @@ mod tests {
         rc_alleles_inplace(&mut data, seq_offsets.view(), var_offsets.view(), to_rc_row.view());
         // "" stays ""; "ACN" -> revcomp -> "NGT".
         assert_eq!(&data, b"NGT");
+    }
+
+    /// PR-B3a: with a per-variant REF table, `assemble_variants_window` gathers REF
+    /// bytes exactly the way it gathers ALT bytes.
+    #[test]
+    fn assemble_variants_window_gathers_ref_when_table_supplied() {
+        let v_idxs = Array1::from_vec(vec![2i32, 0]);
+        let v_starts = Array1::from_vec(vec![10i32, 20, 30]);
+        let ilens = Array1::from_vec(vec![0i32, 0, 0]);
+        let alt = Array1::from_vec(b"AACCGG".to_vec());
+        let alt_off = Array1::from_vec(vec![0i64, 2, 4, 6]);
+        let refe = Array1::from_vec(b"TTTGGGCCC".to_vec());
+        let ref_off = Array1::from_vec(vec![0i64, 3, 6, 9]);
+        let (_a, _ao, _s, _i, rd, ro) = assemble_variants_window(
+            v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt.view(),
+            alt_off.view(),
+            Some((refe.view(), ref_off.view())),
+        );
+        let rd = rd.expect("ref requested");
+        let ro = ro.expect("ref requested");
+        // v_idx 2 -> "CCC", v_idx 0 -> "TTT"
+        assert_eq!(rd.to_vec(), b"CCCTTT".to_vec());
+        assert_eq!(ro.to_vec(), vec![0i64, 3, 6]);
+    }
+
+    /// No REF table supplied ⇒ both REF outputs are None (default `var_fields`).
+    #[test]
+    fn assemble_variants_window_ref_is_none_without_table() {
+        let v_idxs = Array1::from_vec(vec![0i32]);
+        let v_starts = Array1::from_vec(vec![10i32]);
+        let ilens = Array1::from_vec(vec![0i32]);
+        let alt = Array1::from_vec(b"A".to_vec());
+        let alt_off = Array1::from_vec(vec![0i64, 1]);
+        let (_a, _ao, _s, _i, rd, ro) = assemble_variants_window(
+            v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt.view(),
+            alt_off.view(),
+            None,
+        );
+        assert!(rd.is_none());
+        assert!(ro.is_none());
+    }
+
+    // --- WindowModeConfig::from_python (Wave B PR-B4 Task 9) --------------------
+
+    #[test]
+    fn window_mode_config_from_python_all_none_is_disabled() {
+        let out = WindowModeConfig::from_python(None, None, None, None, None).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_builds_u8_lut() {
+        let lut = Array1::from_vec(vec![0u8, 1, 2, 3]);
+        let out = WindowModeConfig::from_python(
+            Some("window"),
+            Some("allele"),
+            Some(4),
+            Some(lut.clone()),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.ref_mode, WindowMode::Window);
+        assert_eq!(out.alt_mode, WindowMode::Allele);
+        assert_eq!(out.flank_len, 4);
+        match out.token_lut {
+            TokenLut::U8(l) => assert_eq!(l, lut),
+            TokenLut::I32(_) => panic!("expected TokenLut::U8"),
+        }
+    }
+
+    #[test]
+    fn window_mode_config_from_python_builds_i32_lut() {
+        let lut = Array1::from_vec(vec![300i32, 1, 2, 3]);
+        let out =
+            WindowModeConfig::from_python(Some("window"), Some("window"), Some(2), None, Some(lut.clone()))
+                .unwrap()
+                .unwrap();
+        match out.token_lut {
+            TokenLut::I32(l) => assert_eq!(l, lut),
+            TokenLut::U8(_) => panic!("expected TokenLut::I32"),
+        }
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_partial_config() {
+        // ref_mode given without alt_mode/flank_len -- a caller bug, not silently
+        // defaulted.
+        assert!(WindowModeConfig::from_python(Some("window"), None, None, None, None).is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_lut_without_modes() {
+        let lut = Array1::from_vec(vec![0u8, 1]);
+        assert!(WindowModeConfig::from_python(None, None, None, Some(lut), None).is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_invalid_mode_string() {
+        assert!(WindowModeConfig::from_python(
+            Some("bogus"),
+            Some("window"),
+            Some(1),
+            Some(Array1::from_vec(vec![0u8])),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_both_lut_dtypes() {
+        assert!(WindowModeConfig::from_python(
+            Some("window"),
+            Some("window"),
+            Some(1),
+            Some(Array1::from_vec(vec![0u8])),
+            Some(Array1::from_vec(vec![0i32])),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn window_mode_config_from_python_rejects_neither_lut_dtype() {
+        assert!(
+            WindowModeConfig::from_python(Some("window"), Some("window"), Some(1), None, None)
+                .is_err()
+        );
     }
 }

@@ -26,6 +26,41 @@ pub fn word_reads_reset() {
     WORD_READS.store(0, Ordering::Relaxed);
 }
 
+/// Per-variant staged INFO values for one requested field. genoray's VCF/PGEN
+/// `StagedColumn` has exactly two variants (I32/F32), so that path only ever
+/// produces those two. `I16` (Wave B PR-B3b review, #304) exists solely to carry
+/// SVAR1 per-call FORMAT fields registered with a native `int16` dtype (genoray's
+/// `mutcat`) through this SAME channel without a lossy/dtype-breaking upcast to
+/// `I32` -- see `ffi::stream_engine::CallVals`, which is the CSR-scale backing
+/// store this per-batch accumulator is filled from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InfoVals {
+    I32(Vec<i32>),
+    F32(Vec<f32>),
+    I16(Vec<i16>),
+}
+
+impl InfoVals {
+    pub fn len(&self) -> usize {
+        match self {
+            InfoVals::I32(v) => v.len(),
+            InfoVals::F32(v) => v.len(),
+            InfoVals::I16(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A named per-variant INFO column carried on the window (Wave B PR-B3a).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfoCol {
+    pub name: String,
+    pub values: InfoVals,
+}
+
 #[derive(Default)]
 pub struct DecodedWindow {
     pub v_starts: Vec<i32>,
@@ -47,15 +82,25 @@ pub struct DecodedWindow {
     /// else left EMPTY. `afs.is_empty()` ⇒ no AF filter (matches SVAR1's `afs: None`
     /// no-op and the PGEN path, whose `info_staged` is always empty).
     pub afs: Vec<f32>,
+    /// Requested non-AF INFO columns, one per name passed to `fill_decoded_window`,
+    /// in request order. Each has one value per window variant. Empty when no
+    /// `var_fields` INFO column was requested (Wave B PR-B3a).
+    pub info_cols: Vec<InfoCol>,
 }
 
 /// Fill `slot` (reusing its allocations) from a window's `DenseChunk`. The static table
 /// copies straight across; the genotype transpose walks haps in C-order and pushes each
 /// carried variant's COLUMN INDEX (into the static table), building a per-hap CSR.
+///
+/// `want_af` and `info_names` describe how `chunk.info_staged` was populated: AF (when
+/// requested at all) is always staged first (`info_staged[0]`), and the `info_names`
+/// fields follow it in request order (see the `afs`/`info_cols` field docs above).
 pub fn fill_decoded_window(
     chunk: &DenseChunk,
     n_samples: usize,
     ploidy: usize,
+    want_af: bool,
+    info_names: &[String],
     slot: &mut DecodedWindow,
 ) {
     let n_var = chunk.pos.len();
@@ -72,13 +117,29 @@ pub fn fill_decoded_window(
     slot.global_v_idxs.clear();
     slot.global_v_idxs.extend_from_slice(&chunk.global_idx);
 
-    // AF channel (Wave B PR-B2, #319): copy the single requested AF INFO column
-    // (info_staged[0], a per-variant Float) when present; leave empty otherwise
-    // (no AF requested, or PGEN which stages no INFO). gvl only ever requests the
-    // one AF field, so index 0 is AF.
+    // AF occupies info_staged[0] iff it was requested (PR-B2); the var_fields INFO
+    // columns follow it in request order (PR-B3a).
     slot.afs.clear();
-    if let Some(genoray_core::types::StagedColumn::Float(v)) = chunk.info_staged.first() {
-        slot.afs.extend_from_slice(v);
+    let af_offset = if want_af {
+        if let Some(genoray_core::types::StagedColumn::Float(v)) = chunk.info_staged.first() {
+            slot.afs.extend_from_slice(v);
+        }
+        1
+    } else {
+        0
+    };
+
+    slot.info_cols.clear();
+    for (i, name) in info_names.iter().enumerate() {
+        let values = match chunk.info_staged.get(af_offset + i) {
+            Some(genoray_core::types::StagedColumn::Int(v)) => InfoVals::I32(v.clone()),
+            Some(genoray_core::types::StagedColumn::Float(v)) => InfoVals::F32(v.clone()),
+            None => continue,
+        };
+        slot.info_cols.push(InfoCol {
+            name: name.clone(),
+            values,
+        });
     }
 
     // Word-level two-pass counting-sort transpose. Instead of calling get_bit once per
@@ -174,7 +235,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let chunk = dense_fixture();
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        fill_decoded_window(&chunk, 2, 2, false, &[], &mut slot);
 
         assert_eq!(slot.v_starts, vec![10, 20]);
         assert_eq!(slot.ilens, vec![0, 0]);
@@ -206,7 +267,7 @@ mod tests {
             format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        fill_decoded_window(&chunk, 2, 2, false, &[], &mut slot);
         assert!(slot.geno_v_idxs.is_empty());
         assert_eq!(slot.geno_offsets, vec![0, 0, 0, 0, 0]); // 4 haps, all empty
     }
@@ -237,7 +298,7 @@ mod tests {
             format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 3, 2, &mut slot);
+        fill_decoded_window(&chunk, 3, 2, false, &[], &mut slot);
 
         assert_eq!(slot.v_starts, vec![42]);
         // Every hap carries variant 0.
@@ -254,7 +315,7 @@ mod tests {
         assert_eq!(word_reads(), 0);
         let chunk = dense_fixture(); // 2 var, 2 samples, ploidy 2
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        fill_decoded_window(&chunk, 2, 2, false, &[], &mut slot);
         // Metric changed from per-cell get_bit reads (V*S*P = 8) to per-word reads: the
         // word-level two-pass transpose walks chunk.genos.words twice (count pass +
         // fill pass), so the count is 2 * n_words. dense_fixture has 8 bits = 1 word.
@@ -305,7 +366,7 @@ mod tests {
             format_by_carrier: None,
         };
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, n_samples, ploidy, &mut slot);
+        fill_decoded_window(&chunk, n_samples, ploidy, false, &[], &mut slot);
         assert_eq!(slot.geno_offsets, ref_offsets);
         assert_eq!(slot.geno_v_idxs, ref_idxs);
     }
@@ -320,7 +381,7 @@ mod tests {
         let mut chunk = dense_fixture();
         chunk.info_staged = vec![StagedColumn::Float(vec![0.1f32, 0.9])];
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        fill_decoded_window(&chunk, 2, 2, true, &[], &mut slot);
         assert_eq!(slot.afs, vec![0.1f32, 0.9]);
     }
 
@@ -333,7 +394,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let chunk = dense_fixture(); // info_staged: Vec::new()
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&chunk, 2, 2, &mut slot);
+        fill_decoded_window(&chunk, 2, 2, false, &[], &mut slot);
         assert!(slot.afs.is_empty());
     }
 
@@ -348,11 +409,60 @@ mod tests {
         let mut with_af = dense_fixture();
         with_af.info_staged = vec![StagedColumn::Float(vec![0.1f32, 0.9])];
         let mut slot = DecodedWindow::default();
-        fill_decoded_window(&with_af, 2, 2, &mut slot);
+        fill_decoded_window(&with_af, 2, 2, true, &[], &mut slot);
         assert_eq!(slot.afs, vec![0.1f32, 0.9]);
 
         let without_af = dense_fixture(); // info_staged: Vec::new()
-        fill_decoded_window(&without_af, 2, 2, &mut slot);
+        fill_decoded_window(&without_af, 2, 2, false, &[], &mut slot);
         assert!(slot.afs.is_empty());
+    }
+
+    /// Requested non-AF INFO fields land in `info_cols` in request order, with the
+    /// dtype genoray staged them as. `info_staged[0]` stays reserved for AF (PR-B2),
+    /// so a chunk with AF + 2 extra fields yields `afs` plus 2 `info_cols`.
+    #[test]
+    fn info_cols_copied_from_staged_columns_in_request_order() {
+        let mut chunk = dense_fixture();
+        chunk.info_staged = vec![
+            StagedColumn::Float(vec![0.1f32, 0.9]),
+            StagedColumn::Int(vec![7i32, 8]),
+            StagedColumn::Float(vec![1.5f32, 2.5]),
+        ];
+        let names = vec!["DP".to_string(), "QUAL2".to_string()];
+        let mut w = DecodedWindow::default();
+        fill_decoded_window(&chunk, 2, 2, true, &names, &mut w);
+        assert_eq!(w.afs, vec![0.1f32, 0.9]);
+        assert_eq!(w.info_cols.len(), 2);
+        assert_eq!(w.info_cols[0].name, "DP");
+        assert_eq!(w.info_cols[0].values, InfoVals::I32(vec![7, 8]));
+        assert_eq!(w.info_cols[1].name, "QUAL2");
+        assert_eq!(w.info_cols[1].values, InfoVals::F32(vec![1.5, 2.5]));
+    }
+
+    /// No AF requested: `info_staged[0]` is the first *requested* field, not AF.
+    #[test]
+    fn info_cols_start_at_zero_when_af_not_requested() {
+        let mut chunk = dense_fixture();
+        chunk.info_staged = vec![StagedColumn::Int(vec![3i32, 4])];
+        let names = vec!["DP".to_string()];
+        let mut w = DecodedWindow::default();
+        fill_decoded_window(&chunk, 2, 2, false, &names, &mut w);
+        assert!(w.afs.is_empty());
+        assert_eq!(w.info_cols.len(), 1);
+        assert_eq!(w.info_cols[0].values, InfoVals::I32(vec![3, 4]));
+    }
+
+    /// Slot recycling: a window with info columns then one without must not leak the
+    /// previous window's columns (same defect class as the existing `afs` reuse test).
+    #[test]
+    fn info_cols_cleared_on_slot_reuse() {
+        let mut with_cols = dense_fixture();
+        with_cols.info_staged = vec![StagedColumn::Int(vec![3i32, 4])];
+        let mut w = DecodedWindow::default();
+        fill_decoded_window(&with_cols, 2, 2, false, &["DP".to_string()], &mut w);
+        assert_eq!(w.info_cols.len(), 1);
+        let without = dense_fixture();
+        fill_decoded_window(&without, 2, 2, false, &[], &mut w);
+        assert!(w.info_cols.is_empty());
     }
 }

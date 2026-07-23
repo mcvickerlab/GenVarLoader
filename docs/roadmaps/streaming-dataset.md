@@ -550,8 +550,10 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
   streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
   byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
-  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done —
-  see below**); non-default `var_fields` (PR-B3) and `"variant-windows"` (PR-B4) remain. Plan:
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**),
+  non-default `var_fields` (**PR-B3a, done — see below**), and SVAR1 per-call FORMAT/dosage
+  `var_fields` (**PR-B3b, done — see below**) are wired; `"variant-windows"` (PR-B4, Rust core
+  + Python surface/FFI done, byte-identical parity suite still open — see below) remains. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -606,6 +608,134 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `FieldSpec` staging and `_write_gvi_index`-adjacent AF-attach path already existed at the
   pinned rev. No new exported symbol (two new `with_settings` kwargs only) — no `api.md`
   change. Design: `docs/superpowers/specs/2026-07-21-streaming-variants-min-max-af-b2-design.md`.
+- ✅ **Variants-output surface, Wave B PR-B3a (`var_fields`) — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** `StreamingDataset
+  .with_settings(var_fields=[...])` selects which extra per-variant fields ride along on
+  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)` but valid
+  **only** for `with_seqs("variants")` (raises `NotImplementedError` on any other output kind —
+  stricter than the written path, which also allows `var_fields` on `"variant-windows"`;
+  streaming's `"variant-windows"` output, wired as of PR-B4 Task 9, has no `var_fields`-
+  equivalent knob of its own yet). New `available_var_fields`,
+  `servable_var_fields`, and `active_var_fields` properties. The requestable set is
+  **backend-derived**: SVAR1 offers its numeric index columns (e.g. `AF`) + `ref`; VCF/BCF
+  offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
+  `servable_var_fields` narrows `available_var_fields` to what the engine can actually gather
+  today — SVAR1 index columns like `AF` are advertised but not yet servable (requesting one
+  raises `NotImplementedError` at `with_settings` time, still deferred follow-up work); VCF/BCF
+  and PGEN are fully servable. Byte-identical parity gated against the written
+  oracle on `ref` (all three backends) and on VCF INFO fields (`AF`). **Measured, permanent
+  divergence (not a bug):** for a VCF/BCF source, `written.available_var_fields ⊊
+  streaming.available_var_fields` — `gvl.write()` only ever persists one numeric INFO column
+  (`AF`) into a queryable written schema; any other declared numeric INFO field (e.g. an
+  Integer `DP`) streaming can serve live but the written path cannot expose at all (buried in a
+  nested `INFO` struct column the written-path schema scan never surfaces as a top-level
+  field) — requesting it from a written `Dataset` raises `ValueError`. Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_vcf_available_var_fields_superset_of_written`
+  and `::test_streaming_vcf_dp_field_streaming_only`. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`. Design:
+  `docs/superpowers/specs/2026-07-22-streaming-variants-wave-b-b3-b4-design.md`; plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md`. Branch:
+  `spec/streaming-waveb-b3b4`.
+- ✅ **Variants-output surface, Wave B PR-B3b (SVAR1 per-call FORMAT/dosage `var_fields`) —
+  issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Extends PR-B3a's
+  `var_fields` surface with the remaining field class: per-call FORMAT fields (`dosage` + any
+  genoray custom Number=G FORMAT column), **SVAR1-only** — VCF/PGEN decline them symmetrically
+  with the written path (`gvl.write()` never persists per-call dosage for those sources).
+  `_Svar1Backend` discovers `dosage`/custom-fmt fields the same way the written path's
+  `_svar_format_fields` helper does, extends both `available_var_fields` AND
+  `servable_var_fields` (unlike PR-B3a's numeric INDEX columns, these ARE servable — but only for
+  a dtype the FFI can carry without coercion, see the dtype-preservation note below), and only
+  crosses the REQUESTED subset into the Rust engine (split by EXACT dtype into
+  `CallVals::{F32,I32,I16}`; the field is memmapped and CSR-length-checked lazily, at
+  `build_engine` time, not eagerly at construction — a store with a stale/truncated field file
+  still opens fine for requests that never touch it).
+  **Dtype preservation (review fix, #304):** the first cut coerced every non-float per-call
+  field to `int32` regardless of its registered dtype, breaking byte-identical parity for
+  genoray's one real custom FORMAT field (`mutcat`, `int16`) and risking silent
+  truncation/wraparound for a hypothetical wider integer dtype. Fixed by widening `CallVals`
+  (and the shared per-batch `InfoVals` accumulator) with an `I16` variant and gating
+  `servable_var_fields` on the field's EXACT dtype being one of `float32`/`int32`/`int16` — the
+  only three genoray custom FORMAT fields actually use; anything else is available but not
+  servable (loud `NotImplementedError`, never a silent cast). Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_svar1_custom_format_field_matches_written`
+  (asserts `.dtype` explicitly, not just value equality; exercises the `I16` branch
+  `test_streaming_svar1_dosage_matches_written`, float32-only, never touched).
+  **Key correctness point:** per-call fields are stored parallel to `variant_idxs.npy` on the
+  SAME hap-major CSR — indexed by CSR POSITION, not by variant id (the opposite of PR-B3a's INFO
+  columns) — `Svar1Backend::generate_variants` gathers them inside the SAME keep branch that
+  pushes `kept.push(gvi)`, using the loop's CSR-position variable `o`, and rides the existing
+  `VariantsBatch.info_out` channel (no new FFI). Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_svar1_dosage_matches_written`
+  (parametrized over AF filtering, proving the per-call column is compacted by the SAME
+  AF/region keep mask as `start`/`ilen`, with `arange`-valued synthetic dosages that make a
+  CSR-position-vs-variant-id indexing bug fail loudly) and
+  `::test_dosage_var_field_rejected_on_record_backends` (VCF/PGEN). **Known scale caveat:**
+  per-call fields cross into Rust as a full `PyReadonlyArray1::to_owned()` copy (the same
+  pattern already used for `v_starts`/`ilens`/`alt_alleles`), but unlike those (variant-scale),
+  per-call fields are CSR-scale (one entry per genotype call) — the same order of magnitude as
+  `variant_idxs.npy` itself, which stays a zero-copy mmap inside `Svar1Store`. A whole-cohort
+  `dosages.npy` could be large; a follow-up could open per-call fields as their own Rust-side
+  mmap instead. Not a blocker for this task (correctness-first, flagged for follow-up). Docs
+  updated: `docs/source/dataset.md`, `skills/genvarloader/SKILL.md`. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 7). Branch:
+  `spec/streaming-waveb-b3b4`.
+- ✅ **Variants-output surface, Wave B PR-B4 (`with_seqs("variant-windows")`) — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Task 8 (Rust
+  `generate_variant_windows`) **done** — both `RecordBackend` (VCF/PGEN) and `Svar1Backend`
+  (SVAR1) grew a `generate_variant_windows` override reusing the shared `kept_v_idxs`
+  selection walk (so `"variants"` and `"variant-windows"` output can never silently diverge
+  on which variants/order they select for a given row slice) and feeding the window-local or
+  GLOBAL static table through `crate::variants::windows::assemble_windows_mode` instead of
+  `assemble_variants_window`'s plain ALT/REF gather. `scalars` carries the SAME
+  `start`/`ilen`/`row_offsets`/`info_out` a plain `generate_variants` call would return for
+  the identical kept variants — including SVAR1's per-call FORMAT/dosage fields, gathered by
+  CSR position via a `gather_call_bufs` helper shared with `generate_variants` (fixed in
+  review: the first cut left SVAR1's `info_out` empty on the mistaken theory that
+  variant-windows had no per-call-position slot for it).
+  Task 9 (Python surface + FFI marshaling) **done** — `next_batch_variant_windows` added to
+  both `Svar1StreamEngine` and `RecordStreamEngine`, marshaling `VariantWindowsBatch` to a
+  `dict` (`start`/`ilen`/`offsets` plus `<name>`/`<name>_offsets` per emitted token buffer),
+  symmetric between the two engines. `WindowModeConfig::from_python` (`src/variants/mod.rs`) is
+  the ONE shared Rust-side decode point both engines' `#[new]` call — parses
+  `win_ref_mode`/`win_alt_mode` (`"window"`/`"allele"` strings, converted to the `WindowMode`
+  enum immediately at the FFI boundary, never passed further as a raw `i64`),
+  `win_flank_len`, and a dtype-tagged `win_token_lut_{u8,i32}` (exactly one populated) into an
+  `Option<WindowModeConfig>` — `None` (every pre-Task-9 call site, including every Rust unit
+  test) preserves the old disabled default byte-for-byte. On the Python side,
+  `StreamingDataset.with_seqs("variant-windows", opt)` requires `opt` (a `VarWindowOpt`,
+  rejected for every other kind with `ValueError`), builds the token LUT once via
+  `build_token_lut` (same call `_impl.py`'s written-path `with_seqs` makes) and caches
+  `(lut, lut_dtype, opt)` on the dataset; `_win_mode_kwargs` (one shared builder) translates
+  that bundle into the `win_*` keyword arguments for whichever of SVAR1/VCF/PGEN
+  `build_engine` is in play. `_iter_batches` packs the output as a plain `dict[str, Ragged]`
+  — token buffers get TWO ragged axes (`(b, p, ~v, ~w)`, mirroring `_FlatWindow.to_ragged`),
+  scalars (`start`/`ilen`) get one (`(b, p, ~v)`, mirroring `_Flat.to_ragged`). The SVAR2
+  (`.svar2`) backend rejects `"variant-windows"` with `NotImplementedError` immediately from
+  `with_seqs` (config time, not iterate time).
+  Task 10 (byte-identical parity suite + closing docs) **done** — 27 parametrized cases
+  (`test_streaming_variant_windows_matches_written`: 3 backends × {ref, alt} ∈
+  {window, allele} × 2 token alphabets, plus `test_variant_windows_empty_group_matches_written`:
+  3 backends) in `tests/dataset/test_streaming_variants_parity.py`, gated against the written
+  `_FlatVariantWindows.to_ragged()` oracle at `with_output_format("flat")`. Compares whole
+  BATCHES (not per-cell) via `Ragged.to_padded()` with an out-of-band sentinel — measured that
+  `seqpro.rag.Ragged.__getitem__` does not do independent per-axis fancy indexing on the
+  doubly-ragged (variant count, window length) token fields, so per-`(k, h)` cell indexing can
+  raise "cannot convert a jagged Ragged to a dense array" whenever a group holds more than one
+  variant with a different window length (e.g. a SNP next to an indel). **Measured, confirmed
+  pre-existing divergence (not a PR-B4 bug):** PGEN's written `start` column is `int64`
+  (from `haps.variants.start`), while streaming always emits `int32` for every backend — present
+  identically on the already-merged `with_seqs("variants")` path (verified directly: SVAR1/VCF
+  written+streamed `start` is `int32`/`int32`; PGEN is `int64`/`int32`), just never caught there
+  because that parity test compares via dtype-agnostic `assert_array_equal`. Carved out of the
+  dtype assertion for PGEN's `start` column specifically (values still asserted equal); not
+  normalized, since that would touch the shared merged `"variants"` code path for a
+  pre-existing, out-of-scope divergence. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-10). Branch:
+  `spec/streaming-waveb-b3b4`.
+
+**Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
+(PR-B0 through PR-B4, per the ✅ entries above).
 
 ## Sequencing
 
