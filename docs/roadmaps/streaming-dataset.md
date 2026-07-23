@@ -679,7 +679,7 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   updated: `docs/source/dataset.md`, `skills/genvarloader/SKILL.md`. Plan:
   `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Task 7). Branch:
   `spec/streaming-waveb-b3b4`.
-- 🚧 **Variants-output surface, Wave B PR-B4 (`with_seqs("variant-windows")`) — issue
+- ✅ **Variants-output surface, Wave B PR-B4 (`with_seqs("variant-windows")`) — issue
   [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** Task 8 (Rust
   `generate_variant_windows`) **done** — both `RecordBackend` (VCF/PGEN) and `Svar1Backend`
   (SVAR1) grew a `generate_variant_windows` override reusing the shared `kept_v_idxs`
@@ -711,10 +711,31 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   — token buffers get TWO ragged axes (`(b, p, ~v, ~w)`, mirroring `_FlatWindow.to_ragged`),
   scalars (`start`/`ilen`) get one (`(b, p, ~v)`, mirroring `_Flat.to_ragged`). The SVAR2
   (`.svar2`) backend rejects `"variant-windows"` with `NotImplementedError` immediately from
-  `with_seqs` (config time, not iterate time). Docs updated: `skills/genvarloader/SKILL.md`.
-  Task 10 (byte-identical parity suite) is the remaining open item. Plan:
-  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-9). Branch:
+  `with_seqs` (config time, not iterate time).
+  Task 10 (byte-identical parity suite + closing docs) **done** — 27 parametrized cases
+  (`test_streaming_variant_windows_matches_written`: 3 backends × {ref, alt} ∈
+  {window, allele} × 2 token alphabets, plus `test_variant_windows_empty_group_matches_written`:
+  3 backends) in `tests/dataset/test_streaming_variants_parity.py`, gated against the written
+  `_FlatVariantWindows.to_ragged()` oracle at `with_output_format("flat")`. Compares whole
+  BATCHES (not per-cell) via `Ragged.to_padded()` with an out-of-band sentinel — measured that
+  `seqpro.rag.Ragged.__getitem__` does not do independent per-axis fancy indexing on the
+  doubly-ragged (variant count, window length) token fields, so per-`(k, h)` cell indexing can
+  raise "cannot convert a jagged Ragged to a dense array" whenever a group holds more than one
+  variant with a different window length (e.g. a SNP next to an indel). **Measured, confirmed
+  pre-existing divergence (not a PR-B4 bug):** PGEN's written `start` column is `int64`
+  (from `haps.variants.start`), while streaming always emits `int32` for every backend — present
+  identically on the already-merged `with_seqs("variants")` path (verified directly: SVAR1/VCF
+  written+streamed `start` is `int32`/`int32`; PGEN is `int64`/`int32`), just never caught there
+  because that parity test compares via dtype-agnostic `assert_array_equal`. Carved out of the
+  dtype assertion for PGEN's `start` column specifically (values still asserted equal); not
+  normalized, since that would touch the shared merged `"variants"` code path for a
+  pre-existing, out-of-scope divergence. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`. Plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-10). Branch:
   `spec/streaming-waveb-b3b4`.
+
+**Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
+(PR-B0 through PR-B4, per the ✅ entries above).
 
 ## Sequencing
 

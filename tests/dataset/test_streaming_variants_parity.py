@@ -881,3 +881,174 @@ def test_available_var_fields_includes_custom_format_field(streaming_case, tmp_p
     sds = gvl.StreamingDataset(regions, reference=reference, variants=svar)
     assert _CUSTOM_FIELD_NAME in sds.available_var_fields
     assert _CUSTOM_FIELD_NAME in sds.servable_var_fields
+
+
+# --- Wave B PR-B4: variant-windows byte-identical parity (issue #304) --------
+#
+# `StreamingDataset.with_seqs("variant-windows", opt)` drives Task 8's Rust
+# `generate_variant_windows` kernel + Task 9's FFI/Python packing. This
+# compares that streamed `dict[str, Ragged]` output, per BATCH, against the
+# written oracle queried with the SAME (r_idx, s_idx) arrays in one shot:
+# `gvl.write` + `Dataset.open(...).with_output_format("flat")
+# .with_seqs("variant-windows", opt)[r_idx, s_idx].to_ragged()` -- the query
+# boundary requires the flat output format for variant-windows (`Haps.__call__`
+# raises otherwise, see `_haps.py`), and the query result is a
+# `_FlatVariantWindows` whose `.to_ragged()` is what actually produces the
+# `dict[str, Ragged]` shape comparable to streaming's per-batch dict.
+#
+# Adaptations from the brief's literal skeleton (see the task report for the
+# full list):
+#   1. `with_output_format("flat")` is required and was missing from the
+#      brief -- without it the query raises "requires the flat output format".
+#   2. The brief indexes the written oracle PER CELL (`ds[r, s]`) and per-hap
+#      (`data[name][k, h]`, a tuple index). Measured empirically (task report):
+#      `seqpro.rag.Ragged.__getitem__` on these doubly-ragged (variant count,
+#      window length) token fields does NOT do independent per-axis numpy-style
+#      fancy indexing -- a tuple index and sequential bracket indexing both
+#      descend into the SAME nested structure one level per index, so neither
+#      reliably resolves "the (batch=k, ploidy=h) cell" once more than one
+#      ragged axis is involved, and `np.asarray()` on a partially-resolved cell
+#      raises "cannot convert a jagged Ragged to a dense array" whenever that
+#      cell holds more than one variant with a different window length (e.g. a
+#      SNP next to an indel -- exactly the svar1 fixture's shape). Querying the
+#      written oracle with the WHOLE BATCH's index arrays at once (matching
+#      streaming's per-batch shape exactly) and comparing via `.to_padded()`
+#      sidesteps this entirely: both sides pad to a dense array with the same
+#      out-of-band sentinel, so real data compares index-for-index and any
+#      genuine shape divergence (variant count or window length) still surfaces
+#      as an assertion failure.
+#
+# `var_fields` is intentionally left at its default (`["alt", "ilen", "start"]`)
+# throughout -- the written path DOES support `var_fields` ride-along columns
+# in window mode, but streaming's Python packing silently drops `info_out` in
+# the windows branch (a known, separately-tracked follow-up, not in scope
+# here). With defaults, window fields are exactly `{start, ilen}` plus the
+# token buffers (`ref_window`/`alt_window` or `ref`/`alt`, depending on `opt`).
+
+
+def _sentinel_for(dtype) -> int:
+    """An out-of-band `.to_padded()` fill value for `dtype`, guaranteed not to
+    collide with any real value this test's tiny fixtures can produce (token
+    ids, `start`/`ilen`). Padding only ever fills POSITIONS BEYOND each row's
+    real length, so as long as the exact same sentinel is used on both the
+    streaming and written side, padded positions compare sentinel-to-sentinel
+    regardless of what the value would mean as real data -- the dtype's own
+    extreme bound is always a safe, simple choice.
+    """
+    dt = np.dtype(dtype)
+    if dt.kind == "u":
+        return int(np.iinfo(dt).max)
+    if dt.kind == "i":
+        return int(np.iinfo(dt).min)
+    raise TypeError(f"_sentinel_for: no sentinel defined for dtype {dt}")
+
+
+def _assert_field_matches(name: str, got, exp, *, check_dtype: bool) -> int:
+    """Compare one whole-batch `dict[str, Ragged]` field (streaming vs the
+    written oracle queried with the same batch index arrays) and return the
+    number of variants it carries (summed over every (region, sample, ploid)
+    group), for the caller's vacuous-pass guard. See the module docstring for
+    why this pads+densifies rather than indexing per-(k, h) cell."""
+    if check_dtype:
+        assert got.dtype == exp.dtype, (
+            f"{name} dtype divergence: streaming {got.dtype} vs written {exp.dtype}"
+        )
+    assert got.shape == exp.shape, (
+        f"{name} shape divergence: streaming {got.shape} vs written {exp.shape}"
+    )
+    sentinel = _sentinel_for(got.dtype)
+    np.testing.assert_array_equal(got.to_padded(sentinel), exp.to_padded(sentinel))
+    # `.lengths` is the per-(region, sample, ploid) VARIANT COUNT for every
+    # field here (scalar fields have one ragged axis over variants; window
+    # fields have a second, inner ragged axis over window length that
+    # `.lengths` does not report -- confirmed empirically, task report) --
+    # summing it is exact and dtype-agnostic, unlike counting via an
+    # opaque-string field (see the module docstring's earlier `ref`/`alt`
+    # collapse warnings elsewhere in this file).
+    return int(np.asarray(got.lengths).sum())
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("ref_mode", ["window", "allele"])
+@pytest.mark.parametrize("alt_mode", ["window", "allele"])
+@pytest.mark.parametrize("alphabet,unk", [(b"ACGT", 4), (b"ACGTN", 5)])
+def test_streaming_variant_windows_matches_written(
+    streaming_case, backend, ref_mode, alt_mode, alphabet, unk
+):
+    """All four (ref, alt) mode combinations, both token dtypes, all three
+    backends, byte-identical against the written `_FlatVariantWindows
+    .to_ragged()` output.
+
+    PGEN's `start` column has a REAL, PRE-EXISTING, mode-independent dtype
+    divergence shared with the already-merged `with_seqs("variants")` path
+    (measured directly -- see the task report for the exact dtypes observed
+    per backend): the written oracle's `start` comes from
+    `haps.variants.start`, which is int64 for PGEN specifically (int32 for
+    SVAR1 and VCF), while streaming always emits int32 `start` for every
+    backend. `with_seqs("variants")`'s own parity test
+    (`test_streaming_variants_matches_written`, above) never caught this
+    because it compares via dtype-agnostic `np.testing.assert_array_equal`.
+    Here we assert dtype for every field/backend EXCEPT this one documented
+    case, where we still assert full value equality (just not dtype) -- a
+    genuine divergence must stay explicit, not silently dropped from the gate.
+    """
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    regions, reference, variants, written = streaming_case(backend)
+    opt = VarWindowOpt(
+        flank_length=4,
+        token_alphabet=alphabet,
+        unknown_token=unk,
+        ref=ref_mode,
+        alt=alt_mode,
+    )
+    ds = written.with_output_format("flat").with_seqs("variant-windows", opt)
+    sds = gvl.StreamingDataset(
+        regions, reference=reference, variants=variants
+    ).with_seqs("variant-windows", opt)
+
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        expected = ds[np.asarray(r_idx), np.asarray(s_idx)].to_ragged()
+        assert set(data) == set(expected), (
+            f"field-set mismatch: streaming {sorted(data)} vs written "
+            f"{sorted(expected)}"
+        )
+        for name in data:
+            # See docstring: PGEN `start` is dtype-divergent (int32 streaming
+            # vs int64 written) for a pre-existing, variant-windows-independent
+            # reason -- values must still match exactly.
+            check_dtype = not (backend == "pgen" and name == "start")
+            n = _assert_field_matches(
+                name, data[name], expected[name], check_dtype=check_dtype
+            )
+            if name == "start":
+                total += n
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_variant_windows_empty_group_matches_written(empty_region_case, backend):
+    """A (region, sample, ploid) cell with no in-window variant stays empty on both
+    paths at the default `dummy_variant=None` -- no sentinel fill on either side.
+    """
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    regions, reference, variants, written = empty_region_case(backend)
+    opt = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    ds = written.with_output_format("flat").with_seqs("variant-windows", opt)
+    sds = gvl.StreamingDataset(
+        regions, reference=reference, variants=variants
+    ).with_seqs("variant-windows", opt)
+    saw_empty = False
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        expected = ds[np.asarray(r_idx), np.asarray(s_idx)].to_ragged()
+        # No dtype assertion here (mirrors the brief): this test's job is the
+        # empty-group VALUE contract, not the separately-tracked PGEN `start`
+        # dtype divergence (see `test_streaming_variant_windows_matches_written`).
+        _assert_field_matches(
+            "start", data["start"], expected["start"], check_dtype=False
+        )
+        if np.any(np.asarray(data["start"].lengths) == 0):
+            saw_empty = True
+    assert saw_empty, "vacuous pass: fixture had no empty groups"

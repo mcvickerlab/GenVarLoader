@@ -241,7 +241,7 @@ super-batch is `max_mem`-bounded, so this costs no extra peak memory, and iterat
 stays fixed regardless of core count — the `(region_idxs, sample_idxs)` that ride along
 with each batch identify every row.
 
-### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`, `with_seqs("variants")`
+### Output-mode breadth: `with_len`, jitter, `with_seqs("annotated")`, `with_seqs("variants")`, `with_seqs("variant-windows")`
 
 `StreamingDataset` supports the following read-time knobs (issue
 [#277](https://github.com/mcvickerlab/GenVarLoader/issues/277)), mirroring the same-named
@@ -284,11 +284,30 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   no dataset-global variant id (unlike `AnnotatedHaps.var_idxs`) — each `RaggedVariants` entry is
   self-contained. `min_af`/`max_af` filtering (Wave B PR-B2, below) is wired for this output
   kind; non-default `var_fields` (Wave B PR-B3a, below) selects which extra fields ride along.
+- **`with_seqs("variant-windows", opt)`** (Wave B PR-B4, issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) — requires an `opt`
+  ([`VarWindowOpt`](api.md#genvarloader.VarWindowOpt)), same as the written path, and
+  `with_output_format("flat")` (querying in the default `"ragged"` output format raises).
+  Unlike the written path's `Dataset.with_seqs("variant-windows", opt)[r, s]`, which returns a
+  [`FlatVariantWindows`](api.md#genvarloader.FlatVariantWindows), `StreamingDataset` yields a
+  plain `dict[str, Ragged]` per batch: keys `start`/`ilen` (one ragged axis, shape
+  `(batch, ploidy, ~variants)`) plus whichever of `ref_window`/`alt_window` (`opt.ref`/`opt.alt
+  == "window"`) or `ref`/`alt` (`== "allele"`) the options selected — those token buffers carry
+  a SECOND ragged axis (`(batch, ploidy, ~variants, ~window_len)`, since window/allele length
+  varies per variant). Token dtype (`uint8` or `int32`, from `build_token_lut`) is preserved
+  exactly. Byte-identical to `Dataset.open(...).with_output_format("flat")
+  .with_seqs("variant-windows", opt)[r, s].to_ragged()` at `jitter=0`, on the SVAR1, VCF, and
+  PGEN backends (`.svar2` raises `NotImplementedError` immediately, at `with_seqs` config time).
+  **Not combinable with `var_fields`, `min_af`/`max_af`, `unphased_union`, or
+  `dummy_variant`** — `VarWindowOpt` has no `var_fields`-equivalent knob of its own for
+  streaming yet, and `StreamingDataset.with_settings` has no `unphased_union`/`dummy_variant`
+  parameter at all (unlike `Dataset.with_settings`, which supports both for
+  `"variant-windows"` output) — passing either raises a plain `TypeError` (unexpected keyword
+  argument), not a documented `NotImplementedError` guard.
 
-`"variant-windows"`/`"reference"` output kinds remain **not yet implemented** for
-`StreamingDataset` — a later Wave B follow-up (issue
-[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PR-B4); `with_seqs` raises
-`NotImplementedError` for `"variant-windows"`/`"reference"`.
+`"reference"` output remains **not yet implemented** for `StreamingDataset` — a later Wave B
+follow-up (issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs`
+raises `NotImplementedError` for `"reference"`.
 
 #### Variant fields on streaming output (`var_fields`, Wave B PR-B3a)
 
@@ -297,8 +316,9 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
 ride along on `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`
 (see "Variant fields (`var_fields`)" above) but valid **only** for `with_seqs("variants")` —
 combining `var_fields` with any other output kind raises `NotImplementedError` (stricter than the
-written path, which allows `var_fields` on `"variant-windows"` too — streaming doesn't support
-that output kind yet). The requestable set is **backend-derived**, not read from an on-disk
+written path, which also allows `var_fields` on `"variant-windows"` — streaming's
+`"variant-windows"` output (Wave B PR-B4, above) has no `var_fields`-equivalent knob of its own
+yet). The requestable set is **backend-derived**, not read from an on-disk
 schema, since there is no written artifact:
 
 | Backend | `available_var_fields` |
@@ -351,8 +371,8 @@ This is a permanent asymmetry between the two paths for VCF/BCF sources, not a b
 [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317)) mirrors
 `Dataset.with_settings(min_af=, max_af=)`: inclusive AF bounds applied as a per-variant filter,
 supported **only** for `with_seqs("variants")` output — combining `min_af`/`max_af` with any
-other output kind (`"haplotypes"`, `"annotated"`, `"reference"`) raises `NotImplementedError`,
-matching the written path. Where the AF comes from depends on the backend:
+other output kind (`"haplotypes"`, `"annotated"`, `"reference"`, `"variant-windows"`) raises
+`NotImplementedError`, matching the written path. Where the AF comes from depends on the backend:
 
 | Backend | AF source | If unavailable |
 |---|---|---|
