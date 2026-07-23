@@ -282,13 +282,50 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   the written path's region-overlap clip), and output is byte-identical to
   `Dataset.open(...).with_seqs("variants")[r, s]` at `jitter=0`. Streamed variant records carry
   no dataset-global variant id (unlike `AnnotatedHaps.var_idxs`) — each `RaggedVariants` entry is
-  self-contained. `min_af`/`max_af` filtering and non-default `var_fields` (e.g. `dosage`/FORMAT
-  columns) on the streaming variants path are not yet wired.
+  self-contained. `min_af`/`max_af` filtering (Wave B PR-B2, below) is wired for this output
+  kind; non-default `var_fields` (e.g. `dosage`/FORMAT columns) on the streaming variants path is
+  not yet wired (**PR-B3**).
 
-`"variant-windows"`/`"reference"` output kinds, `min_af`/`max_af`, and non-default `var_fields`
-remain **not yet implemented** for `StreamingDataset` — later Wave B follow-ups (issue
-[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B2–B4); `with_seqs` raises
+`"variant-windows"`/`"reference"` output kinds and non-default `var_fields` remain **not yet
+implemented** for `StreamingDataset` — later Wave B follow-ups (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B3–B4); `with_seqs` raises
 `NotImplementedError` for `"variant-windows"`/`"reference"`.
+
+#### Allele-frequency filtering (`min_af`/`max_af`, Wave B PR-B2)
+
+`StreamingDataset.with_settings(min_af=, max_af=)` (issue
+[#317](https://github.com/mcvickerlab/GenVarLoader/issues/317)) mirrors
+`Dataset.with_settings(min_af=, max_af=)`: inclusive AF bounds applied as a per-variant filter,
+supported **only** for `with_seqs("variants")` output — combining `min_af`/`max_af` with any
+other output kind (`"haplotypes"`, `"annotated"`, `"reference"`) raises `NotImplementedError`,
+matching the written path. Where the AF comes from depends on the backend:
+
+| Backend | AF source | If unavailable |
+|---|---|---|
+| SVAR (`.svar`) | The `.svar` index, after running `SparseVar.cache_afs()` on the store | `RuntimeError` |
+| VCF/BCF | The VCF/BCF `INFO/AF` header field, read live per window | `RuntimeError` |
+| PGEN | Not supported — a PGEN record stream carries no INFO | `RuntimeError` (always) |
+
+When AF filtering is requested but unavailable (an uncached `.svar` store, a VCF/BCF with no
+`INFO/AF` field, or any PGEN source), streaming raises the **same** `RuntimeError` message as the
+written path ("Either this dataset is not backed by an SVAR file, or the SVAR file has not had
+AFs cached yet..."), so the guard behaves identically on both sides.
+
+**VCF/BCF AF now also flows into the written path.** `gvl.write()` caches an `AF` column into the
+written `.gvi` index whenever the source VCF/BCF header declares `INFO/AF` (see
+[write.md](write.md)), so a written `Dataset` opened from that same VCF/BCF can AF-filter it too
+— streaming and written agree by construction, since both read the same `INFO/AF` field.
+AF-less VCFs/BCFs are unaffected on both sides.
+
+```{caution}
+This VCF/BCF streaming⟺written AF agreement assumes a **single `AF` value per (bi-allelic)
+record** — normalize with `bcftools norm -m -any` before writing. If a record's `INFO/AF` carries
+multiple values (an ambiguous ALT→AF mapping, e.g. a `Number=.` `AF` left un-subset after a
+`bcftools norm -m` split), the two paths diverge: `gvl.write()` **declines** to cache AF (written
+filtering then raises the guard), while streaming reads AF **live** and resolves it to the first
+value — so streaming may filter where the written path raises. Normalize so each record carries a
+single per-ALT `AF` to keep the two byte-identical.
+```
 
 The **`.svar2` backend** does not yet support these knobs. It is currently
 **haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,

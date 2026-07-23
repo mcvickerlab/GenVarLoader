@@ -734,7 +734,8 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let vcf_filler = VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let vcf_filler =
+            VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         let pgen_filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
 
         let job = RecordJob {
@@ -769,7 +770,8 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let vcf_filler = VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let vcf_filler =
+            VcfWindowFiller::new(&vcf_fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         let pgen_filler = PgenWindowFiller::new(&pgen_fixture_path(), &["s1", "s2"]).unwrap();
 
         let job = RecordJob {
@@ -812,7 +814,7 @@ mod tests {
         // Sorted order is S1, S10, S2 (physical .psam order is S10, S2, S1).
         let public = ["S1", "S10", "S2"];
         let vcf_filler =
-            VcfWindowFiller::new(&unsorted_vcf_fixture_path(), &public, 2, None).unwrap();
+            VcfWindowFiller::new(&unsorted_vcf_fixture_path(), &public, 2, None, false).unwrap();
         let pgen_filler = PgenWindowFiller::new(&unsorted_pgen_fixture_path(), &public).unwrap();
 
         let job = RecordJob {
@@ -856,7 +858,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let public = ["S1", "S10", "S2"];
         let vcf_filler =
-            VcfWindowFiller::new(&unsorted_vcf_fixture_path(), &public, 2, None).unwrap();
+            VcfWindowFiller::new(&unsorted_vcf_fixture_path(), &public, 2, None, false).unwrap();
         let pgen_filler = PgenWindowFiller::new(&unsorted_pgen_fixture_path(), &public).unwrap();
 
         let job = RecordJob {

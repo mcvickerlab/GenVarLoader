@@ -35,8 +35,13 @@
 //! `RecordBackend::generate` doc comment requires — a spanning upstream DEL
 //! must be present in the decoded table for the kernel to clip it per-row.
 //!
-//! No INFO/FORMAT fields are requested (`fields: &[]`) — haplotype
-//! reconstruction only needs POS/ILEN/ALT/GT.
+//! No FORMAT fields are ever requested. INFO fields are requested only when
+//! `want_af` is set at construction (Wave B PR-B2, #319): the single `AF`
+//! `FieldSpec` (`Info`/`Float`/`F32`), staged by genoray into
+//! `DenseChunk.info_staged[0]` and copied into `DecodedWindow.afs` by
+//! `fill_decoded_window`. Otherwise `fields: Vec::new()` — haplotype
+//! reconstruction only needs POS/ILEN/ALT/GT, so no-filter jobs pay no
+//! INFO-decode cost.
 //!
 //! ## Single-chunk invariant
 //!
@@ -52,7 +57,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::ensure;
 
 use genoray_core::chunk_assembler::ChunkAssembler;
-use genoray_core::field::FieldSpec;
+use genoray_core::field::{FieldCategory, FieldSpec, HtslibType, StorageDtype};
 use genoray_core::normalize::CheckRef;
 use genoray_core::svar2_view::OverlapMode;
 use genoray_core::types::{BitGrid3, DenseChunk};
@@ -109,14 +114,30 @@ impl VcfWindowFiller {
     /// `fasta_path: None` matches `gvl.write`'s VCF normalization (no
     /// read-time left-alignment) — see the module doc. Pass `Some(path)` only
     /// to deliberately deviate from that parity contract.
+    ///
+    /// `want_af`: request the `AF` INFO `FieldSpec` (Wave B PR-B2, #319), so
+    /// `fill` populates `DecodedWindow.afs`. Pass `false` when no AF filter is
+    /// configured — no-filter jobs then pay no INFO-decode cost.
     pub fn new(
         vcf_path: &str,
         samples: &[&str],
         ploidy: usize,
         fasta_path: Option<&str>,
+        want_af: bool,
     ) -> anyhow::Result<Self> {
         let sample_indices = VcfRecordSource::resolve_sample_indices(vcf_path, samples)?;
         VCF_SAMPLE_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+        let fields = if want_af {
+            vec![FieldSpec {
+                name: "AF".into(),
+                category: FieldCategory::Info,
+                htype: HtslibType::Float,
+                dtype: StorageDtype::F32,
+                default: None,
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             vcf_path: vcf_path.to_string(),
             sample_indices,
@@ -124,7 +145,7 @@ impl VcfWindowFiller {
             fasta_path: fasta_path.map(str::to_string),
             check_ref: CheckRef::Exclude,
             overlap: OverlapMode::Variant,
-            fields: Vec::new(),
+            fields,
             htslib_threads: 1,
             chunk_size: DEFAULT_CHUNK_SIZE,
         })
@@ -243,7 +264,7 @@ mod tests {
         vcf_sample_resolutions_reset();
         assert_eq!(vcf_sample_resolutions(), 0);
 
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         assert_eq!(
             vcf_sample_resolutions(),
             1,
@@ -300,7 +321,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         let job = RecordJob {
             contig_idx: 0,
             regions: vec![(0, 100)],
@@ -329,7 +350,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         let job = RecordJob {
             contig_idx: 0,
             regions: vec![(500, 600)],
@@ -360,7 +381,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None).unwrap();
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false).unwrap();
         // s_lo=1,s_hi=2 selects only s2.
         let job = RecordJob {
             contig_idx: 0,
@@ -388,7 +409,7 @@ mod tests {
         let _guard = crate::record_stream::transpose::FILLER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None)
+        let filler = VcfWindowFiller::new(&fixture_path(), &["s1", "s2"], 2, None, false)
             .unwrap()
             .with_chunk_size(1);
         let job = RecordJob {

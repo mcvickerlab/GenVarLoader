@@ -1,6 +1,11 @@
+import shutil
+
+import numpy as np
 import polars as pl
 import pytest
+from genoray import SparseVar
 
+import genvarloader as gvl
 from genvarloader._dataset._streaming import StreamingDataset
 from genvarloader._ragged import RaggedSeqs
 
@@ -57,6 +62,94 @@ def test_with_settings_sets_jitter_rng_deterministic():
     assert sds._jitter == 4
     assert sds._rng == 0
     assert sds._deterministic is False
+
+
+def test_with_settings_min_max_af_stored(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert sds._min_af is None and sds._max_af is None
+    out = sds.with_settings(min_af=0.1, max_af=0.9)
+    assert out._min_af == 0.1 and out._max_af == 0.9
+    assert sds._min_af is None and sds._max_af is None  # immutable
+    assert out._jitter == sds._jitter  # copy preserves others
+
+
+def test_af_filter_rejects_non_variants_output(streaming_case):
+    regions, reference, variants, _ = streaming_case("svar1")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_seqs("haplotypes")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(NotImplementedError, match="af"):
+        next(iter(sds.to_iter(batch_size=4)))
+
+
+def _af_cached_svar(streaming_case, tmp_path):
+    regions, reference, variants, _ = streaming_case("svar1")
+    dst = tmp_path / "af.svar"
+    shutil.copytree(variants, dst)
+    sv = SparseVar(str(dst))
+    sv.cache_afs()
+    af = sv.index.sort("index")["AF"].to_numpy()
+    return regions, reference, str(dst), af
+
+
+def test_svar1_min_af_actually_filters(streaming_case, tmp_path):
+    regions, reference, svar, af = _af_cached_svar(streaming_case, tmp_path)
+    thr = float(np.median(af))
+    base = gvl.StreamingDataset(regions, reference=reference, variants=svar).with_seqs(
+        "variants"
+    )
+    filt = base.with_settings(min_af=thr)
+
+    def total(ds):
+        # Count VARIANTS per (cell, hap) via `start` -- one scalar per kept variant.
+        # NB: do NOT count `alt[h]`: for a hap with zero kept variants `alt[h]` is an
+        # empty bytestring `b''`, and `np.atleast_1d(np.asarray(b''))` has shape (1,),
+        # so an alt-byte count saturates at a fixed structural value and never reflects
+        # filtering. `start[h]` is one integer per variant, so `.size` is the true count.
+        n = 0
+        for data, r_idx, _s in ds.to_iter(batch_size=4):
+            for k in range(len(r_idx)):
+                for h in range(ds.ploidy):
+                    n += np.asarray(data[k].start[h]).size
+        return n
+
+    n_base, n_filt = total(base), total(filt)
+    # An AF threshold above every possible AF (1.0) must drop EVERY variant -- the
+    # regression guard proving the Rust AF keep actually runs end-to-end (not a no-op).
+    n_extreme = total(base.with_settings(min_af=2.0))
+    assert n_base > 0, "unfiltered stream must yield variants"
+    assert n_filt < n_base, "median-AF min_af must drop some variants"
+    assert n_extreme == 0, "min_af above max AF must drop all variants"
+
+
+@pytest.mark.parametrize("backend", ["svar1", "pgen"])
+def test_af_missing_guard_raises(streaming_case, backend):
+    # svar1 here = the UN-cached fixture (streaming_case does NOT run cache_afs);
+    # pgen has no AF path. Both must raise the same RuntimeError as the written path.
+    regions, reference, variants, _ = streaming_case(backend)
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_seqs("variants")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(RuntimeError, match="AFs cached"):
+        next(iter(sds.to_iter(batch_size=4)))
+
+
+def test_af_missing_guard_raises_vcf_without_info_af(streaming_case):
+    # The committed streaming_case("vcf") fixture's VCF has NO INFO/AF header field
+    # (verified), so has_cached_af is False -> the guard raises.
+    regions, reference, vcf_no_af, _ = streaming_case("vcf")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=vcf_no_af)
+        .with_seqs("variants")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(RuntimeError, match="AFs cached"):
+        next(iter(sds.to_iter(batch_size=4)))
 
 
 def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():

@@ -148,6 +148,9 @@ class StreamingDataset:
     _rng: "int | np.random.Generator | None" = None
     # Deterministic: disables random within-window shifts for fixed-length output.
     _deterministic: bool = True
+    # Inclusive allele-frequency bounds for `with_seqs("variants")` (PR-B2, #317).
+    _min_af: "float | None" = None
+    _max_af: "float | None" = None
 
     def __init__(
         self,
@@ -284,6 +287,8 @@ class StreamingDataset:
             "_jitter",
             "_rng",
             "_deterministic",
+            "_min_af",
+            "_max_af",
         ):
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
@@ -462,6 +467,18 @@ class StreamingDataset:
             # -- threaded through `build_engine`/the engine constructor and selects the
             # `next_batch_variants` puller below.
             _variants = self._seq_kind is RaggedVariants
+            # Wave B PR-B2 (#317): min_af/max_af filtering is only implemented for
+            # `with_seqs("variants")` output -- mirroring the written `Dataset`, which
+            # raises for haplotype/annotated output when AF bounds are requested (AF
+            # filtering drops whole variants, which haplotype/annotated reconstruction
+            # has no way to represent). Fail fast rather than silently ignore the bounds.
+            _af_filter = self._min_af is not None or self._max_af is not None
+            if _af_filter and not _variants:
+                raise NotImplementedError(
+                    'min_af/max_af filtering is only supported for with_seqs("variants") '
+                    "output (matching the written Dataset, which raises for "
+                    "haplotype/annotated output)."
+                )
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
             # unjittered region bounds and emit ragged haplotypes only, so combining
@@ -514,6 +531,15 @@ class StreamingDataset:
                     '"engine" prefetch strategy requires a record-style backend (SVAR1/VCF/PGEN)'
                 )
                 backend = self._backend
+                # Wave B PR-B2 (#317/#319): AF filtering needs cached per-variant AF --
+                # `SparseVar.cache_afs()` for SVAR1, an INFO/AF header field for VCF, never
+                # for PGEN (no INFO path). Fail fast with the SAME message the written
+                # `Dataset` path raises (`_haps.py`), so streaming and written agree.
+                if _af_filter and not backend.has_cached_af:
+                    raise RuntimeError(
+                        "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
+                        + "Doing this automatically is not yet supported."
+                    )
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
                 # chunk `arange(s_lo, s_hi)`, so each window is captured losslessly by
@@ -565,7 +591,13 @@ class StreamingDataset:
                         for (contig_idx, r_idx, s_lo, s_hi) in plan_jobs
                     ]
                 engine = backend.build_engine(
-                    engine_jobs, batch_size, _out_len, _annotated, _variants
+                    engine_jobs,
+                    batch_size,
+                    _out_len,
+                    _annotated,
+                    _variants,
+                    min_af=self._min_af,
+                    max_af=self._max_af,
                 )
                 del engine_jobs
                 # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
@@ -1012,6 +1044,8 @@ class StreamingDataset:
         jitter: "int | None" = None,
         rng: "int | np.random.Generator | None" = None,
         deterministic: "bool | None" = None,
+        min_af: "float | None" = None,
+        max_af: "float | None" = None,
     ) -> "StreamingDataset":
         """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
         relevant subset of :meth:`Dataset.with_settings` (same parameter names).
@@ -1036,6 +1070,16 @@ class StreamingDataset:
             not yet implemented (documented Wave A deferral -- needs a Rust engine
             API addition). Currently has no observable effect on ``to_iter``'s
             output.
+        min_af
+            Inclusive lower allele-frequency bound for ``with_seqs("variants")``.
+            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
+            field); otherwise raises at iterate time. Matches
+            :meth:`Dataset.with_settings`.
+        max_af
+            Inclusive upper allele-frequency bound for ``with_seqs("variants")``.
+            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
+            field); otherwise raises at iterate time. Matches
+            :meth:`Dataset.with_settings`.
 
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
@@ -1049,6 +1093,10 @@ class StreamingDataset:
             object.__setattr__(out, "_rng", rng)
         if deterministic is not None:
             object.__setattr__(out, "_deterministic", bool(deterministic))
+        if min_af is not None:
+            object.__setattr__(out, "_min_af", float(min_af))
+        if max_af is not None:
+            object.__setattr__(out, "_max_af", float(max_af))
         return out
 
     def __getitem__(self, idx) -> None:
@@ -1161,7 +1209,17 @@ class _Svar1Backend:
 
         self._contigs = list(contigs)
 
-        sv = SparseVar(str(svar_path))
+        # Wave B PR-B2 (#317): `SparseVar._scan_index` only selects a fixed column
+        # set (CHROM/POS/REF/ALT/ILEN/`index`) plus whatever `attrs` the caller
+        # requests -- a plain `SparseVar(path)` silently omits a cached "AF" column
+        # even when `cache_afs()` has already written it to `index.arrow` on disk.
+        # Peek the on-disk schema (same `index.arrow` layout `_svar_link.py` reads
+        # directly) and request "AF" explicitly when present, so `idx["AF"]` below
+        # is actually populated for stores with cached AF.
+        _has_cached_af = (
+            "AF" in pl.scan_ipc(Path(svar_path) / "index.arrow").collect_schema()
+        )
+        sv = SparseVar(str(svar_path), attrs=["AF"] if _has_cached_af else None)
         # `gvl.write()` always lexicographically sorts sample names
         # (`_write.py`'s unconditional `samples.sort()`), so `gvl.Dataset`'s
         # sample index `s` means "the s-th name in sorted order" -- NOT the
@@ -1198,6 +1256,17 @@ class _Svar1Backend:
         )
 
         idx = sv.index.sort("index")
+        # Wave B PR-B2 (#317): cached per-variant AF, row-aligned with `idx` at THIS
+        # point -- read before `_canonicalize_variant_table` below, which is a pure
+        # per-row column transform (no reorder/filter/row-count change), so alignment
+        # with the Rust global `v_starts`/`ilens` tables built from the canonicalized
+        # `idx` further down holds. `None` when the store has no cached AF (streaming
+        # `min_af`/`max_af` is then a no-op via `has_cached_af`/`build_engine`).
+        self._afs = (
+            idx["AF"].to_numpy().astype(np.float32, copy=False)
+            if "AF" in idx.columns
+            else None
+        )
         # Same "valid inputs only" contract `gvl.write` enforces (validated, not
         # fixed up). This is load-bearing here, not just parity-cosmetic: `ilens`
         # (used both to derive `v_ends` for the range search and by the
@@ -1292,6 +1361,13 @@ class _Svar1Backend:
             self._contig_arrays[c] = (vs_c, ve_c)
             self._contig_meta[c] = (contig_start, n_local, max_v_len)
 
+    @property
+    def has_cached_af(self) -> bool:
+        """Whether this store has cached per-variant AF (Wave B PR-B2, #317) --
+        `SparseVar.cache_afs()` has been run and `min_af`/`max_af` filtering is
+        therefore available on this backend."""
+        return self._afs is not None
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -1299,6 +1375,8 @@ class _Svar1Backend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,
+        max_af: "float | None" = None,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -1326,6 +1404,13 @@ class _Svar1Backend:
         `variants` parameter, which gates `Svar1Backend::generate_variants` (flat
         `alt`/`start`/`ilen` variant buffers via the shared `assemble_variants_window`
         helper) the same way `annotated` gates `next_batch_annotated`.
+
+        `min_af`/`max_af` (Wave B PR-B2, #317) forward straight to the engine
+        constructor's trailing `afs`/`min_af`/`max_af` parameters. `afs` (this
+        backend's cached per-variant AF, `self._afs`) is only passed when filtering
+        is actually requested (`min_af is not None or max_af is not None`) -- a
+        no-filter job stays zero-cost, matching the `afs=None` no-op fast path
+        documented on the Rust side (`stream_engine.rs`).
         """
         from ..genvarloader import Svar1StreamEngine
 
@@ -1394,6 +1479,9 @@ class _Svar1Backend:
             output_length,
             annotated,
             variants,
+            afs=(self._afs if (min_af is not None or max_af is not None) else None),
+            min_af=min_af,
+            max_af=max_af,
         )
 
     def read_window(
@@ -1847,6 +1935,12 @@ class _VcfBackend:
 
         self._ref = Reference.from_path(reference_path, self._contigs)
 
+        # Whether the source VCF header declares an INFO/AF field (Wave B
+        # PR-B2, #319) -- the SAME condition `gvl.write` uses (Task 5) to cache
+        # AF into the written `.gvi`, so streaming and written agree on AF
+        # availability.
+        self._has_cached_af = bool(vcf._declared_info_fields(("AF",)))
+
         # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
         # (the public ladder branch constructs both the same way) but unused
         # here: `build_engine`'s `jobs` already carry each window's
@@ -1855,6 +1949,13 @@ class _VcfBackend:
         # own region table the way `_Svar1Backend` does for its readahead path.
         del bed
 
+    @property
+    def has_cached_af(self) -> bool:
+        """Whether the source VCF header declares an INFO/AF field (Wave B PR-B2,
+        #319) -- the SAME condition gvl.write uses to cache AF into the written
+        .gvi, so streaming <-> written agree on AF availability."""
+        return self._has_cached_af
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -1862,6 +1963,8 @@ class _VcfBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
+        max_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1880,7 +1983,13 @@ class _VcfBackend:
         gathered by `generate_batch_core`). VCF's genoray ids are hard-coded
         `-1` until Phase 3, so the gather is a no-op and emitted ids stay
         window-local -- the known VCF gap (see `vcf.rs`'s `WindowFiller::fill`
-        doc comment and GitHub issue #305).
+        doc comment and GitHub issue #305). `min_af`/`max_af` are forwarded
+        straight to the engine constructor's trailing bounds params; the Rust
+        `#[new]` derives `want_af` from them (`min_af.is_some() ||
+        max_af.is_some()`) so the `VcfWindowFiller` requests the AF
+        `FieldSpec` exactly when filtering is active (Wave B PR-B2, #317/#319)
+        -- callers are expected to have already checked `has_cached_af` (see
+        `StreamingDataset._iter_batches`'s AF-missing guard).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -1923,6 +2032,8 @@ class _VcfBackend:
             output_length,
             annotated,
             variants,
+            min_af,
+            max_af,
         )
 
 
@@ -1996,6 +2107,12 @@ class _PgenBackend:
         # from `StreamingDataset._plan`/`_regions`.
         del bed
 
+    @property
+    def has_cached_af(self) -> bool:
+        """PGEN record streams carry no INFO -> no AF (Wave B PR-B2, #319).
+        AF filtering on PGEN is guarded upstream; always False."""
+        return False
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -2003,6 +2120,8 @@ class _PgenBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
+        min_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
+        max_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -2062,4 +2181,11 @@ class _PgenBackend:
             output_length,
             annotated,
             variants,
+            # `min_af`/`max_af`: PGEN stages no INFO, so `PgenWindowFiller` never
+            # populates AFs and the Rust AF fold is a no-op regardless of these
+            # values -- forwarded only to keep the two backends' `RecordStreamEngine`
+            # call sites symmetric; AF filtering on PGEN is guarded out upstream
+            # (see `has_cached_af` and `StreamingDataset._iter_batches`'s guard).
+            min_af,
+            max_af,
         )

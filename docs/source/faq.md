@@ -136,7 +136,17 @@ As of Wave A (issue [#277](https://github.com/mcvickerlab/GenVarLoader/issues/27
 
 The **`.svar2`** backend does not yet support these Wave A knobs: it is currently `with_seqs("haplotypes")` only, `jitter=0` only, and ragged output only — combining a `.svar2` source with `jitter>0`, `with_len(<int>)`, or `with_seqs("annotated")` raises `NotImplementedError` (SVAR2 Wave A support is a known follow-up).
 
-`with_seqs("variants")` returns `RaggedVariants` (default fields `alt`/`start`/`ilen`, region-clipped, byte-identical to the written path) on the SVAR1, VCF, and PGEN backends — `.svar2` remains haplotypes-only. `"variant-windows"`/`"reference"` output, `min_af`/`max_af`, and non-default `var_fields` are **not yet implemented** for `StreamingDataset` (later Wave B, issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B2–B4); `with_seqs` raises `NotImplementedError` for `"variant-windows"`/`"reference"`. See the `genvarloader` skill for the full scope.
+`with_seqs("variants")` returns `RaggedVariants` (default fields `alt`/`start`/`ilen`, region-clipped, byte-identical to the written path) on the SVAR1, VCF, and PGEN backends — `.svar2` remains haplotypes-only. `"variant-windows"`/`"reference"` output and non-default `var_fields` are **not yet implemented** for `StreamingDataset` (later Wave B, issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PR B3/B4); `with_seqs` raises `NotImplementedError` for `"variant-windows"`/`"reference"`. See the `genvarloader` skill for the full scope.
+
+**`min_af`/`max_af` filtering** (Wave B PR-B2, issue [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317)) is wired for `with_seqs("variants")` via `with_settings(min_af=, max_af=)`, mirroring `Dataset.with_settings` (inclusive bounds; raises `NotImplementedError` for any other output kind). The AF source is per-backend:
+
+| Backend | AF source | If unavailable |
+|---|---|---|
+| SVAR (`.svar`) | `.svar` index, after `SparseVar.cache_afs()` | `RuntimeError` |
+| VCF/BCF | `INFO/AF` header field, read live | `RuntimeError` |
+| PGEN | not supported (no INFO in a PGEN record stream) | `RuntimeError` (always) |
+
+The streaming guard raises the **same** `RuntimeError` message as the written `Dataset` path when AF isn't available. `gvl.write()` also now caches an `AF` column into a written `.gvi` index for any VCF/BCF source whose header declares `INFO/AF` (see [write.md](write.md)), so a written `Dataset` built from that same source can AF-filter too — streaming and written stay interchangeable because both read the same `INFO/AF` field. AF-less VCFs/BCFs, and PGEN sources, are unaffected on both sides.
 
 **Peak memory does not scale with cohort size.** The `max_mem` constructor argument (default `"512MB"`; an int byte count or a size string like `"1g"`/`"2GiB"`) bounds the read window's offsets buffer, which `StreamingDataset` chunks over regions and samples so it stays within budget regardless of how many samples the dataset has. Generation is separately bounded by `to_iter`'s `batch_size`: each window is read once, then reconstructed one `batch_size` slice at a time, so haplotype output is never materialized for a whole window at once. Peak memory is therefore `max_mem` (offsets) + `batch_size` (output) — neither term grows with cohort size.
 
