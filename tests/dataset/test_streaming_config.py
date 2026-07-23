@@ -125,6 +125,33 @@ def test_svar1_min_af_actually_filters(streaming_case, tmp_path):
     assert n_extreme == 0, "min_af above max AF must drop all variants"
 
 
+@pytest.mark.parametrize("backend", ["svar1", "pgen"])
+def test_af_missing_guard_raises(streaming_case, backend):
+    # svar1 here = the UN-cached fixture (streaming_case does NOT run cache_afs);
+    # pgen has no AF path. Both must raise the same RuntimeError as the written path.
+    regions, reference, variants, _ = streaming_case(backend)
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_seqs("variants")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(RuntimeError, match="AFs cached"):
+        next(iter(sds.to_iter(batch_size=4)))
+
+
+def test_af_missing_guard_raises_vcf_without_info_af(streaming_case):
+    # The committed streaming_case("vcf") fixture's VCF has NO INFO/AF header field
+    # (verified), so has_cached_af is False -> the guard raises.
+    regions, reference, vcf_no_af, _ = streaming_case("vcf")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=vcf_no_af)
+        .with_seqs("variants")
+        .with_settings(min_af=0.1)
+    )
+    with pytest.raises(RuntimeError, match="AFs cached"):
+        next(iter(sds.to_iter(batch_size=4)))
+
+
 def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     sds = _tiny_sds()
     from genvarloader._dataset._rag_variants import RaggedVariants

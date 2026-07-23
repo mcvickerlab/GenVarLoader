@@ -488,14 +488,14 @@ impl RecordStreamEngine {
         match source_kind {
             "vcf" => {
                 let sample_refs: Vec<&str> = sample_names.iter().map(String::as_str).collect();
-                // want_af: false for now — Task 8 wires the real min_af/max_af-derived
-                // flag from Python (Wave B PR-B2, #319).
+                // want_af is derived from the AF bounds: request the AF FieldSpec exactly
+                // when AF filtering is active (Wave B PR-B2, #319).
                 let filler = VcfWindowFiller::new(
                     &vcf_path,
                     &sample_refs,
                     ploidy,
                     fasta_path.as_deref(),
-                    /* want_af */ false,
+                    min_af.is_some() || max_af.is_some(),
                 )
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(Self::new_rs(

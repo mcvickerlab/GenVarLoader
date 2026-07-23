@@ -134,11 +134,20 @@ def svar1_multicontig_fixture(tmp_path_factory) -> Svar1MultiContigFixture:
     subprocess.run(["bcftools", "index", str(bcf)], check=True)
 
     svar_path = tmp_path_factory.mktemp("svar1_mc_store") / "store.svar"
+    # `samples=None` (not an explicit `["S0", "S1", "S2"]` list, even though that
+    # list names the VCF's full population): `SparseVar.from_vcf` treats ANY
+    # explicit `samples=` as a subsetting request and unconditionally recomputes
+    # + caches AF into `index.arrow` as a side effect (`_write_from_reader`'s
+    # `subsetting_samples` branch), even when the "subset" is the whole cohort.
+    # This fixture is relied on elsewhere as the UN-cached case (Wave B PR-B2,
+    # #317/#319 AF-missing guard test) -- `samples=None` takes the "not
+    # subsetting" path and skips that AF computation, while still preserving the
+    # VCF's native S0/S1/S2 order (`caller_samples = list(vcf.available_samples)`).
     SparseVar.from_vcf(
         svar_path,
         VCF(bcf),
         max_mem="1g",
-        samples=["S0", "S1", "S2"],
+        samples=None,
         overwrite=True,
     )
 

@@ -531,6 +531,15 @@ class StreamingDataset:
                     '"engine" prefetch strategy requires a record-style backend (SVAR1/VCF/PGEN)'
                 )
                 backend = self._backend
+                # Wave B PR-B2 (#317/#319): AF filtering needs cached per-variant AF --
+                # `SparseVar.cache_afs()` for SVAR1, an INFO/AF header field for VCF, never
+                # for PGEN (no INFO path). Fail fast with the SAME message the written
+                # `Dataset` path raises (`_haps.py`), so streaming and written agree.
+                if _af_filter and not backend.has_cached_af:
+                    raise RuntimeError(
+                        "Either this dataset is not backed by an SVAR file, or the SVAR file has not had AFs cached yet."
+                        + "Doing this automatically is not yet supported."
+                    )
                 # Build a COMPACT, region-scale plan ONCE and drive off THAT (never a
                 # second `list(self._plan())`). `_plan` always yields a CONTIGUOUS sample
                 # chunk `arange(s_lo, s_hi)`, so each window is captured losslessly by
@@ -1926,6 +1935,12 @@ class _VcfBackend:
 
         self._ref = Reference.from_path(reference_path, self._contigs)
 
+        # Whether the source VCF header declares an INFO/AF field (Wave B
+        # PR-B2, #319) -- the SAME condition `gvl.write` uses (Task 5) to cache
+        # AF into the written `.gvi`, so streaming and written agree on AF
+        # availability.
+        self._has_cached_af = bool(vcf._declared_info_fields(("AF",)))
+
         # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
         # (the public ladder branch constructs both the same way) but unused
         # here: `build_engine`'s `jobs` already carry each window's
@@ -1934,6 +1949,13 @@ class _VcfBackend:
         # own region table the way `_Svar1Backend` does for its readahead path.
         del bed
 
+    @property
+    def has_cached_af(self) -> bool:
+        """Whether the source VCF header declares an INFO/AF field (Wave B PR-B2,
+        #319) -- the SAME condition gvl.write uses to cache AF into the written
+        .gvi, so streaming <-> written agree on AF availability."""
+        return self._has_cached_af
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -1941,8 +1963,8 @@ class _VcfBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
-        min_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
-        max_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
+        min_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
+        max_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1961,7 +1983,13 @@ class _VcfBackend:
         gathered by `generate_batch_core`). VCF's genoray ids are hard-coded
         `-1` until Phase 3, so the gather is a no-op and emitted ids stay
         window-local -- the known VCF gap (see `vcf.rs`'s `WindowFiller::fill`
-        doc comment and GitHub issue #305).
+        doc comment and GitHub issue #305). `min_af`/`max_af` are forwarded
+        straight to the engine constructor's trailing bounds params; the Rust
+        `#[new]` derives `want_af` from them (`min_af.is_some() ||
+        max_af.is_some()`) so the `VcfWindowFiller` requests the AF
+        `FieldSpec` exactly when filtering is active (Wave B PR-B2, #317/#319)
+        -- callers are expected to have already checked `has_cached_af` (see
+        `StreamingDataset._iter_batches`'s AF-missing guard).
         """
         from ..genvarloader import RecordStreamEngine
 
@@ -2004,6 +2032,8 @@ class _VcfBackend:
             output_length,
             annotated,
             variants,
+            min_af,
+            max_af,
         )
 
 
@@ -2077,6 +2107,12 @@ class _PgenBackend:
         # from `StreamingDataset._plan`/`_regions`.
         del bed
 
+    @property
+    def has_cached_af(self) -> bool:
+        """PGEN record streams carry no INFO -> no AF (Wave B PR-B2, #319).
+        AF filtering on PGEN is guarded upstream; always False."""
+        return False
+
     def build_engine(
         self,
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
@@ -2084,8 +2120,8 @@ class _PgenBackend:
         output_length: int,
         annotated: bool = False,
         variants: bool = False,
-        min_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
-        max_af: "float | None" = None,  # accepted for the shared call site; behavior wired in Task 8 (#317/#319)
+        min_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
+        max_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -2145,4 +2181,11 @@ class _PgenBackend:
             output_length,
             annotated,
             variants,
+            # `min_af`/`max_af`: PGEN stages no INFO, so `PgenWindowFiller` never
+            # populates AFs and the Rust AF fold is a no-op regardless of these
+            # values -- forwarded only to keep the two backends' `RecordStreamEngine`
+            # call sites symmetric; AF filtering on PGEN is guarded out upstream
+            # (see `has_cached_af` and `StreamingDataset._iter_batches`'s guard).
+            min_af,
+            max_af,
         )
