@@ -317,6 +317,16 @@ written `.gvi` index whenever the source VCF/BCF header declares `INFO/AF` (see
 — streaming and written agree by construction, since both read the same `INFO/AF` field.
 AF-less VCFs/BCFs are unaffected on both sides.
 
+```{caution}
+This VCF/BCF streaming⟺written AF agreement assumes a **single `AF` value per (bi-allelic)
+record** — normalize with `bcftools norm -m -any` before writing. If a record's `INFO/AF` carries
+multiple values (an ambiguous ALT→AF mapping, e.g. a `Number=.` `AF` left un-subset after a
+`bcftools norm -m` split), the two paths diverge: `gvl.write()` **declines** to cache AF (written
+filtering then raises the guard), while streaming reads AF **live** and resolves it to the first
+value — so streaming may filter where the written path raises. Normalize so each record carries a
+single per-ALT `AF` to keep the two byte-identical.
+```
+
 The **`.svar2` backend** does not yet support these knobs. It is currently
 **haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
 `with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
