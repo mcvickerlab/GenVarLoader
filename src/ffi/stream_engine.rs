@@ -335,6 +335,8 @@ impl EngineBackend for Svar1Backend {
             start,
             ilen,
             row_offsets: Array1::from_vec(row_offsets),
+            // PR-B3a: SVAR1 has no window INFO columns yet (Task 3 fills this in).
+            info_out: Vec::new(),
         })
     }
 }

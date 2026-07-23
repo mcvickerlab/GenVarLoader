@@ -306,12 +306,36 @@ impl EngineBackend for RecordBackend {
             ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
         );
 
+        // PR-B3a: ride-along INFO columns, gathered by the SAME kept v_idxs the
+        // assembly above used, so every column is aligned with `start`/`ilen`.
+        // The region/AF keep already happened when v_idxs was built — no second mask.
+        let info_out: Vec<(String, crate::record_stream::transpose::InfoVals)> = slot
+            .info_cols
+            .iter()
+            .map(|col| {
+                let vals = match &col.values {
+                    crate::record_stream::transpose::InfoVals::I32(src) => {
+                        crate::record_stream::transpose::InfoVals::I32(
+                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                        )
+                    }
+                    crate::record_stream::transpose::InfoVals::F32(src) => {
+                        crate::record_stream::transpose::InfoVals::F32(
+                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                        )
+                    }
+                };
+                (col.name.clone(), vals)
+            })
+            .collect();
+
         Ok(VariantsBatch {
             alt_data,
             alt_seq_offsets,
             start,
             ilen,
             row_offsets,
+            info_out,
         })
     }
 }
@@ -1058,14 +1082,11 @@ mod tests {
         assert!(engine.next_batch_core().is_none());
     }
 
-    /// Wave B PR-B1: `generate_variants` region-overlap clip. Window table has two SNPs:
-    /// v0@pos=12 falls inside the row's region `[10,20)`; v1@pos=25 falls outside. A
-    /// single hap's CSR carries both local variants. `generate_variants` must keep only
-    /// v0 -- its `start`/`ilen`/`alt` gathered from the window static table, and
-    /// `row_offsets` delimiting exactly one kept variant for the single `(row, ploid)`
-    /// output row (ploidy=1 -> length 2: `[0, 1]`).
-    #[test]
-    fn generate_variants_clips_to_window_and_gathers_fields() {
+    /// A 1-region / 1-sample / ploidy-1 window whose 2-variant table has v0@12 inside the
+    /// region `[10,20)` and v1@25 outside it, with a single hap carrying both. Shared shape
+    /// behind `generate_variants_clips_to_window_and_gathers_fields` and
+    /// `variants_fixture_with_info` (PR-B3a).
+    fn variants_fixture() -> (RecordBackend, DecodedWindow) {
         let slot = DecodedWindow {
             v_starts: vec![12, 25],
             ilens: vec![0, 0],
@@ -1096,6 +1117,29 @@ mod tests {
             min_af: None,
             max_af: None,
         };
+        (backend, slot)
+    }
+
+    /// Attaches the supplied INFO columns to `variants_fixture()`'s window. Mirrors
+    /// `variants_fixture()` exactly otherwise (2-variant table, v0@12 kept / v1@25
+    /// clipped by the region) but lets the caller attach `info_cols`.
+    fn variants_fixture_with_info(
+        info_cols: Vec<crate::record_stream::transpose::InfoCol>,
+    ) -> (RecordBackend, DecodedWindow) {
+        let (backend, mut slot) = variants_fixture();
+        slot.info_cols = info_cols;
+        (backend, slot)
+    }
+
+    /// Wave B PR-B1: `generate_variants` region-overlap clip. Window table has two SNPs:
+    /// v0@pos=12 falls inside the row's region `[10,20)`; v1@pos=25 falls outside. A
+    /// single hap's CSR carries both local variants. `generate_variants` must keep only
+    /// v0 -- its `start`/`ilen`/`alt` gathered from the window static table, and
+    /// `row_offsets` delimiting exactly one kept variant for the single `(row, ploid)`
+    /// output row (ploidy=1 -> length 2: `[0, 1]`).
+    #[test]
+    fn generate_variants_clips_to_window_and_gathers_fields() {
+        let (backend, slot) = variants_fixture();
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
         // only v0 survives the overlap clip
@@ -1103,6 +1147,49 @@ mod tests {
         assert_eq!(out.ilen.as_slice().unwrap(), &[0]);
         assert_eq!(out.alt_data.as_slice().unwrap(), &[b'A']);
         assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 1]);
+    }
+
+    /// PR-B3a: a window INFO column rides along, gathered by the SAME kept `v_idxs`
+    /// and therefore aligned with `start`/`ilen` element-for-element.
+    ///
+    /// Starts from `variants_fixture_with_info` (2 local variants, region `[10,20)`),
+    /// then extends the window to a THIRD variant (v2@14, also inside the region) and
+    /// reorders the single hap's CSR traversal to `[2, 0, 1]` — deliberately
+    /// non-monotonic in `v_idx`. This makes the kept output order `[2, 0]` (v1@25 is
+    /// clipped), so a bug that gathered by output POSITION instead of by the actual
+    /// `v_idx` (e.g. `src[i]` instead of `src[v_idxs[i]]`) would misalign `info_out`
+    /// against `start`/`ilen` — silent corruption a single-kept-variant fixture could
+    /// not catch.
+    #[test]
+    fn generate_variants_gathers_info_columns_aligned_with_start() {
+        use crate::record_stream::transpose::{InfoCol, InfoVals};
+
+        let (backend, mut slot) = variants_fixture_with_info(vec![InfoCol {
+            name: "DP".into(),
+            values: InfoVals::I32(vec![10, 20, 30]),
+        }]);
+        // Extend the 2-variant window table with a third variant v2@14 (inside the
+        // region, like v0), and reorder the hap's CSR so kept order is [v2, v0].
+        slot.v_starts.push(14);
+        slot.ilens.push(0);
+        slot.alt_alleles.push(b'G');
+        slot.alt_offsets.push(3);
+        slot.geno_v_idxs = vec![2, 0, 1];
+        slot.geno_offsets = vec![0, 3];
+
+        let batch = backend.generate_variants(0, &slot, 0, 1).unwrap();
+        // Kept: v2@14 then v0@12 (v1@25 clipped by the region).
+        assert_eq!(batch.start.as_slice().unwrap(), &[14, 12]);
+
+        assert_eq!(batch.info_out.len(), 1);
+        assert_eq!(batch.info_out[0].0, "DP");
+        let InfoVals::I32(dp) = &batch.info_out[0].1 else {
+            panic!("expected I32 column");
+        };
+        // One DP value per kept variant, same count and order as `start`: DP[2]=30 for
+        // v2, DP[0]=10 for v0 -- NOT a position-order gather ([10, 20] or a prefix).
+        assert_eq!(dp.len(), batch.start.len());
+        assert_eq!(dp.as_slice(), &[30, 10]);
     }
 
     /// Wave B PR-B1 regression (task-2 review gap): the clip test above collapses

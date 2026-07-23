@@ -77,7 +77,11 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
     ) -> anyhow::Result<(Array1<u8>, Option<Array1<i32>>, Option<Array1<i32>>, Array1<i64>)>;
 
     /// Variants-output counterpart of `generate` (Wave B PR-B1). Default: unsupported.
-    /// RecordBackend overrides it; Svar1Backend overrides it in Task 4.
+    /// RecordBackend overrides it; Svar1Backend overrides it in Task 4. The returned
+    /// `VariantsBatch.info_out` (Wave B PR-B3a) carries ride-along per-variant INFO
+    /// columns gathered by the same kept `v_idxs` as `start`/`ilen` — `RecordBackend`
+    /// populates it from `DecodedWindow.info_cols`; `Svar1Backend` leaves it empty
+    /// until a later task.
     fn generate_variants(
         &self,
         _job_idx: usize,

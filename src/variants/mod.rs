@@ -16,6 +16,10 @@ pub struct VariantsBatch {
     pub start: Array1<i32>,
     pub ilen: Array1<i32>,
     pub row_offsets: Array1<i64>,
+    /// Ride-along per-variant INFO columns (Wave B PR-B3a), one entry per requested
+    /// `var_fields` INFO column, each with exactly one value per kept variant — i.e.
+    /// the same length as `start`/`ilen`, gathered by the same kept `v_idxs`.
+    pub info_out: Vec<(String, crate::record_stream::transpose::InfoVals)>,
 }
 
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
