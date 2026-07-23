@@ -76,11 +76,13 @@ AF-filter it (`Dataset.with_settings(min_af=, max_af=)`) the same way a `.svar` 
 (no `AF` column is written, and AF filtering raises the same guard it always did). The cache is
 only attached when `gvl.write()` builds a fresh `.gvi` index — if a *valid* `.gvi` index already
 exists on disk without an `AF` column (e.g. built by an older gvl or by genoray directly), it is
-not rewritten, so AF filtering keeps raising until the index is rebuilt. The cached `AF` follows
-the same bi-allelic requirement as all gvl VCF input: if a header's `INFO/AF` carries more than one
-value for a record — an un-normalized multiallelic site — `gvl.write()` raises `ValueError`, so
-normalize first (`bcftools norm -m -any`), which splits each ALT into its own bi-allelic record
-carrying that ALT's `AF`.
+not rewritten, so AF filtering keeps raising until the index is rebuilt. AF caching also needs a
+single AF value per record: if a record's `INFO/AF` carries more than one value — an ambiguous
+ALT→AF mapping, e.g. a `bcftools norm -m` split that left a `Number=.` `AF` un-subset so a
+bi-allelic `G>A` record still lists `AF=0.333,0.667` — `gvl.write()` cannot tell which value the
+kept ALT maps to, so it logs a warning and does **not** cache `AF` (the write still succeeds; AF
+filtering then raises the usual guard). Normalize so each record carries a single per-ALT `AF`
+(`bcftools norm -m -any`) to enable AF filtering.
 
 ```python
 gvl.write(

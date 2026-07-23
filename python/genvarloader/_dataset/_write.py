@@ -91,16 +91,25 @@ def _attach_af_column(variants: VCF) -> None:
     base = pl.read_ipc(idx_path)
     af = variants._fetch_info_cols(["AF"]).collect()
     if isinstance(af.schema["AF"], pl.List):
-        # Number=A INFO/AF comes back as List(Float); gvl requires bi-allelic
-        # normalization (bcftools norm -m -any) so every record has exactly one
-        # ALT -> the list is length 1 and list.first() is lossless. A longer list
-        # means an un-normalized multiallelic record slipped through.
+        # INFO/AF comes back as List(Float): `Number=A` (one per ALT) or `Number=.`
+        # (arbitrary). gvl's written variant table takes the first ALT per record
+        # (`_canonicalize_variant_table`'s `.list.first()`), so a properly bi-allelic
+        # record has exactly one AF value and `.list.first()` is lossless/aligned.
+        # A record with MORE than one AF value has an ambiguous ALT->AF mapping (e.g.
+        # a `bcftools norm -m` split that left `Number=.` AF un-subset, so a bi-allelic
+        # `G>A` record still carries the whole `AF=0.333,0.667` list). We cannot know
+        # which value the kept ALT maps to, so we DECLINE to cache AF (rather than
+        # guess or raise): the write still succeeds unchanged, and AF filtering on this
+        # dataset raises the usual "AF not cached" guard. Normalize so each record
+        # carries a single per-ALT AF (`bcftools norm -m -any`) to enable AF filtering.
         if af["AF"].list.len().max() > 1:
-            raise ValueError(
-                "A VCF INFO/AF field carries multiple values for a record, which "
-                "means the VCF was not bi-allelically normalized (bcftools norm -m -any). "
-                "gvl requires bi-allelic input; please normalize before writing."
+            logger.warning(
+                "VCF INFO/AF carries multiple values for at least one record "
+                "(ambiguous ALT->AF mapping, e.g. an un-subset Number=. field after "
+                "`bcftools norm -m`); NOT caching AF. AF filtering on this dataset "
+                "will raise until the VCF is normalized so each record has a single AF."
             )
+            return
         af = af.with_columns(pl.col("AF").list.first())
     if base.height != af.height or not base["POS"].equals(af["POS"]):
         raise ValueError(

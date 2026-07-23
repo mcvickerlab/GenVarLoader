@@ -135,3 +135,38 @@ def test_write_af_less_vcf_has_no_af_column(streaming_case, tmp_path):
     assert "AF" not in _Variants.available_info_fields(
         out / "genotypes" / "variants.arrow"
     )
+
+
+# A bi-allelic record whose `Number=.` INFO/AF still carries the full un-subset
+# multiallelic AF list (`0.333,0.667`) after a `bcftools norm -m` split -- the
+# ALT->AF mapping is ambiguous. `gvl.write()` must NOT raise (writing such a VCF
+# is valid for non-AF use); it warns and declines to cache AF. Regression guard
+# for a review-fix that originally raised here, breaking every unrelated test
+# that writes this common fixture shape (test_output_format, test_unphased_union,
+# test_flat_mode_equivalence).
+_VCF_MULTIVALUE_AF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##INFO=<ID=AF,Number=.,Type=Float,Description="Allele frequency">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\tAF=0.333,0.667\tGT\t1|0\t0|1
+chr1\t16\t.\tT\tC\t.\t.\tAF=0.5\tGT\t1|1\t0|1
+"""
+
+
+def test_write_multivalue_af_writes_without_af_column(tmp_path):
+    ref = tmp_path / "ref.fa"
+    ref.write_text(f">chr1\n{_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+    vcf_gz = _build_indexed_vcf(_VCF_MULTIVALUE_AF, tmp_path)
+    regions = pl.DataFrame(
+        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_REF)]}
+    )
+    out = tmp_path / "ds"
+    # Must NOT raise (the historic bug raised ValueError here).
+    gvl.write(out, regions, variants=str(vcf_gz), overwrite=True)
+    # AF is ambiguous -> not cached; write otherwise succeeded.
+    assert "AF" not in _Variants.available_info_fields(
+        out / "genotypes" / "variants.arrow"
+    )
