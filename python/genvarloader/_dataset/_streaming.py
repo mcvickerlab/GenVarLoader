@@ -1283,6 +1283,11 @@ class _Svar1Backend:
         self._ilens = np.ascontiguousarray(ilens, np.int32)
         self._alt_alleles = np.ascontiguousarray(alt.data.view(np.uint8), np.uint8)
         self._alt_offsets = np.ascontiguousarray(alt.offsets, np.int64)
+        # Wave B PR-B3a (#304): REF was read and discarded here. It is a `var_field`
+        # (and the `ref="allele"` input for variant-windows), so keep the global
+        # per-variant byte table alongside the ALT one -- same layout, same gather.
+        self._ref_alleles = np.ascontiguousarray(ref.data.view(np.uint8), np.uint8)
+        self._ref_offsets = np.ascontiguousarray(ref.offsets, np.int64)
 
         self._svar_path = str(svar_path)
         self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
@@ -1473,6 +1478,8 @@ class _Svar1Backend:
             self._ilens,
             self._alt_alleles,
             self._alt_offsets,
+            self._ref_alleles,
+            self._ref_offsets,
             self._ref.pad_char,
             True,
             batch_size,

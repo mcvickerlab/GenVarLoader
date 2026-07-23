@@ -20,6 +20,15 @@ pub struct VariantsBatch {
     /// `var_fields` INFO column, each with exactly one value per kept variant — i.e.
     /// the same length as `start`/`ilen`, gathered by the same kept `v_idxs`.
     pub info_out: Vec<(String, crate::record_stream::transpose::InfoVals)>,
+    /// Ragged per-variant REF allele bytes (Wave B PR-B3a `var_fields`/`ref="allele"`
+    /// input), gathered by the SAME kept `v_idxs` as `alt_data`/`start`/`ilen` — i.e.
+    /// element-for-element aligned with them. `Some` only when REF was requested
+    /// (`want_ref`); `None` (both fields) is the default `var_fields` path and must
+    /// stay byte-unchanged (no allocation, no behavior change).
+    pub ref_data: Option<Array1<u8>>,
+    /// Ragged-array offsets for `ref_data` (length `start.len() + 1`). `Some` iff
+    /// `ref_data` is `Some`.
+    pub ref_seq_offsets: Option<Array1<i64>>,
 }
 
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
@@ -106,17 +115,38 @@ pub fn gather_alleles(
 /// `_assemble_variant_buffers_rust` (`_flat_variants.py`) byte-for-byte given
 /// byte-identical inputs — no dataset-global id is produced here (variants output is
 /// self-contained, per #313).
+///
+/// `ref_src` (Wave B PR-B3a) is an optional per-variant REF byte table
+/// `(bytes, offsets)`, gathered by the SAME `v_idxs` via [`gather_alleles`] — the same
+/// gather ALT uses, so REF stays element-for-element aligned with `start`/`ilen`/ALT.
+/// `None` (the default `var_fields` path) yields `(None, None)` with no extra
+/// allocation or work — byte-unchanged behavior.
 pub fn assemble_variants_window(
     v_idxs: ArrayView1<i32>,
     v_starts: ArrayView1<i32>,
     ilens: ArrayView1<i32>,
     alt_alleles: ArrayView1<u8>,
     alt_offsets: ArrayView1<i64>,
-) -> (Array1<u8>, Array1<i64>, Array1<i32>, Array1<i32>) {
+    ref_src: Option<(ArrayView1<u8>, ArrayView1<i64>)>,
+) -> (
+    Array1<u8>,
+    Array1<i64>,
+    Array1<i32>,
+    Array1<i32>,
+    Option<Array1<u8>>,
+    Option<Array1<i64>>,
+) {
     let (alt_data, alt_seq_offsets) = gather_alleles(v_idxs, alt_alleles, alt_offsets);
     let start: Array1<i32> = v_idxs.iter().map(|&vi| v_starts[vi as usize]).collect();
     let ilen: Array1<i32> = v_idxs.iter().map(|&vi| ilens[vi as usize]).collect();
-    (alt_data, alt_seq_offsets, start, ilen)
+    let (ref_data, ref_seq_offsets) = match ref_src {
+        Some((bytes, offs)) => {
+            let (d, o) = gather_alleles(v_idxs, bytes, offs);
+            (Some(d), Some(o))
+        }
+        None => (None, None),
+    };
+    (alt_data, alt_seq_offsets, start, ilen, ref_data, ref_seq_offsets)
 }
 
 /// Reverse-complement the alleles of mask-selected `(b*p)` rows, in place.
@@ -553,5 +583,51 @@ mod tests {
         rc_alleles_inplace(&mut data, seq_offsets.view(), var_offsets.view(), to_rc_row.view());
         // "" stays ""; "ACN" -> revcomp -> "NGT".
         assert_eq!(&data, b"NGT");
+    }
+
+    /// PR-B3a: with a per-variant REF table, `assemble_variants_window` gathers REF
+    /// bytes exactly the way it gathers ALT bytes.
+    #[test]
+    fn assemble_variants_window_gathers_ref_when_table_supplied() {
+        let v_idxs = Array1::from_vec(vec![2i32, 0]);
+        let v_starts = Array1::from_vec(vec![10i32, 20, 30]);
+        let ilens = Array1::from_vec(vec![0i32, 0, 0]);
+        let alt = Array1::from_vec(b"AACCGG".to_vec());
+        let alt_off = Array1::from_vec(vec![0i64, 2, 4, 6]);
+        let refe = Array1::from_vec(b"TTTGGGCCC".to_vec());
+        let ref_off = Array1::from_vec(vec![0i64, 3, 6, 9]);
+        let (_a, _ao, _s, _i, rd, ro) = assemble_variants_window(
+            v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt.view(),
+            alt_off.view(),
+            Some((refe.view(), ref_off.view())),
+        );
+        let rd = rd.expect("ref requested");
+        let ro = ro.expect("ref requested");
+        // v_idx 2 -> "CCC", v_idx 0 -> "TTT"
+        assert_eq!(rd.to_vec(), b"CCCTTT".to_vec());
+        assert_eq!(ro.to_vec(), vec![0i64, 3, 6]);
+    }
+
+    /// No REF table supplied ⇒ both REF outputs are None (default `var_fields`).
+    #[test]
+    fn assemble_variants_window_ref_is_none_without_table() {
+        let v_idxs = Array1::from_vec(vec![0i32]);
+        let v_starts = Array1::from_vec(vec![10i32]);
+        let ilens = Array1::from_vec(vec![0i32]);
+        let alt = Array1::from_vec(b"A".to_vec());
+        let alt_off = Array1::from_vec(vec![0i64, 1]);
+        let (_a, _ao, _s, _i, rd, ro) = assemble_variants_window(
+            v_idxs.view(),
+            v_starts.view(),
+            ilens.view(),
+            alt.view(),
+            alt_off.view(),
+            None,
+        );
+        assert!(rd.is_none());
+        assert!(ro.is_none());
     }
 }

@@ -109,6 +109,14 @@ struct RecordBackend {
     /// `slot.afs`) ⇒ no-op, preserving pre-PR-B2 parity exactly.
     min_af: Option<f32>,
     max_af: Option<f32>,
+    /// Wave B PR-B3a (#304): when `true`, `generate_variants` builds a per-window-variant
+    /// REF byte table by slicing the contig reference (`self.contigs[job.contig_idx]` is
+    /// already the WHOLE contig — see `generate`'s identical `c.ref_bytes` use) and passes
+    /// it to `assemble_variants_window` so `VariantsBatch.ref_data`/`ref_seq_offsets` are
+    /// populated. No Python-facing `var_fields`/`ref` surface requests this yet (a later
+    /// task wires that); `false` (default) preserves pre-Task-3 behavior exactly (no extra
+    /// allocation/work).
+    want_ref: bool,
 }
 
 impl RecordBackend {
@@ -298,13 +306,53 @@ impl EngineBackend for RecordBackend {
         let v_idxs = Array1::from_vec(v_idxs);
         let row_offsets = Array1::from_vec(row_offsets);
 
-        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
-            v_idxs.view(),
-            ndarray::ArrayView1::from(slot.v_starts.as_slice()),
-            ndarray::ArrayView1::from(slot.ilens.as_slice()),
-            ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
-            ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
-        );
+        // PR-B3a: VCF/PGEN REF bytes. genoray's DenseChunk does not expose REF, so
+        // slice the contig reference at [start, start + ref_len) with
+        // ref_len = alt_len - ilen — exact for the normalized, left-aligned biallelic
+        // variants gvl requires. `c.ref_bytes` is the WHOLE contig (`generate` above
+        // makes the same assumption via its own `ref_offsets = [0, c.ref_bytes.len()]`),
+        // so `v_start` is a direct index. Window-LOCAL table (one entry per
+        // `slot.v_starts`), matching ALT's `slot.alt_offsets` shape exactly.
+        let ref_table = if self.want_ref {
+            let c = &self.contigs[job.contig_idx];
+            let n_v = slot.v_starts.len();
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut offs: Vec<i64> = Vec::with_capacity(n_v + 1);
+            offs.push(0);
+            for vi in 0..n_v {
+                let s = slot.v_starts[vi] as i64;
+                let alt_len = slot.alt_offsets[vi + 1] - slot.alt_offsets[vi];
+                let ref_len = alt_len - slot.ilens[vi] as i64;
+                for k in 0..ref_len {
+                    let pos = s + k;
+                    let b = if pos < 0 || pos as usize >= c.ref_bytes.len() {
+                        self.pad_char
+                    } else {
+                        c.ref_bytes[pos as usize]
+                    };
+                    bytes.push(b);
+                }
+                offs.push(bytes.len() as i64);
+            }
+            Some((bytes, offs))
+        } else {
+            None
+        };
+
+        let (alt_data, alt_seq_offsets, start, ilen, ref_data, ref_seq_offsets) =
+            crate::variants::assemble_variants_window(
+                v_idxs.view(),
+                ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+                ndarray::ArrayView1::from(slot.ilens.as_slice()),
+                ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+                ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+                ref_table.as_ref().map(|(b, o)| {
+                    (
+                        ndarray::ArrayView1::from(b.as_slice()),
+                        ndarray::ArrayView1::from(o.as_slice()),
+                    )
+                }),
+            );
 
         // PR-B3a: ride-along INFO columns, gathered by the SAME kept v_idxs the
         // assembly above used, so every column is aligned with `start`/`ilen`.
@@ -336,6 +384,8 @@ impl EngineBackend for RecordBackend {
             ilen,
             row_offsets,
             info_out,
+            ref_data,
+            ref_seq_offsets,
         })
     }
 }
@@ -366,6 +416,7 @@ impl RecordStreamEngine {
         variants: bool,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        want_ref: bool,
     ) -> Self {
         let backend = RecordBackend {
             filler,
@@ -380,6 +431,7 @@ impl RecordStreamEngine {
             variants,
             min_af,
             max_af,
+            want_ref,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -539,6 +591,9 @@ impl RecordStreamEngine {
                     variants,
                     min_af,
                     max_af,
+                    // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task);
+                    // this task only adds the ref_data/ref_seq_offsets plumbing.
+                    false,
                 ))
             }
             "pgen" => {
@@ -576,6 +631,9 @@ impl RecordStreamEngine {
                     variants,
                     min_af,
                     max_af,
+                    // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task);
+                    // this task only adds the ref_data/ref_seq_offsets plumbing.
+                    false,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
@@ -878,6 +936,7 @@ mod tests {
             false, // variants
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -912,6 +971,7 @@ mod tests {
             false, // variants
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
@@ -944,6 +1004,7 @@ mod tests {
             false, // variants
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         match engine.next_batch_core() {
@@ -1060,6 +1121,7 @@ mod tests {
             false, // variants
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1116,6 +1178,7 @@ mod tests {
             variants: true,
             min_af: None,
             max_af: None,
+            want_ref: false,
         };
         (backend, slot)
     }
@@ -1229,6 +1292,7 @@ mod tests {
             variants: true,
             min_af: None,
             max_af: None,
+            want_ref: false,
         };
 
         let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
@@ -1294,6 +1358,7 @@ mod tests {
             variants: true,
             min_af: Some(0.1),
             max_af: None,
+            want_ref: false,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
@@ -1341,6 +1406,7 @@ mod tests {
             variants: true,
             min_af: None,
             max_af: None,
+            want_ref: false,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();

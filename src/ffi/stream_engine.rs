@@ -150,6 +150,19 @@ struct Svar1Backend {
     /// Inclusive upper AF bound (`af <= max_af` kept); `None` disables the upper bound.
     /// Only meaningful when `afs` is `Some`.
     max_af: Option<f32>,
+    /// Wave B PR-B3a (#304): GLOBAL per-variant REF allele byte table, indexed by the
+    /// same global variant id as `v_starts`/`ilens`/`alt_alleles`/`alt_offsets` --
+    /// same layout, same gather (`assemble_variants_window` reuses `gather_alleles`
+    /// for both). Always populated (`_Svar1Backend.__init__` reads it unconditionally
+    /// -- an SVAR1 store with no REF column fails construction there), but only
+    /// gathered into `VariantsBatch.ref_data`/`ref_seq_offsets` when `want_ref` is set.
+    ref_alleles: Array1<u8>,
+    ref_offsets: Array1<i64>,
+    /// When `true`, `generate_variants` passes `Some((ref_alleles, ref_offsets))` to
+    /// `assemble_variants_window`. No Python-facing `var_fields`/`ref` surface requests
+    /// this yet (a later task wires that); `false` (default) preserves pre-Task-3
+    /// behavior exactly (no extra allocation/work).
+    want_ref: bool,
 }
 
 impl EngineBackend for Svar1Backend {
@@ -321,13 +334,22 @@ impl EngineBackend for Svar1Backend {
         }
 
         let v_idxs = Array1::from_vec(kept);
-        let (alt_data, alt_seq_offsets, start, ilen) = crate::variants::assemble_variants_window(
-            v_idxs.view(),
-            self.v_starts.view(),
-            self.ilens.view(),
-            self.alt_alleles.view(),
-            self.alt_offsets.view(),
-        );
+        // PR-B3a: pass the GLOBAL REF table through iff requested -- `None` (the
+        // default) costs no extra allocation/work, matching `RecordBackend`'s gate.
+        let ref_src = if self.want_ref {
+            Some((self.ref_alleles.view(), self.ref_offsets.view()))
+        } else {
+            None
+        };
+        let (alt_data, alt_seq_offsets, start, ilen, ref_data, ref_seq_offsets) =
+            crate::variants::assemble_variants_window(
+                v_idxs.view(),
+                self.v_starts.view(),
+                self.ilens.view(),
+                self.alt_alleles.view(),
+                self.alt_offsets.view(),
+                ref_src,
+            );
 
         Ok(crate::variants::VariantsBatch {
             alt_data,
@@ -337,6 +359,8 @@ impl EngineBackend for Svar1Backend {
             row_offsets: Array1::from_vec(row_offsets),
             // PR-B3a: SVAR1 has no window INFO columns yet (Task 3 fills this in).
             info_out: Vec::new(),
+            ref_data,
+            ref_seq_offsets,
         })
     }
 }
@@ -361,6 +385,8 @@ impl Svar1StreamEngine {
         ilens: Array1<i32>,
         alt_alleles: Array1<u8>,
         alt_offsets: Array1<i64>,
+        ref_alleles: Array1<u8>,
+        ref_offsets: Array1<i64>,
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
@@ -370,6 +396,7 @@ impl Svar1StreamEngine {
         afs: Option<Array1<f32>>,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        want_ref: bool,
     ) -> Self {
         for c in &contigs {
             store.set_contig_meta_rs(&c.name, c.contig_start, c.n_local, c.max_v_len);
@@ -391,6 +418,9 @@ impl Svar1StreamEngine {
             afs,
             min_af,
             max_af,
+            ref_alleles,
+            ref_offsets,
+            want_ref,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -434,7 +464,7 @@ impl Svar1StreamEngine {
         contig_names, contig_starts, n_locals, max_v_lens, v_starts_c, v_ends_c,
         contig_ref_bytes, phys_sample_idx,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
-        v_starts, ilens, alt_alleles, alt_offsets,
+        v_starts, ilens, alt_alleles, alt_offsets, ref_alleles, ref_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
         variants=false, afs=None, min_af=None, max_af=None,
     ))]
@@ -460,6 +490,14 @@ impl Svar1StreamEngine {
         ilens: PyReadonlyArray1<i32>,
         alt_alleles: PyReadonlyArray1<u8>,
         alt_offsets: PyReadonlyArray1<i64>,
+        // Wave B PR-B3a (#304): GLOBAL per-variant REF allele byte table -- same
+        // layout as `alt_alleles`/`alt_offsets`. Always required (an SVAR1 store with
+        // no REF column already fails construction in `_Svar1Backend.__init__`), but
+        // only gathered into a batch's `ref_data`/`ref_seq_offsets` when the engine is
+        // built with `want_ref=true` (no Python-facing `var_fields`/`ref` surface
+        // requests that yet -- a later task wires it).
+        ref_alleles: PyReadonlyArray1<u8>,
+        ref_offsets: PyReadonlyArray1<i64>,
         pad_char: u8,
         parallel: bool,
         batch_size: usize,
@@ -557,6 +595,8 @@ impl Svar1StreamEngine {
             ilens.as_array().to_owned(),
             alt_alleles.as_array().to_owned(),
             alt_offsets.as_array().to_owned(),
+            ref_alleles.as_array().to_owned(),
+            ref_offsets.as_array().to_owned(),
             pad_char,
             parallel,
             batch_size,
@@ -566,6 +606,9 @@ impl Svar1StreamEngine {
             afs,
             min_af,
             max_af,
+            // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task); this
+            // task only adds the ref_data/ref_seq_offsets plumbing.
+            false,
         ))
     }
 
@@ -673,6 +716,10 @@ mod tests {
         ilens: Array1<i32>,
         alt_alleles: Array1<u8>,
         alt_offsets: Array1<i64>,
+        /// PR-B3a: GLOBAL per-variant REF byte table (var0 REF='G', var1 REF='T'),
+        /// same layout as `alt_alleles`/`alt_offsets`.
+        ref_alleles: Array1<u8>,
+        ref_offsets: Array1<i64>,
         ref_bytes: Vec<u8>,
     }
 
@@ -688,6 +735,8 @@ mod tests {
             ilens: Array1::from(vec![0i32, 0]),
             alt_alleles: Array1::from(vec![b'A', b'C']),
             alt_offsets: Array1::from(vec![0i64, 1, 2]),
+            ref_alleles: Array1::from(vec![b'G', b'T']),
+            ref_offsets: Array1::from(vec![0i64, 1, 2]),
             ref_bytes: vec![b'T'; 30],
         }
     }
@@ -761,6 +810,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             batch_size,
@@ -770,6 +821,7 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         )
     }
 
@@ -917,6 +969,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             8,
@@ -926,6 +980,7 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         match engine.next_batch_core() {
@@ -1015,6 +1070,9 @@ mod tests {
         let ilens = Array1::from(vec![0i32, 0]);
         let alt_alleles = Array1::from(vec![b'A', b'C']);
         let alt_offsets = Array1::from(vec![0i64, 1, 2]);
+        // PR-B3a: GLOBAL per-variant REF table, same layout as alt_alleles/alt_offsets.
+        let ref_alleles = Array1::from(vec![b'T', b'G']);
+        let ref_offsets = Array1::from(vec![0i64, 1, 2]);
         let chr1_ref = vec![b'G'; 20];
         let chr2_ref = vec![b'T'; 20];
 
@@ -1063,6 +1121,8 @@ mod tests {
             ilens.clone(),
             alt_alleles.clone(),
             alt_offsets.clone(),
+            ref_alleles.clone(),
+            ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1072,6 +1132,7 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1190,6 +1251,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1199,6 +1262,7 @@ mod tests {
             None,  // afs
             None,  // min_af
             None,  // max_af
+            false, // want_ref
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1262,6 +1326,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1271,6 +1337,7 @@ mod tests {
             afs.clone(),
             Some(0.1f32),
             None,
+            false, // want_ref
         );
         let batch_a = engine_a
             .next_batch_variants_core()
@@ -1306,6 +1373,8 @@ mod tests {
             f.ilens.clone(),
             f.alt_alleles.clone(),
             f.alt_offsets.clone(),
+            f.ref_alleles.clone(),
+            f.ref_offsets.clone(),
             b'N',
             false,
             1000,
@@ -1315,6 +1384,7 @@ mod tests {
             afs,
             Some(0.1f32),
             None,
+            false, // want_ref
         );
         let batch_b = engine_b
             .next_batch_variants_core()
