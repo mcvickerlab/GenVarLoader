@@ -468,7 +468,7 @@ impl Svar1StreamEngine {
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         v_starts, ilens, alt_alleles, alt_offsets, ref_alleles, ref_offsets,
         pad_char, parallel, batch_size, output_length, annotated=false,
-        variants=false, afs=None, min_af=None, max_af=None,
+        variants=false, afs=None, min_af=None, max_af=None, want_ref=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -496,8 +496,8 @@ impl Svar1StreamEngine {
         // layout as `alt_alleles`/`alt_offsets`. Always required (an SVAR1 store with
         // no REF column already fails construction in `_Svar1Backend.__init__`), but
         // only gathered into a batch's `ref_data`/`ref_seq_offsets` when the engine is
-        // built with `want_ref=true` (no Python-facing `var_fields`/`ref` surface
-        // requests that yet -- a later task wires it).
+        // built with `want_ref=true` (the Python `var_fields` surface sets this via
+        // `_Svar1Backend.build_engine`).
         ref_alleles: PyReadonlyArray1<u8>,
         ref_offsets: PyReadonlyArray1<i64>,
         pad_char: u8,
@@ -509,6 +509,7 @@ impl Svar1StreamEngine {
         afs: Option<PyReadonlyArray1<f32>>,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        want_ref: bool,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
@@ -608,9 +609,9 @@ impl Svar1StreamEngine {
             afs,
             min_af,
             max_af,
-            // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task); this
-            // task only adds the ref_data/ref_seq_offsets plumbing.
-            false,
+            // Wave B PR-B3a (#304): forwarded from the Python `var_fields` surface
+            // (`_Svar1Backend.build_engine` sets `want_ref = "ref" in var_fields`).
+            want_ref,
         ))
     }
 

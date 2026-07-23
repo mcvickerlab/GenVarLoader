@@ -152,6 +152,44 @@ def test_af_missing_guard_raises_vcf_without_info_af(streaming_case):
         next(iter(sds.to_iter(batch_size=4)))
 
 
+def test_available_var_fields_svar1_includes_ref(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert "ref" in sds.available_var_fields
+    assert {"alt", "ilen", "start"} <= set(sds.available_var_fields)
+
+
+def test_active_var_fields_defaults_to_alt_ilen_start(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert sds.active_var_fields == ["alt", "ilen", "start"]
+
+
+def test_unknown_var_field_raises(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    with pytest.raises(ValueError, match="not available"):
+        sds.with_settings(var_fields=["alt", "start", "NOPE"])
+
+
+def test_var_fields_with_haplotypes_output_raises(streaming_case):
+    regions, reference, variants, _written = streaming_case("svar1")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=["alt", "start", "ref"])
+        .with_seqs("haplotypes")
+    )
+    with pytest.raises(NotImplementedError, match="var_fields"):
+        next(iter(sds.to_iter(batch_size=2)))
+
+
+def test_pgen_var_fields_limited_to_ref(streaming_case):
+    regions, reference, variants, _written = streaming_case("pgen")
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert "ref" in sds.available_var_fields
+    assert sds.available_var_fields == ["alt", "ilen", "start", "ref"]
+
+
 def test_with_seqs_accepts_annotated_and_variants_rejects_variant_windows():
     sds = _tiny_sds()
     from genvarloader._dataset._rag_variants import RaggedVariants

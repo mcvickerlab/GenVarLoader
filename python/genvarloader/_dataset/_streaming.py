@@ -22,6 +22,44 @@ from ._utils import bed_to_regions
 if TYPE_CHECKING:
     import torch.utils.data as td
 
+# Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
+# report a `with_seqs(...)` value back in error messages (`_iter_batches`'s
+# var_fields/non-variants guard) -- the inverse of `with_seqs`'s own `kind_map`.
+_SEQ_KIND_NAMES: dict[type, str] = {
+    RaggedSeqs: "haplotypes",
+    RaggedAnnotatedHaps: "annotated",
+    RaggedVariants: "variants",
+}
+
+# Wave B PR-B3a (#304) name-collision guard: `next_batch_variants()`'s FFI dict
+# (`stream_engine.rs`/`record_stream/engine.rs`) is keyed by field name and
+# `PyDict::set_item` silently overwrites -- a live-source INFO/index column that
+# happened to be named one of these would clobber the corresponding fixed-schema
+# array with no error (wrong data, no exception). Cheapest correct fix: exclude any
+# such colliding name from a backend's `available_var_fields` at the source, so it
+# can never be selected via `var_fields` in the first place -- `with_settings`'s
+# `not in available_var_fields` check then raises the normal, clear "not available"
+# `ValueError` for it. This is also semantically the right call independent of the
+# FFI concern: "alt"/"start"/"ilen"/"ref" already name the builtin fields, so a
+# same-named INFO/index column would be ambiguous to request even if it could be
+# threaded through safely.
+_RESERVED_VAR_FIELD_NAMES = frozenset(
+    {"alt", "start", "ilen", "ref", "offsets", "ref_offsets"}
+)
+
+# Wave B PR-B3a (#304): `with_seqs("variants")`'s pre-var_fields default, reproduced
+# byte-for-byte when `var_fields` is never set (see `active_var_fields` and every
+# backend's `build_engine`).
+_DEFAULT_VAR_FIELDS = ("alt", "ilen", "start")
+
+
+def _normalize_var_fields(var_fields: "list[str] | None") -> list[str]:
+    """`var_fields`, or the builtin default when `None`. Shared by every backend's
+    `build_engine` and `StreamingDataset.active_var_fields` so the default list
+    literal exists in exactly one place."""
+    return list(var_fields) if var_fields is not None else list(_DEFAULT_VAR_FIELDS)
+
+
 # SVAR2 reconstruct super-batch: the rayon dispatch grain. Sized to saturate cores
 # (n_work = rows*ploidy must be >> num_threads) while the output buffer stays
 # max_mem-bounded and cohort-independent (#284). This is the measured knee
@@ -54,6 +92,45 @@ def _parse_max_mem(max_mem: str | int) -> int:
         if s.endswith(suffix):
             return int(float(s[: -len(suffix)]) * units[suffix])
     return int(float(s))  # bare number = bytes
+
+
+def _declared_info_numeric_dtypes(vcf_path: str) -> dict[str, bool]:
+    """Numeric (Integer/Float) INFO fields declared in a VCF/BCF header.
+
+    Wave B PR-B3a (#304): the live-source counterpart of ``_Variants.available_info_fields``
+    (`_haps.py`, which scans a WRITTEN ``variants.arrow``'s polars schema) -- here there is no
+    on-disk arrow table, so this scans the VCF header directly via ``cyvcf2``'s
+    ``header_iter()`` (the same primitive ``genoray.VCF._declared_info_fields`` uses, generalized
+    from a fixed candidate tuple to "every declared INFO field"). Flag/String/Character INFO
+    types are excluded -- they have no numeric representation, matching the written path's
+    numeric-only filter.
+
+    Args:
+        vcf_path: Path to the VCF/BCF file.
+
+    Returns:
+        Mapping of INFO field name -> ``is_float`` (``True`` for ``Type=Float``, ``False``
+        for ``Type=Integer``), in VCF header declaration order.
+    """
+    from genoray import VCF
+
+    vcf = VCF(vcf_path)
+    out: dict[str, bool] = {}
+    for h in vcf._vcf.header_iter():
+        info = h.info()
+        if info.get("HeaderType") != "INFO":
+            continue
+        name = info.get("ID")
+        htype = info.get("Type")
+        if name is None or name in _RESERVED_VAR_FIELD_NAMES:
+            continue
+        if htype == "Integer":
+            out[name] = False
+        elif htype == "Float":
+            out[name] = True
+        # Flag/String/Character: not numeric, excluded (matches
+        # `_Variants.available_info_fields`'s `v.is_numeric()` filter).
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +228,9 @@ class StreamingDataset:
     # Inclusive allele-frequency bounds for `with_seqs("variants")` (PR-B2, #317).
     _min_af: "float | None" = None
     _max_af: "float | None" = None
+    # Requested variant fields for `with_seqs("variants")` output (PR-B3a, #304).
+    # `None` means the default `["alt", "ilen", "start"]` -- see `active_var_fields`.
+    _var_fields: "list[str] | None" = None
 
     def __init__(
         self,
@@ -289,6 +369,7 @@ class StreamingDataset:
             "_deterministic",
             "_min_af",
             "_max_af",
+            "_var_fields",
         ):
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
@@ -351,6 +432,34 @@ class StreamingDataset:
         data arrives at ``sample_idx == i``.
         """
         return list(self._samples)
+
+    @property
+    def available_var_fields(self) -> list[str]:
+        """Variant fields this source can serve, in a stable order.
+
+        Derived from the LIVE source (SVAR1's on-disk index schema, or the VCF/BCF
+        header) rather than a written artifact, so it can differ per backend --
+        unlike the written :attr:`Dataset.available_var_fields
+        <genvarloader.Dataset.available_var_fields>`, which reads an already-shipped
+        ``variants.arrow``. The injected-callback (test) construction path has no
+        backend and always returns the builtin default.
+
+        Returns:
+            Field names requestable via :meth:`with_settings`'s ``var_fields``.
+        """
+        if self._backend is None:
+            return list(_DEFAULT_VAR_FIELDS)
+        return list(self._backend.available_var_fields)
+
+    @property
+    def active_var_fields(self) -> list[str]:
+        """The variant fields currently selected for ``with_seqs("variants")`` output.
+
+        Returns:
+            The configured ``var_fields``, or the default ``["alt", "ilen", "start"]``
+            when none was set via :meth:`with_settings`.
+        """
+        return _normalize_var_fields(self._var_fields)
 
     def __len__(self) -> int:
         return len(self._regions) * self.n_samples
@@ -479,6 +588,15 @@ class StreamingDataset:
                     "output (matching the written Dataset, which raises for "
                     "haplotype/annotated output)."
                 )
+            # Wave B PR-B3a (#304): `var_fields` only shapes `with_seqs("variants")`
+            # output. The written path silently ignores it elsewhere; streaming fails
+            # fast instead, matching how it treats every other ignorable setting (the
+            # AF guard just above, and the jitter/out_len/annotated SVAR2 guard below).
+            if self._var_fields is not None and not _variants:
+                raise NotImplementedError(
+                    'var_fields only applies to with_seqs("variants") output; got '
+                    f"with_seqs({_SEQ_KIND_NAMES.get(self._seq_kind, self._seq_kind)!r})."
+                )
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
             # unjittered region bounds and emit ragged haplotypes only, so combining
@@ -598,6 +716,7 @@ class StreamingDataset:
                     _variants,
                     min_af=self._min_af,
                     max_af=self._max_af,
+                    var_fields=self._var_fields,
                 )
                 del engine_jobs
                 # Issue #277 Wave A Task 4: annotated output pulls the 4-tuple
@@ -652,7 +771,63 @@ class StreamingDataset:
                                 (b_times_p, None),
                                 row_off,
                             ).reshape(hi - lo, backend.ploidy, None)
-                            out = RaggedVariants(alt=alt, start=start, ilen=ilen)
+                            # Wave B PR-B3a (#304): `ref` (an allele field, opaque-string
+                            # like `alt`) and any other requested var_field (a numeric
+                            # INFO/index column, plain numeric like `start`/`ilen`) are
+                            # packed the same way `alt`/`start`/`ilen` are above, keyed
+                            # by the field's own name from `next_batch_variants`'s dict.
+                            # `active_var_fields` (not raw dict keys) drives which of
+                            # `ilen`/`ref` are actually attached to the output record --
+                            # `nxt` always carries `ilen` (and `ref`/`ref_offsets` iff
+                            # `want_ref` was set at `build_engine` time), independent of
+                            # what the caller asked for, so the record-shape decision
+                            # must be var_fields-driven, not presence-driven.
+                            ref_rag = None
+                            if "ref" in nxt:
+                                ref_char = np.asarray(nxt["ref"], np.uint8).view("S1")
+                                ref_rag = (
+                                    Ragged.from_offsets(
+                                        ref_char,
+                                        (b_times_p, None, None),
+                                        [
+                                            row_off,
+                                            np.asarray(nxt["ref_offsets"], np.int64),
+                                        ],
+                                    )
+                                    .to_strings()
+                                    .reshape(hi - lo, backend.ploidy, None)
+                                )
+                            extra: dict[str, Ragged] = {}
+                            for _name in self.active_var_fields:
+                                if _name in ("alt", "start", "ilen", "ref"):
+                                    continue
+                                if _name not in nxt:
+                                    # A field this backend *advertised* via
+                                    # `available_var_fields` but whose data the engine
+                                    # does not (yet) forward -- e.g. an SVAR1 numeric
+                                    # index column beyond `ref`, which
+                                    # `Svar1Backend::generate_variants` does not gather
+                                    # (deferred follow-up work; see
+                                    # `_Svar1Backend.__init__`'s comment). Fail loudly
+                                    # instead of letting a bare `KeyError` leak out of
+                                    # this packing loop.
+                                    raise NotImplementedError(
+                                        f"var_fields={_name!r} is not yet forwarded by "
+                                        "the streaming engine for this backend "
+                                        "(deferred follow-up work)."
+                                    )
+                                extra[_name] = Ragged.from_offsets(
+                                    np.asarray(nxt[_name]),
+                                    (b_times_p, None),
+                                    row_off,
+                                ).reshape(hi - lo, backend.ploidy, None)
+                            out = RaggedVariants(
+                                alt=alt,
+                                start=start,
+                                ilen=ilen if "ilen" in self.active_var_fields else None,
+                                ref=ref_rag,
+                                **extra,
+                            )
                         elif _annotated:
                             data, annot_v, annot_pos, offsets = nxt
                             shape = (hi - lo, backend.ploidy, None)
@@ -1046,6 +1221,7 @@ class StreamingDataset:
         deterministic: "bool | None" = None,
         min_af: "float | None" = None,
         max_af: "float | None" = None,
+        var_fields: "list[str] | None" = None,
     ) -> "StreamingDataset":
         """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
         relevant subset of :meth:`Dataset.with_settings` (same parameter names).
@@ -1080,6 +1256,16 @@ class StreamingDataset:
             Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
             field); otherwise raises at iterate time. Matches
             :meth:`Dataset.with_settings`.
+        var_fields
+            Variant fields to emit for ``with_seqs("variants")`` output (Wave B
+            PR-B3a, #304). Must be a subset of :attr:`available_var_fields`; an
+            unknown field raises :class:`ValueError` immediately (not at iterate
+            time). Defaults to ``["alt", "ilen", "start"]`` (see
+            :attr:`active_var_fields`) when never set -- this default reproduces
+            today's ``with_seqs("variants")`` output byte-for-byte. Only meaningful
+            for ``with_seqs("variants")``; combining it with any other output kind
+            raises :class:`NotImplementedError` at iterate time (matches how
+            ``min_af``/``max_af`` are guarded).
 
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
@@ -1097,6 +1283,14 @@ class StreamingDataset:
             object.__setattr__(out, "_min_af", float(min_af))
         if max_af is not None:
             object.__setattr__(out, "_max_af", float(max_af))
+        if var_fields is not None:
+            missing = [f for f in var_fields if f not in self.available_var_fields]
+            if missing:
+                raise ValueError(
+                    f"var_fields {missing} are not available for this source. "
+                    f"Available: {self.available_var_fields}."
+                )
+            object.__setattr__(out, "_var_fields", list(var_fields))
         return out
 
     def __getitem__(self, idx) -> None:
@@ -1289,6 +1483,32 @@ class _Svar1Backend:
         self._ref_alleles = np.ascontiguousarray(ref.data.view(np.uint8), np.uint8)
         self._ref_offsets = np.ascontiguousarray(ref.offsets, np.int64)
 
+        # Wave B PR-B3a (#304): numeric index columns are the requestable INFO-like
+        # fields, filtered exactly as `_Variants.available_info_fields` does on the
+        # written path (`_haps.py`): numeric, minus the positional POS/ILEN columns
+        # (and minus any name reserved for a builtin/FFI-fixed key -- see
+        # `_RESERVED_VAR_FIELD_NAMES`). Scans the RAW on-disk `index.arrow` schema
+        # (not `SparseVar.index`/`_scan_index`, which only flattens columns the
+        # caller explicitly names via `attrs=`) -- in practice this is `[]` unless
+        # `cache_afs()` has written a top-level `AF` column (genoray nests any other
+        # declared INFO under a single `INFO` Struct column, which is not
+        # `is_numeric()`). `ref` is always available -- the store is rejected above
+        # if it has no REF column. NOTE: the current `Svar1StreamEngine` only wires
+        # `ref` through `next_batch_variants` (its `generate_variants` hardcodes
+        # `info_out: Vec::new()` -- forwarding arbitrary numeric index columns like a
+        # cached `AF` is deferred follow-up work); the packing loop in
+        # `_iter_batches` raises a clear `NotImplementedError` rather than a bare
+        # `KeyError` if such a field is ever actually requested.
+        _schema = pl.scan_ipc(Path(svar_path) / "index.arrow").collect_schema()
+        _info = [
+            k
+            for k, v in _schema.items()
+            if v.is_numeric()
+            and k not in {"POS", "ILEN"}
+            and k not in _RESERVED_VAR_FIELD_NAMES
+        ]
+        self.available_var_fields = [*_DEFAULT_VAR_FIELDS, *_info, "ref"]
+
         self._svar_path = str(svar_path)
         self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
 
@@ -1382,6 +1602,7 @@ class _Svar1Backend:
         variants: bool = False,
         min_af: "float | None" = None,
         max_af: "float | None" = None,
+        var_fields: "list[str] | None" = None,
     ) -> object:
         """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
         overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
@@ -1416,8 +1637,21 @@ class _Svar1Backend:
         is actually requested (`min_af is not None or max_af is not None`) -- a
         no-filter job stays zero-cost, matching the `afs=None` no-op fast path
         documented on the Rust side (`stream_engine.rs`).
+
+        `var_fields` (Wave B PR-B3a, #304) selects whether `ref` is requested:
+        `want_ref = "ref" in var_fields` (default `["alt", "ilen", "start"]` when
+        `None`) forwards to the engine constructor's trailing `want_ref` parameter,
+        which gates whether `generate_variants` gathers `ref_data`/`ref_seq_offsets`
+        (`stream_engine.rs`). Any other requested field (a numeric index column) is
+        NOT forwarded here -- `Svar1Backend::generate_variants` has no general
+        INFO/index-column gather yet (`info_out` is unconditionally empty); such a
+        field is deferred follow-up work, and the caller (`_iter_batches`) raises a
+        clear error rather than silently omitting it.
         """
         from ..genvarloader import Svar1StreamEngine
+
+        _active_fields = _normalize_var_fields(var_fields)
+        want_ref = "ref" in _active_fields
 
         contig_names = list(self._contigs)
         contig_starts: list[int] = []
@@ -1489,6 +1723,7 @@ class _Svar1Backend:
             afs=(self._afs if (min_af is not None or max_af is not None) else None),
             min_af=min_af,
             max_af=max_af,
+            want_ref=want_ref,
         )
 
     def read_window(
@@ -1662,6 +1897,12 @@ class _Svar2Backend:
         # `_iter_batches`' super-batch drive must READ this attribute, never
         # recompute it, so later overrides (tests, Task 5's sweep) stick.
         self._super_batch_rows = SUPERBATCH_TARGET_ROWS
+        # Wave B PR-B3a (#304): `with_seqs("variants")` (and thus `var_fields`) is not
+        # yet wired for `.svar2` (see `_iter_batches`'s SVAR2 guard, which raises
+        # `NotImplementedError` before any of this would matter) -- this is just the
+        # builtin-default placeholder so `StreamingDataset.available_var_fields` has
+        # something to read from every backend type.
+        self.available_var_fields = list(_DEFAULT_VAR_FIELDS)
 
     def _contig_of(self, r_idx: NDArray[np.intp]) -> tuple[int, str]:
         contig_idxs = self._regions[r_idx, 0]
@@ -1948,6 +2189,15 @@ class _VcfBackend:
         # availability.
         self._has_cached_af = bool(vcf._declared_info_fields(("AF",)))
 
+        # Wave B PR-B3a (#304): declared numeric INFO fields are requestable
+        # `var_fields` -- non-numeric types (Flag/String/Character) are excluded,
+        # matching the written path's numeric-only `available_info_fields` filter
+        # (`_haps.py`). Recorded as name -> is_float so `build_engine` can pass the
+        # `(name, is_float)` pairs the Rust `VcfWindowFiller` needs without
+        # re-scanning the header per call.
+        self._info_dtypes = _declared_info_numeric_dtypes(self._vcf_path)
+        self.available_var_fields = [*_DEFAULT_VAR_FIELDS, *self._info_dtypes, "ref"]
+
         # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
         # (the public ladder branch constructs both the same way) but unused
         # here: `build_engine`'s `jobs` already carry each window's
@@ -1972,6 +2222,7 @@ class _VcfBackend:
         variants: bool = False,
         min_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
         max_af: "float | None" = None,  # forwarded to the engine -- see below (Wave B PR-B2, #317/#319)
+        var_fields: "list[str] | None" = None,
     ) -> object:
         """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/5) that decodes each window's variant
@@ -1997,8 +2248,24 @@ class _VcfBackend:
         `FieldSpec` exactly when filtering is active (Wave B PR-B2, #317/#319)
         -- callers are expected to have already checked `has_cached_af` (see
         `StreamingDataset._iter_batches`'s AF-missing guard).
+
+        `var_fields` (Wave B PR-B3a, #304) selects `want_ref` (`"ref" in var_fields`,
+        default `["alt", "ilen", "start"]` when `None`) and the non-builtin numeric
+        INFO fields to gather, forwarded as `(name, is_float)` pairs (looked up in
+        `self._info_dtypes`, populated at construction from the VCF header) to the
+        engine constructor's trailing `info_fields`/`want_ref` parameters, which the
+        Rust `VcfWindowFiller` stages as additional `FieldSpec`s alongside `AF`
+        (`vcf.rs`).
         """
         from ..genvarloader import RecordStreamEngine
+
+        _active_fields = _normalize_var_fields(var_fields)
+        want_ref = "ref" in _active_fields
+        info_fields = [
+            (name, self._info_dtypes[name])
+            for name in _active_fields
+            if name not in ("alt", "ilen", "start", "ref")
+        ]
 
         contig_names = list(self._contigs)
         contig_ref_bytes = [
@@ -2041,6 +2308,8 @@ class _VcfBackend:
             variants,
             min_af,
             max_af,
+            info_fields=info_fields,
+            want_ref=want_ref,
         )
 
 
@@ -2107,6 +2376,11 @@ class _PgenBackend:
 
         self._ref = Reference.from_path(reference_path, self._contigs)
 
+        # Wave B PR-B3a (#304): PGEN has no INFO path (see the PR-B2 AF guard --
+        # `has_cached_af` is always `False`); `ref` is the only non-builtin
+        # `var_field` it can serve.
+        self.available_var_fields = [*_DEFAULT_VAR_FIELDS, "ref"]
+
         # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
         # (the public ladder branch constructs every backend the same way) but
         # unused here, same as `_VcfBackend`: `build_engine`'s `jobs` already
@@ -2129,6 +2403,7 @@ class _PgenBackend:
         variants: bool = False,
         min_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
         max_af: "float | None" = None,  # accepted for the shared call site; PGEN has no INFO/AF so this is a no-op (guarded upstream, see `has_cached_af`)
+        var_fields: "list[str] | None" = None,
     ) -> object:
         """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
         engine, issue #276 tasks 3b/11) that decodes each window's variant
@@ -2148,8 +2423,16 @@ class _PgenBackend:
         undercount `annot_v_idxs` for narrowed windows. PGEN no longer shares
         VCF's Phase-3 gap (see `pgen.rs`'s `PgenWindowFiller::fill` doc comment
         and GitHub issue #305).
+
+        `var_fields` (Wave B PR-B3a, #304) selects `want_ref` (`"ref" in
+        var_fields`, default `["alt", "ilen", "start"]` when `None`) -- PGEN has no
+        INFO path, so `available_var_fields` never offers anything beyond `ref` and
+        no `info_fields` are forwarded here.
         """
         from ..genvarloader import RecordStreamEngine
+
+        _active_fields = _normalize_var_fields(var_fields)
+        want_ref = "ref" in _active_fields
 
         contig_names = list(self._contigs)
         contig_ref_bytes = [
@@ -2195,4 +2478,5 @@ class _PgenBackend:
             # (see `has_cached_af` and `StreamingDataset._iter_batches`'s guard).
             min_af,
             max_af,
+            want_ref=want_ref,
         )

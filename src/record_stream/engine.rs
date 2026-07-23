@@ -484,7 +484,7 @@ impl RecordStreamEngine {
         contig_names, contig_ref_bytes,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         fasta_path, pad_char, parallel, batch_size, output_length, annotated=false,
-        variants=false, min_af=None, max_af=None,
+        variants=false, min_af=None, max_af=None, info_fields=Vec::new(), want_ref=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -508,6 +508,15 @@ impl RecordStreamEngine {
         variants: bool,
         min_af: Option<f32>,
         max_af: Option<f32>,
+        // Wave B PR-B3a (#304): additional `(name, is_float)` numeric INFO fields
+        // requested via Python `var_fields`, staged by `VcfWindowFiller` after `AF`
+        // (when requested) -- see that type's `info_fields` doc comment. VCF-only;
+        // ignored by the `"pgen"` branch below (PGEN has no INFO path).
+        info_fields: Vec<(String, bool)>,
+        // Wave B PR-B3a (#304): request `ref_data`/`ref_seq_offsets` in
+        // `next_batch_variants` -- forwarded to `RecordBackend::generate_variants`'s
+        // `want_ref` gate for BOTH source kinds.
+        want_ref: bool,
     ) -> PyResult<Self> {
         let n_contigs = contig_names.len();
         if contig_ref_bytes.len() != n_contigs {
@@ -572,9 +581,9 @@ impl RecordStreamEngine {
                     ploidy,
                     fasta_path.as_deref(),
                     min_af.is_some() || max_af.is_some(),
-                    // No var_fields INFO surface yet (Wave B PR-B3a follow-on task);
-                    // this task only adds the DecodedWindow.info_cols layer.
-                    &[],
+                    // Wave B PR-B3a (#304): additional numeric INFO `var_fields`,
+                    // forwarded from the Python surface (`_VcfBackend.build_engine`).
+                    &info_fields,
                 )
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(Self::new_rs(
@@ -591,9 +600,10 @@ impl RecordStreamEngine {
                     variants,
                     min_af,
                     max_af,
-                    // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task);
-                    // this task only adds the ref_data/ref_seq_offsets plumbing.
-                    false,
+                    // Wave B PR-B3a (#304): forwarded from the Python `var_fields`
+                    // surface (`_VcfBackend.build_engine` sets `want_ref = "ref" in
+                    // var_fields`).
+                    want_ref,
                 ))
             }
             "pgen" => {
@@ -631,9 +641,11 @@ impl RecordStreamEngine {
                     variants,
                     min_af,
                     max_af,
-                    // No var_fields/`ref` surface yet (Wave B PR-B3a follow-on task);
-                    // this task only adds the ref_data/ref_seq_offsets plumbing.
-                    false,
+                    // Wave B PR-B3a (#304): forwarded from the Python `var_fields`
+                    // surface (`_PgenBackend.build_engine` sets `want_ref = "ref" in
+                    // var_fields`). PGEN has no INFO path, so `info_fields` (VCF-only)
+                    // is simply unused in this branch.
+                    want_ref,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
