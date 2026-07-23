@@ -70,15 +70,15 @@ def test_streaming_variants_matches_written(streaming_case, backend):
     assert total_variants > 0
 
 
-# `svar1_multicontig_fixture`'s 7 variants have cached AFs of
-# {0.333(chr1:3), 0.667(chr1:7,10; chr2:5,9,21 -- 5 variants), 0.833(chr1:12)}
-# (verified directly against `SparseVar.cache_afs()`'s `index["AF"]`). `(0.3, None)`
-# from the task brief's template band would keep all 7 (min AF is 0.333 > 0.3) --
-# a no-op filter that can't prove partial filtering -- so the min-only band is
-# bumped to 0.4 (excludes only the 0.333 variant). The max-only and both-bounds
-# bands both already exclude the 0.833 variant unmodified from the brief.
-@pytest.mark.parametrize("min_af,max_af", [(0.4, None), (None, 0.7), (0.2, 0.8)])
-def test_streaming_svar1_af_matches_written(streaming_case, tmp_path, min_af, max_af):
+def _build_af_cached_svar1_case(
+    streaming_case, tmp_path: Path
+) -> tuple[pl.DataFrame, Path, str, "gvl.Dataset"]:
+    """Build an AF-cached SVAR1 store: `(regions, reference, variants_path, written)`,
+    the same shape `streaming_case` returns. `SparseVar.cache_afs()` must run before
+    `gvl.write` for `AF` to show up in the written artifact's schema at all. Shared by
+    `test_streaming_svar1_af_matches_written` and
+    `test_available_var_fields_af_cached_svar1` -- both need this exact store.
+    """
     regions, reference, variants, _ = streaming_case("svar1")
     svar = tmp_path / "af.svar"
     shutil.copytree(variants, svar)
@@ -95,9 +95,24 @@ def test_streaming_svar1_af_matches_written(streaming_case, tmp_path, min_af, ma
     written = gvl.Dataset.open(
         out, reference=reference, var_fields=["alt", "ilen", "start", "AF"]
     )
+    return regions, reference, str(svar), written
+
+
+# `svar1_multicontig_fixture`'s 7 variants have cached AFs of
+# {0.333(chr1:3), 0.667(chr1:7,10; chr2:5,9,21 -- 5 variants), 0.833(chr1:12)}
+# (verified directly against `SparseVar.cache_afs()`'s `index["AF"]`). `(0.3, None)`
+# from the task brief's template band would keep all 7 (min AF is 0.333 > 0.3) --
+# a no-op filter that can't prove partial filtering -- so the min-only band is
+# bumped to 0.4 (excludes only the 0.333 variant). The max-only and both-bounds
+# bands both already exclude the 0.833 variant unmodified from the brief.
+@pytest.mark.parametrize("min_af,max_af", [(0.4, None), (None, 0.7), (0.2, 0.8)])
+def test_streaming_svar1_af_matches_written(streaming_case, tmp_path, min_af, max_af):
+    regions, reference, svar, written = _build_af_cached_svar1_case(
+        streaming_case, tmp_path
+    )
     ds = written.with_seqs("variants").with_settings(min_af=min_af, max_af=max_af)
     sds = (
-        gvl.StreamingDataset(regions, reference=reference, variants=str(svar))
+        gvl.StreamingDataset(regions, reference=reference, variants=svar)
         .with_seqs("variants")
         .with_settings(min_af=min_af, max_af=max_af)
     )
@@ -379,6 +394,21 @@ def test_streaming_ref_var_field_matches_written(streaming_case, backend):
     SVAR1 reads REF from its index; VCF/PGEN slice it out of the contig reference at
     [start, start + alt_len - ilen). The written oracle carries REF directly, so this
     is the gate on the reference-slice assumption.
+
+    `ref` is an opaque-string field: indexing a single hap off it (`cell.ref[h]`)
+    collapses ALL of that hap's REF alleles into ONE concatenated `bytes` blob
+    (confirmed empirically: 3 variants of lengths 1/2/3 -> `b'ACCGGG'`, a 0-d
+    scalar under `np.asarray`). That makes the blob-equality assertion below
+    boundary-blind (same total bytes with shifted per-variant boundaries would
+    still pass) and makes counting via `atleast_1d(...).shape[0]` on the blob
+    always exactly 1 -- including for an EMPTY hap, where `b''` is still shape
+    `(1,)` (Wave B PR-B3a review, Important 1). Count via `.start[h]` instead,
+    which does not have this collapse (matching
+    `test_streaming_svar1_af_matches_written`'s pattern), and additionally
+    compare per-variant REF lengths via the public `.to_chars()` accessor (which
+    restores the per-variant ragged structure the opaque-string blob otherwise
+    hides) so a boundary/count divergence is actually caught, not just a total-byte
+    match.
     """
     regions, reference, variants, written = streaming_case(backend)
     fields = ["alt", "ilen", "start", "ref"]
@@ -396,12 +426,22 @@ def test_streaming_ref_var_field_matches_written(streaming_case, backend):
                 np.testing.assert_array_equal(
                     np.asarray(data[k].ref[h]), np.asarray(expected.ref[h])
                 )
-                total += np.atleast_1d(np.asarray(data[k].ref[h])).shape[0]
+                # Boundary check (Minor 2, PR-B3a review): the concatenated-bytes
+                # equality above can't distinguish "same total REF bytes, different
+                # per-variant split" from a genuine match. `.to_chars()` is the
+                # public seqpro.rag accessor that recovers per-variant boundaries
+                # for an opaque-string field (no private `_rl`/`_layout` reach-in
+                # needed); `.lengths` on the resulting per-hap Ragged gives the
+                # exact per-variant REF byte length, including 0 variants for an
+                # empty hap.
+                streamed_ref_lens = data[k].ref.to_chars()[h].lengths
+                expected_ref_lens = expected.ref.to_chars()[h].lengths
+                np.testing.assert_array_equal(streamed_ref_lens, expected_ref_lens)
+                total += np.asarray(data[k].start[h]).shape[0]
     assert total > 0, "vacuous pass: no variants compared"
 
 
-@pytest.mark.parametrize("field_name", ["AF"])
-def test_streaming_vcf_info_var_field_matches_written(af_vcf_case, field_name):
+def test_streaming_vcf_info_var_field_matches_written(af_vcf_case):
     """A Float INFO field (AF) rides along byte-identically between streaming and
     the written path.
 
@@ -416,8 +456,14 @@ def test_streaming_vcf_info_var_field_matches_written(af_vcf_case, field_name):
     below is the strongest TRUE assertion available for DP: it confirms the written
     path rejects the request, and separately verifies streaming's DP dtype/values
     against the fixture's own known ground truth (not the written path).
+
+    (Minor 3, PR-B3a review): this is single-valued (``AF`` only), not
+    parametrized -- ``DP`` can't be tested this way (no written oracle to compare
+    against, as explained above) and gets its own test,
+    `test_streaming_vcf_dp_field_streaming_only`, instead.
     """
     regions, reference, variants, written = af_vcf_case
+    field_name = "AF"
     fields = ["alt", "ilen", "start", field_name]
     ds = written.with_settings(var_fields=fields).with_seqs("variants")
     sds = (
@@ -497,9 +543,15 @@ def test_streaming_vcf_dp_field_streaming_only(af_vcf_case):
 def test_available_var_fields_matches_written(streaming_case, backend):
     """Streaming derives the field set from the live source, the written path from
     the written artifact. They must agree, or one of the two definitions has
-    drifted -- true (equality) for every `streaming_case` backend used here,
-    because none of these fixtures declare a numeric INFO field beyond what
-    `gvl.write` itself caches (`AF`). See
+    drifted -- true (equality) for every `streaming_case` backend used here.
+
+    (Minor 4, PR-B3a review): measured, none of these plain `streaming_case`
+    fixtures declare ANY numeric INFO field, and none has a cached AF either --
+    all three report only the base set `['alt', 'ilen', 'ref', 'start']`. So this
+    equality check never exercises the backend-derived part of
+    `available_var_fields` its docstring is nominally about;
+    `test_available_var_fields_af_cached_svar1` below exercises that part with a
+    store that actually declares `AF`. See
     `test_streaming_vcf_available_var_fields_superset_of_written` below for the
     fixture (`af_vcf_case`, with a `DP` field) where VCF genuinely diverges and
     only `written ⊆ streaming` holds -- that is a real, permanent contract
@@ -509,6 +561,35 @@ def test_available_var_fields_matches_written(streaming_case, backend):
     regions, reference, variants, written = streaming_case(backend)
     sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
     assert set(sds.available_var_fields) == set(written.available_var_fields)
+
+
+def test_available_var_fields_af_cached_svar1(streaming_case, tmp_path):
+    """Strengthens `test_available_var_fields_matches_written` (Improvement (b),
+    PR-B3a review): none of the plain `streaming_case` fixtures contribute a
+    cached AF or any INFO column, so that test's equality check never exercises
+    the backend-derived part of `available_var_fields` its docstring claims to
+    gate. This reuses the AF-cached SVAR1 store
+    (`_build_af_cached_svar1_case`, shared with
+    `test_streaming_svar1_af_matches_written`), where `AF` genuinely appears, and
+    asserts both the real equality AND the available-vs-servable gap. Measured:
+        written  == streaming == ['AF', 'alt', 'ilen', 'ref', 'start']
+        servable == ['alt', 'ilen', 'ref', 'start']  (AF is NOT servable yet)
+    """
+    regions, reference, svar, written = _build_af_cached_svar1_case(
+        streaming_case, tmp_path
+    )
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=svar)
+
+    expected = {"AF", "alt", "ilen", "ref", "start"}
+    assert set(written.available_var_fields) == expected
+    assert set(sds.available_var_fields) == expected
+
+    # Available-vs-servable gap: AF is a real on-disk numeric index column (so it
+    # is schema-visible / "available") but the streaming engine can't gather it
+    # yet ("servable"), deferred to PR-B3b -- see `servable_var_fields`.
+    assert "AF" in sds.available_var_fields
+    assert "AF" not in sds.servable_var_fields
+    assert set(sds.servable_var_fields) == {"alt", "ilen", "ref", "start"}
 
 
 def test_streaming_vcf_available_var_fields_superset_of_written(af_vcf_case):
