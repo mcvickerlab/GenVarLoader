@@ -38,7 +38,7 @@ use crate::ffi::stream_core::{EngineBackend, StreamEngineCore};
 use crate::record_stream::pgen::PgenWindowFiller;
 use crate::record_stream::vcf::VcfWindowFiller;
 use crate::record_stream::DecodedWindow;
-use crate::variants::VariantsBatch;
+use crate::variants::{TokBuf, TokenLut, VariantWindowsBatch, VariantsBatch, WindowModeConfig};
 
 /// Decode job `job`'s window (on `contig`) into `slot`, reusing its allocations. VCF/PGEN
 /// implementors (Task 4/10) do the actual genoray record-stream reading + the hap-major
@@ -117,6 +117,13 @@ struct RecordBackend {
     /// task wires that); `false` (default) preserves pre-Task-3 behavior exactly (no extra
     /// allocation/work).
     want_ref: bool,
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration. `None` (the
+    /// default, and every pre-Task-8 construction site) means the backend was not built
+    /// for variant-windows output; [`RecordBackend::generate_variant_windows`] bails in
+    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is not
+    /// yet reachable from Python — the `#[new]` constructor always passes `None`; a later
+    /// task wires the Python-facing `var_fields`/`with_seqs` surface through to it.
+    win_mode: Option<WindowModeConfig>,
 }
 
 impl RecordBackend {
@@ -131,6 +138,95 @@ impl RecordBackend {
         let mut slot = DecodedWindow::default();
         self.filler.fill(job, c, &mut slot)?;
         Ok(slot)
+    }
+
+    /// The per-row CSR walk + region/AF keep shared by `generate_variants` and
+    /// `generate_variant_windows` (Wave B PR-B4, #304) — factored out of what was
+    /// previously `generate_variants`' own inline loop so BOTH output modes select and
+    /// order window-local variants IDENTICALLY by construction, rather than risking two
+    /// independent copies silently diverging. Same row->region->CSR mapping as
+    /// `generate`/`generate_variants` (`bi = ri*n_samples + si`, per-hap CSR replicated
+    /// across regions — see `generate`'s doc comment), same overlap-keep predicate
+    /// (`src/genotypes/mod.rs:68-74`'s `v_end = v_start - v_ilen.min(0) + 1`, keep iff
+    /// `v_start < r_e && v_end > r_s`) ANDed with the PR-B2 AF keep. Returns the kept
+    /// window-local `v_idxs` (in walk order) and `row_offsets` delimiting them per
+    /// `(row, ploid)` output row (length `(row_hi-row_lo)*ploidy + 1`).
+    fn kept_v_idxs(
+        &self,
+        job_idx: usize,
+        slot: &DecodedWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> (Array1<i32>, Array1<i64>) {
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+
+        let mut v_idxs: Vec<i32> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy + 1);
+        row_offsets.push(0);
+
+        for bi in row_lo..row_hi {
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let si = bi % n_samples;
+            for p in 0..self.ploidy {
+                let h = si * self.ploidy + p;
+                let csr_lo = slot.geno_offsets[h] as usize;
+                let csr_hi = slot.geno_offsets[h + 1] as usize;
+                for &vidx in &slot.geno_v_idxs[csr_lo..csr_hi] {
+                    let v_start = slot.v_starts[vidx as usize] as i64;
+                    let v_ilen = slot.ilens[vidx as usize] as i64;
+                    let v_end = v_start - v_ilen.min(0) + 1;
+                    let af_keep = if slot.afs.is_empty() {
+                        true
+                    } else {
+                        let af = slot.afs[vidx as usize];
+                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
+                    };
+                    if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
+                        v_idxs.push(vidx);
+                    }
+                }
+                row_offsets.push(v_idxs.len() as i64);
+            }
+        }
+
+        (Array1::from_vec(v_idxs), Array1::from_vec(row_offsets))
+    }
+
+    /// Build the per-window-local-variant REF byte table (Wave B PR-B3a's `want_ref`
+    /// machinery), shared by `generate_variants` (gated on `self.want_ref`) and
+    /// `generate_variant_windows` (gated on `win.ref_mode == 2`, the "bare allele" mode —
+    /// `ref_mode == 1`, the flanked-window mode, instead reads the whole contig reference
+    /// directly via `windows::fetch_windows`, no per-variant table needed). genoray's
+    /// `DenseChunk` does not expose REF, so slice the contig reference at
+    /// `[start, start + ref_len)` with `ref_len = alt_len - ilen` — exact for the
+    /// normalized, left-aligned biallelic variants gvl requires. Window-LOCAL table (one
+    /// entry per `slot.v_starts`), matching ALT's `slot.alt_offsets` shape exactly.
+    fn window_ref_table(&self, job_idx: usize, slot: &DecodedWindow) -> (Vec<u8>, Vec<i64>) {
+        let job = &self.jobs[job_idx];
+        let c = &self.contigs[job.contig_idx];
+        let n_v = slot.v_starts.len();
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut offs: Vec<i64> = Vec::with_capacity(n_v + 1);
+        offs.push(0);
+        for vi in 0..n_v {
+            let s = slot.v_starts[vi] as i64;
+            let alt_len = slot.alt_offsets[vi + 1] - slot.alt_offsets[vi];
+            let ref_len = alt_len - slot.ilens[vi] as i64;
+            for k in 0..ref_len {
+                let pos = s + k;
+                let b = if pos < 0 || pos as usize >= c.ref_bytes.len() {
+                    self.pad_char
+                } else {
+                    c.ref_bytes[pos as usize]
+                };
+                bytes.push(b);
+            }
+            offs.push(bytes.len() as i64);
+        }
+        (bytes, offs)
     }
 }
 
@@ -265,76 +361,11 @@ impl EngineBackend for RecordBackend {
                  with variants=false"
             );
         }
-        let job = &self.jobs[job_idx];
-        let n_samples = job.s_hi - job.s_lo;
-        let n_rows = row_hi - row_lo;
+        let (v_idxs, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
-        let mut v_idxs: Vec<i32> = Vec::new();
-        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * self.ploidy + 1);
-        row_offsets.push(0);
-
-        for bi in row_lo..row_hi {
-            let ri = bi / n_samples;
-            let (r_s, r_e) = job.regions[ri];
-            let si = bi % n_samples;
-            for p in 0..self.ploidy {
-                let h = si * self.ploidy + p;
-                let csr_lo = slot.geno_offsets[h] as usize;
-                let csr_hi = slot.geno_offsets[h + 1] as usize;
-                for &vidx in &slot.geno_v_idxs[csr_lo..csr_hi] {
-                    let v_start = slot.v_starts[vidx as usize] as i64;
-                    let v_ilen = slot.ilens[vidx as usize] as i64;
-                    let v_end = v_start - v_ilen.min(0) + 1;
-                    // Wave B PR-B2: AND an AF keep onto the region-overlap keep. Empty
-                    // slot.afs (no AF requested / PGEN) ⇒ af_keep always true (no-op),
-                    // preserving pre-PR-B2 parity. Inclusive bounds, matching the written
-                    // oracle and the SVAR1 fold.
-                    let af_keep = if slot.afs.is_empty() {
-                        true
-                    } else {
-                        let af = slot.afs[vidx as usize];
-                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
-                    };
-                    if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
-                        v_idxs.push(vidx);
-                    }
-                }
-                row_offsets.push(v_idxs.len() as i64);
-            }
-        }
-
-        let v_idxs = Array1::from_vec(v_idxs);
-        let row_offsets = Array1::from_vec(row_offsets);
-
-        // PR-B3a: VCF/PGEN REF bytes. genoray's DenseChunk does not expose REF, so
-        // slice the contig reference at [start, start + ref_len) with
-        // ref_len = alt_len - ilen — exact for the normalized, left-aligned biallelic
-        // variants gvl requires. `c.ref_bytes` is the WHOLE contig (`generate` above
-        // makes the same assumption via its own `ref_offsets = [0, c.ref_bytes.len()]`),
-        // so `v_start` is a direct index. Window-LOCAL table (one entry per
-        // `slot.v_starts`), matching ALT's `slot.alt_offsets` shape exactly.
+        // PR-B3a: VCF/PGEN REF bytes -- see `window_ref_table`'s doc comment.
         let ref_table = if self.want_ref {
-            let c = &self.contigs[job.contig_idx];
-            let n_v = slot.v_starts.len();
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut offs: Vec<i64> = Vec::with_capacity(n_v + 1);
-            offs.push(0);
-            for vi in 0..n_v {
-                let s = slot.v_starts[vi] as i64;
-                let alt_len = slot.alt_offsets[vi + 1] - slot.alt_offsets[vi];
-                let ref_len = alt_len - slot.ilens[vi] as i64;
-                for k in 0..ref_len {
-                    let pos = s + k;
-                    let b = if pos < 0 || pos as usize >= c.ref_bytes.len() {
-                        self.pad_char
-                    } else {
-                        c.ref_bytes[pos as usize]
-                    };
-                    bytes.push(b);
-                }
-                offs.push(bytes.len() as i64);
-            }
-            Some((bytes, offs))
+            Some(self.window_ref_table(job_idx, slot))
         } else {
             None
         };
@@ -357,33 +388,7 @@ impl EngineBackend for RecordBackend {
         // PR-B3a: ride-along INFO columns, gathered by the SAME kept v_idxs the
         // assembly above used, so every column is aligned with `start`/`ilen`.
         // The region/AF keep already happened when v_idxs was built — no second mask.
-        let info_out: Vec<(String, crate::record_stream::transpose::InfoVals)> = slot
-            .info_cols
-            .iter()
-            .map(|col| {
-                let vals = match &col.values {
-                    crate::record_stream::transpose::InfoVals::I32(src) => {
-                        crate::record_stream::transpose::InfoVals::I32(
-                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
-                        )
-                    }
-                    crate::record_stream::transpose::InfoVals::F32(src) => {
-                        crate::record_stream::transpose::InfoVals::F32(
-                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
-                        )
-                    }
-                    // genoray's VCF/PGEN `StagedColumn` never produces `I16` (see
-                    // `InfoVals`'s doc comment) -- this arm exists only for match
-                    // exhaustiveness with the SVAR1-only `I16` variant.
-                    crate::record_stream::transpose::InfoVals::I16(src) => {
-                        crate::record_stream::transpose::InfoVals::I16(
-                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
-                        )
-                    }
-                };
-                (col.name.clone(), vals)
-            })
-            .collect();
+        let info_out = gather_info_out(v_idxs.view(), &slot.info_cols);
 
         Ok(VariantsBatch {
             alt_data,
@@ -396,6 +401,171 @@ impl EngineBackend for RecordBackend {
             ref_seq_offsets,
         })
     }
+
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` counterpart of
+    /// `generate_variants` above. Reuses the SAME `kept_v_idxs` selection walk (so the two
+    /// output modes can never silently diverge on which variants -- or what order -- they
+    /// select for a given `[row_lo, row_hi)` slice), then feeds the window-local static
+    /// table through `crate::variants::windows::assemble_windows_mode` instead of
+    /// `assemble_variants_window`'s plain ALT/REF gather. `scalars` still carries
+    /// `start`/`ilen`/`row_offsets`/`info_out` for the identical kept `v_idxs` (ride-along
+    /// position/INFO data), but never raw `ref_data`/`ref_seq_offsets` -- variant-windows
+    /// only exposes REF as a tokenized buffer (`tok_bufs`' `"ref"`/`"ref_window"` entry),
+    /// not raw bytes.
+    fn generate_variant_windows(
+        &self,
+        job_idx: usize,
+        slot: &DecodedWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<VariantWindowsBatch> {
+        let win = self.win_mode.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "RecordStreamEngine.next_batch_variant_windows() called on an engine not \
+                 configured for variant-windows output"
+            )
+        })?;
+        let job = &self.jobs[job_idx];
+        let (v_idxs, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
+
+        // ref_mode==2 (bare allele) needs the per-window-local REF byte table (same one
+        // `generate_variants` builds under `want_ref`); ref_mode==1 (flanked window)
+        // instead reads the whole contig reference directly via
+        // `windows::fetch_windows` below, no per-variant table needed.
+        let ref_table = if win.ref_mode == 2 {
+            Some(self.window_ref_table(job_idx, slot))
+        } else {
+            None
+        };
+
+        let n_v = v_idxs.len();
+        // Single-contig window by construction: every selected variant maps to the SAME
+        // (window-local) reference table below, so its "contig id" is always 0.
+        let v_contigs = Array1::<i32>::zeros(n_v);
+        let c = &self.contigs[job.contig_idx];
+        let reference = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
+        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
+
+        let tok_bufs = match &win.token_lut {
+            TokenLut::U8(lut) => {
+                let bufs = crate::variants::windows::assemble_windows_mode::<u8>(
+                    v_idxs.view(),
+                    row_offsets.view(),
+                    win.ref_mode,
+                    win.alt_mode,
+                    ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+                    ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+                    ref_table
+                        .as_ref()
+                        .map(|(b, _)| ndarray::ArrayView1::from(b.as_slice())),
+                    ref_table
+                        .as_ref()
+                        .map(|(_, o)| ndarray::ArrayView1::from(o.as_slice())),
+                    win.flank_len,
+                    lut.view(),
+                    v_contigs.view(),
+                    ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+                    ndarray::ArrayView1::from(slot.ilens.as_slice()),
+                    reference,
+                    ref_offsets.view(),
+                    self.pad_char,
+                );
+                bufs.tok_bufs
+                    .into_iter()
+                    .map(|(name, data, offs)| (name.to_string(), TokBuf::U8(data, offs)))
+                    .collect::<Vec<_>>()
+            }
+            TokenLut::I32(lut) => {
+                let bufs = crate::variants::windows::assemble_windows_mode::<i32>(
+                    v_idxs.view(),
+                    row_offsets.view(),
+                    win.ref_mode,
+                    win.alt_mode,
+                    ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+                    ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+                    ref_table
+                        .as_ref()
+                        .map(|(b, _)| ndarray::ArrayView1::from(b.as_slice())),
+                    ref_table
+                        .as_ref()
+                        .map(|(_, o)| ndarray::ArrayView1::from(o.as_slice())),
+                    win.flank_len,
+                    lut.view(),
+                    v_contigs.view(),
+                    ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+                    ndarray::ArrayView1::from(slot.ilens.as_slice()),
+                    reference,
+                    ref_offsets.view(),
+                    self.pad_char,
+                );
+                bufs.tok_bufs
+                    .into_iter()
+                    .map(|(name, data, offs)| (name.to_string(), TokBuf::I32(data, offs)))
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let (alt_data, alt_seq_offsets, start, ilen, _ref_data, _ref_seq_offsets) =
+            crate::variants::assemble_variants_window(
+                v_idxs.view(),
+                ndarray::ArrayView1::from(slot.v_starts.as_slice()),
+                ndarray::ArrayView1::from(slot.ilens.as_slice()),
+                ndarray::ArrayView1::from(slot.alt_alleles.as_slice()),
+                ndarray::ArrayView1::from(slot.alt_offsets.as_slice()),
+                None,
+            );
+        let info_out = gather_info_out(v_idxs.view(), &slot.info_cols);
+
+        Ok(VariantWindowsBatch {
+            scalars: VariantsBatch {
+                alt_data,
+                alt_seq_offsets,
+                start,
+                ilen,
+                row_offsets,
+                info_out,
+                ref_data: None,
+                ref_seq_offsets: None,
+            },
+            tok_bufs,
+        })
+    }
+}
+
+/// Gather ride-along per-variant INFO columns by the SAME kept `v_idxs` a variants /
+/// variant-windows assembly used, so every column stays aligned with `start`/`ilen`
+/// element-for-element (Wave B PR-B3a). Shared by `RecordBackend::generate_variants` and
+/// `RecordBackend::generate_variant_windows` (Wave B PR-B4).
+fn gather_info_out(
+    v_idxs: ndarray::ArrayView1<i32>,
+    info_cols: &[crate::record_stream::transpose::InfoCol],
+) -> Vec<(String, crate::record_stream::transpose::InfoVals)> {
+    info_cols
+        .iter()
+        .map(|col| {
+            let vals = match &col.values {
+                crate::record_stream::transpose::InfoVals::I32(src) => {
+                    crate::record_stream::transpose::InfoVals::I32(
+                        v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                    )
+                }
+                crate::record_stream::transpose::InfoVals::F32(src) => {
+                    crate::record_stream::transpose::InfoVals::F32(
+                        v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                    )
+                }
+                // genoray's VCF/PGEN `StagedColumn` never produces `I16` (see
+                // `InfoVals`'s doc comment) -- this arm exists only for match
+                // exhaustiveness with the SVAR1-only `I16` variant.
+                crate::record_stream::transpose::InfoVals::I16(src) => {
+                    crate::record_stream::transpose::InfoVals::I16(
+                        v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                    )
+                }
+            };
+            (col.name.clone(), vals)
+        })
+        .collect()
 }
 
 /// Producer/consumer record-stream engine (issue #276 task 3b). Python surface (issue
@@ -440,6 +610,11 @@ impl RecordStreamEngine {
             min_af,
             max_af,
             want_ref,
+            // Wave B PR-B4 (#304): not yet reachable from Python (a later task wires the
+            // `with_seqs("variant-windows")` surface through) — every `new_rs` caller
+            // (the `#[new]` pymethod below; tests build `RecordBackend` literals directly)
+            // gets the disabled default.
+            win_mode: None,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -1216,6 +1391,7 @@ mod tests {
             min_af: None,
             max_af: None,
             want_ref: false,
+            win_mode: None,
         };
         (backend, slot)
     }
@@ -1228,6 +1404,29 @@ mod tests {
     ) -> (RecordBackend, DecodedWindow) {
         let (backend, mut slot) = variants_fixture();
         slot.info_cols = info_cols;
+        (backend, slot)
+    }
+
+    /// Wave B PR-B4 (#304): `variants_fixture()`'s window (v0@12 kept inside `[10,20)`,
+    /// v1@25 clipped, region `[10,20)` on 30bp all-`T` `chr1`), but configured for
+    /// `with_seqs("variant-windows")` output instead of plain `generate_variants`. `flank`
+    /// is small enough that v0@12's `[start-flank, end+flank)` read stays within `chr1`'s
+    /// `[0,30)` bounds (no OOB padding to reason about in these tests). The token LUT is a
+    /// 256-entry identity map (byte -> itself) -- the tests only assert token BUFFER
+    /// NAMES/shapes, not exact token values, so the LUT's actual mapping is irrelevant.
+    fn variants_windows_fixture(
+        ref_mode: i64,
+        alt_mode: i64,
+        flank: i64,
+    ) -> (RecordBackend, DecodedWindow) {
+        let (mut backend, slot) = variants_fixture();
+        let lut: Vec<u8> = (0..=255u8).collect();
+        backend.win_mode = Some(WindowModeConfig {
+            ref_mode,
+            alt_mode,
+            flank_len: flank,
+            token_lut: TokenLut::U8(Array1::from_vec(lut)),
+        });
         (backend, slot)
     }
 
@@ -1247,6 +1446,27 @@ mod tests {
         assert_eq!(out.ilen.as_slice().unwrap(), &[0]);
         assert_eq!(out.alt_data.as_slice().unwrap(), &[b'A']);
         assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 1]);
+    }
+
+    /// PR-B4: variant-windows reuses `assemble_windows_mode` and emits one token
+    /// buffer per configured side. ref="window"/alt="window" ⇒ ref_window + alt_window.
+    #[test]
+    fn generate_variant_windows_emits_both_window_buffers() {
+        let (backend, slot) = variants_windows_fixture(1, 1, 2); // ref_mode, alt_mode, flank
+        let batch = backend.generate_variant_windows(0, &slot, 0, 1).unwrap();
+        let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["ref_window", "alt_window"]);
+        // Scalar fields ride along with the same row_offsets as plain variants output.
+        assert_eq!(batch.scalars.row_offsets.len(), slot.geno_offsets.len());
+    }
+
+    /// ref="allele" emits the bare tokenized REF allele, which needs the REF table.
+    #[test]
+    fn generate_variant_windows_ref_allele_uses_ref_table() {
+        let (backend, slot) = variants_windows_fixture(2, 1, 2);
+        let batch = backend.generate_variant_windows(0, &slot, 0, 1).unwrap();
+        let names: Vec<&str> = batch.tok_bufs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["ref", "alt_window"]);
     }
 
     /// PR-B3a: a window INFO column rides along, gathered by the SAME kept `v_idxs`
@@ -1330,6 +1550,7 @@ mod tests {
             min_af: None,
             max_af: None,
             want_ref: false,
+            win_mode: None,
         };
 
         let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
@@ -1396,6 +1617,7 @@ mod tests {
             min_af: Some(0.1),
             max_af: None,
             want_ref: false,
+            win_mode: None,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
@@ -1444,6 +1666,7 @@ mod tests {
             min_af: None,
             max_af: None,
             want_ref: false,
+            win_mode: None,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
@@ -1519,6 +1742,7 @@ mod tests {
             min_af: None,
             max_af: None,
             want_ref: true,
+            win_mode: None,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();

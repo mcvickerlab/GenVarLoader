@@ -44,7 +44,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::bounded;
 use ndarray::Array1;
 
-use crate::variants::VariantsBatch;
+use crate::variants::{VariantWindowsBatch, VariantsBatch};
 
 /// The two per-backend divergence points of the producer/consumer engine, plus the
 /// plan shape. A backend bundles whatever state it needs (store handles, global
@@ -90,6 +90,22 @@ pub(crate) trait EngineBackend: Send + Sync + 'static {
         _row_hi: usize,
     ) -> anyhow::Result<VariantsBatch> {
         anyhow::bail!("variants output is not supported by this backend")
+    }
+
+    /// `variant-windows`-output counterpart of `generate_variants` (Wave B PR-B4, #304):
+    /// same `[row_lo, row_hi)` slice of the same filled window, but returns tokenized
+    /// ref/alt window (or bare-allele) buffers via `crate::variants::windows::assemble_windows_mode`
+    /// instead of (or alongside) `generate_variants`'s ride-along scalar fields. Default:
+    /// unsupported, exactly like `generate_variants`'s default — `RecordBackend` and
+    /// `Svar1Backend` both override it.
+    fn generate_variant_windows(
+        &self,
+        _job_idx: usize,
+        _slot: &Self::Slot,
+        _row_lo: usize,
+        _row_hi: usize,
+    ) -> anyhow::Result<VariantWindowsBatch> {
+        anyhow::bail!("variant-windows output is not supported by this backend")
     }
 }
 

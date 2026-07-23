@@ -197,6 +197,85 @@ struct Svar1Backend {
     /// in `generate_variants`, preserving the byte-unchanged default `var_fields`
     /// path exactly.
     call_fields: Vec<(String, CallVals)>,
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` configuration. `None` (the
+    /// default, and every pre-Task-8 construction site) means the backend was not built
+    /// for variant-windows output; [`Svar1Backend::generate_variant_windows`] bails in
+    /// that case, mirroring how `variants: bool` gates `generate_variants`. `Some` is not
+    /// yet reachable from Python — `Svar1StreamEngine::build` always passes `None`; a
+    /// later task wires the Python-facing `var_fields`/`with_seqs` surface through to it.
+    win_mode: Option<crate::variants::WindowModeConfig>,
+}
+
+impl Svar1Backend {
+    /// The per-row CSR walk + region/AF keep shared by `generate_variants` and
+    /// `generate_variant_windows` (Wave B PR-B4, #304) — factored out of what was
+    /// previously `generate_variants`'s own inline loop so BOTH output modes select and
+    /// order GLOBAL variant ids IDENTICALLY by construction, rather than risking two
+    /// independent copies silently diverging. Same CSR/region mapping as `generate`
+    /// (`slot.o_starts`/`slot.o_stops` are already region-expanded — see
+    /// `generate_variants`'s doc comment point 1), same overlap-keep predicate ANDed with
+    /// the PR-B2 AF keep. Returns the kept GLOBAL variant ids (`v_idxs`, in walk order),
+    /// the CSR positions `o` each one was read from (`kept_o`, same order — needed by
+    /// `generate_variants`'s per-call FORMAT/dosage gather, which is keyed by CSR
+    /// position, not variant id), and `row_offsets` delimiting them per `(row, ploid)`
+    /// output row (length `(row_hi-row_lo)*ploidy + 1`).
+    fn kept_v_idxs(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> (Array1<i32>, Vec<usize>, Array1<i64>) {
+        let ploidy = self.store.ploidy();
+        let job = &self.jobs[job_idx];
+        let n_samples = job.s_hi - job.s_lo;
+        let n_rows = row_hi - row_lo;
+        let geno = self.store.geno_v_idxs();
+
+        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy) — already
+        // region-expanded (see `generate_variants`'s doc comment point 1), same flat
+        // slice `generate` uses.
+        let o_lo = row_lo * ploidy;
+
+        let mut kept: Vec<i32> = Vec::new();
+        let mut kept_o: Vec<usize> = Vec::new();
+        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
+        row_offsets.push(0);
+        for r in 0..(n_rows * ploidy) {
+            let bi = row_lo + r / ploidy;
+            let ri = bi / n_samples;
+            let (r_s, r_e) = job.regions[ri];
+            let os = slot.o_starts[o_lo + r] as usize;
+            let oe = slot.o_stops[o_lo + r] as usize;
+            for o in os..oe {
+                let gvi = geno[o];
+                let v_start = self.v_starts[gvi as usize] as i64;
+                let v_ilen = self.ilens[gvi as usize] as i64;
+                let v_end = v_start - v_ilen.min(0) + 1;
+                // Wave B PR-B2: AND an AF keep-term onto the region-overlap keep.
+                // `afs=None` makes this a pure no-op (`af_keep` always `true`),
+                // preserving pre-PR-B2 parity exactly.
+                let af_keep = match &self.afs {
+                    Some(a) => {
+                        let af = a[gvi as usize];
+                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
+                    }
+                    None => true,
+                };
+                if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
+                    kept.push(gvi);
+                    kept_o.push(o);
+                }
+            }
+            row_offsets.push(kept.len() as i64);
+        }
+
+        (
+            Array1::from_vec(kept),
+            kept_o,
+            Array1::from_vec(row_offsets),
+        )
+    }
 }
 
 impl EngineBackend for Svar1Backend {
@@ -326,28 +405,13 @@ impl EngineBackend for Svar1Backend {
                  with variants=false"
             );
         }
-        let ploidy = self.store.ploidy();
-        let job = &self.jobs[job_idx];
-        let n_samples = job.s_hi - job.s_lo;
-        let n_rows = row_hi - row_lo;
-        let geno = self.store.geno_v_idxs();
+        let (v_idxs, kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
 
-        // CSR rows for this batch slice: [row_lo*ploidy, row_hi*ploidy) — already
-        // region-expanded (see point 1 above), same flat slice `generate` uses.
-        let o_lo = row_lo * ploidy;
-
-        let mut kept: Vec<i32> = Vec::new();
-        let mut row_offsets: Vec<i64> = Vec::with_capacity(n_rows * ploidy + 1);
-        row_offsets.push(0);
-        // Wave B PR-B3b (#304): one accumulator per REQUESTED per-call field
-        // (`self.call_fields`), empty (default `var_fields`) costs nothing extra.
-        // Pushed in lockstep with `kept` inside the SAME keep branch below, so each
-        // buffer ends up the same length as `kept`/`start`/`ilen` -- but gathered by
-        // CSR POSITION `o` (the loop variable indexing `geno`/`self.call_fields`'
-        // arrays), NOT by the variant id `gvi` those `v_starts`/`ilens` lookups use.
-        // A per-call field can legitimately differ across two calls of the SAME
-        // variant (e.g. per-sample dosage), so indexing it by `gvi` instead of `o`
-        // would silently collapse those distinct values -- wrong output, no error.
+        // Wave B PR-B3b (#304): per-call FORMAT/dosage columns, gathered by the SAME CSR
+        // positions `kept_v_idxs` kept (`kept_o`) -- NOT by variant id, since a per-call
+        // field can legitimately differ across two calls of the SAME variant (e.g.
+        // per-sample dosage); indexing it by variant id instead of CSR position would
+        // silently collapse those distinct values -- wrong output, no error.
         let mut call_bufs: Vec<InfoVals> = self
             .call_fields
             .iter()
@@ -357,42 +421,17 @@ impl EngineBackend for Svar1Backend {
                 CallVals::I16(_) => InfoVals::I16(Vec::new()),
             })
             .collect();
-        for r in 0..(n_rows * ploidy) {
-            let bi = row_lo + r / ploidy;
-            let ri = bi / n_samples;
-            let (r_s, r_e) = job.regions[ri];
-            let os = slot.o_starts[o_lo + r] as usize;
-            let oe = slot.o_stops[o_lo + r] as usize;
-            for o in os..oe {
-                let gvi = geno[o];
-                let v_start = self.v_starts[gvi as usize] as i64;
-                let v_ilen = self.ilens[gvi as usize] as i64;
-                let v_end = v_start - v_ilen.min(0) + 1;
-                // Wave B PR-B2: AND an AF keep-term onto the region-overlap keep.
-                // `afs=None` makes this a pure no-op (`af_keep` always `true`),
-                // preserving pre-PR-B2 parity exactly.
-                let af_keep = match &self.afs {
-                    Some(a) => {
-                        let af = a[gvi as usize];
-                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
-                    }
-                    None => true,
-                };
-                if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
-                    kept.push(gvi);
-                    for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
-                        match (vals, &mut call_bufs[fi]) {
-                            (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
-                            (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
-                            (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
-                            _ => unreachable!(
-                                "call_fields/call_bufs dtype pairing is fixed at construction"
-                            ),
-                        }
+        for &o in &kept_o {
+            for (fi, (_, vals)) in self.call_fields.iter().enumerate() {
+                match (vals, &mut call_bufs[fi]) {
+                    (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
+                    (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
+                    (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
+                    _ => {
+                        unreachable!("call_fields/call_bufs dtype pairing is fixed at construction")
                     }
                 }
             }
-            row_offsets.push(kept.len() as i64);
         }
         let info_out: Vec<(String, InfoVals)> = self
             .call_fields
@@ -401,7 +440,6 @@ impl EngineBackend for Svar1Backend {
             .map(|((name, _), buf)| (name.clone(), buf))
             .collect();
 
-        let v_idxs = Array1::from_vec(kept);
         // PR-B3a: pass the GLOBAL REF table through iff requested -- `None` (the
         // default) costs no extra allocation/work, matching `RecordBackend`'s gate.
         let ref_src = if self.want_ref {
@@ -424,7 +462,7 @@ impl EngineBackend for Svar1Backend {
             alt_seq_offsets,
             start,
             ilen,
-            row_offsets: Array1::from_vec(row_offsets),
+            row_offsets,
             // Wave B PR-B3b (#304): SVAR1 still has no window INDEX/INFO columns
             // (VCF/PGEN-only per-window INFO; that forwarding is still deferred, see
             // the `_info` comment in `_Svar1Backend.__init__`) -- but per-call
@@ -432,6 +470,133 @@ impl EngineBackend for Svar1Backend {
             info_out,
             ref_data,
             ref_seq_offsets,
+        })
+    }
+
+    /// Wave B PR-B4 (#304): `with_seqs("variant-windows")` counterpart of
+    /// `generate_variants` above. Reuses the SAME `kept_v_idxs` selection walk (so the two
+    /// output modes can never silently diverge on which variants -- or what order -- they
+    /// select), then feeds the GLOBAL static tables through
+    /// `crate::variants::windows::assemble_windows_mode` instead of
+    /// `assemble_variants_window`'s plain ALT/REF gather. `scalars` still carries
+    /// `start`/`ilen`/`row_offsets` for the identical kept `v_idxs`, but never raw
+    /// `ref_data`/`ref_seq_offsets` (variant-windows only exposes REF as a tokenized
+    /// buffer) nor `info_out` (SVAR1's per-call FORMAT/dosage fields are
+    /// `generate_variants`-only, gathered by CSR position -- variant-windows has no
+    /// analogous per-call-position output to attach them to).
+    fn generate_variant_windows(
+        &self,
+        job_idx: usize,
+        slot: &FilledWindow,
+        row_lo: usize,
+        row_hi: usize,
+    ) -> anyhow::Result<crate::variants::VariantWindowsBatch> {
+        let win = self.win_mode.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Svar1StreamEngine.next_batch_variant_windows() called on an engine not \
+                 configured for variant-windows output"
+            )
+        })?;
+        let job = &self.jobs[job_idx];
+        let (v_idxs, _kept_o, row_offsets) = self.kept_v_idxs(job_idx, slot, row_lo, row_hi);
+
+        // ref_mode==2 (bare allele) needs REF bytes -- SVAR1 already has a GLOBAL REF
+        // table (`self.ref_alleles`/`self.ref_offsets`, same layout `generate_variants`'s
+        // `want_ref` branch reuses), unlike `RecordBackend` which must slice the contig
+        // reference to build a window-local one. ref_mode==1 (flanked window) instead
+        // reads the whole contig reference directly via `windows::fetch_windows` below,
+        // no per-variant table needed.
+        let (ref_g, ref_o) = if win.ref_mode == 2 {
+            (Some(self.ref_alleles.view()), Some(self.ref_offsets.view()))
+        } else {
+            (None, None)
+        };
+
+        let n_v = v_idxs.len();
+        // Single-contig window by construction: every selected variant maps to the SAME
+        // per-contig reference below, so its "contig id" is always 0.
+        let v_contigs = Array1::<i32>::zeros(n_v);
+        let c = &self.contigs[job.contig_idx];
+        let reference = ndarray::ArrayView1::from(c.ref_bytes.as_slice());
+        let ref_offsets = Array1::from(vec![0i64, c.ref_bytes.len() as i64]);
+
+        let tok_bufs = match &win.token_lut {
+            crate::variants::TokenLut::U8(lut) => {
+                let bufs = crate::variants::windows::assemble_windows_mode::<u8>(
+                    v_idxs.view(),
+                    row_offsets.view(),
+                    win.ref_mode,
+                    win.alt_mode,
+                    self.alt_alleles.view(),
+                    self.alt_offsets.view(),
+                    ref_g,
+                    ref_o,
+                    win.flank_len,
+                    lut.view(),
+                    v_contigs.view(),
+                    self.v_starts.view(),
+                    self.ilens.view(),
+                    reference,
+                    ref_offsets.view(),
+                    self.pad_char,
+                );
+                bufs.tok_bufs
+                    .into_iter()
+                    .map(|(name, data, offs)| {
+                        (name.to_string(), crate::variants::TokBuf::U8(data, offs))
+                    })
+                    .collect::<Vec<_>>()
+            }
+            crate::variants::TokenLut::I32(lut) => {
+                let bufs = crate::variants::windows::assemble_windows_mode::<i32>(
+                    v_idxs.view(),
+                    row_offsets.view(),
+                    win.ref_mode,
+                    win.alt_mode,
+                    self.alt_alleles.view(),
+                    self.alt_offsets.view(),
+                    ref_g,
+                    ref_o,
+                    win.flank_len,
+                    lut.view(),
+                    v_contigs.view(),
+                    self.v_starts.view(),
+                    self.ilens.view(),
+                    reference,
+                    ref_offsets.view(),
+                    self.pad_char,
+                );
+                bufs.tok_bufs
+                    .into_iter()
+                    .map(|(name, data, offs)| {
+                        (name.to_string(), crate::variants::TokBuf::I32(data, offs))
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let (alt_data, alt_seq_offsets, start, ilen, _ref_data, _ref_seq_offsets) =
+            crate::variants::assemble_variants_window(
+                v_idxs.view(),
+                self.v_starts.view(),
+                self.ilens.view(),
+                self.alt_alleles.view(),
+                self.alt_offsets.view(),
+                None,
+            );
+
+        Ok(crate::variants::VariantWindowsBatch {
+            scalars: crate::variants::VariantsBatch {
+                alt_data,
+                alt_seq_offsets,
+                start,
+                ilen,
+                row_offsets,
+                info_out: Vec::new(),
+                ref_data: None,
+                ref_seq_offsets: None,
+            },
+            tok_bufs,
         })
     }
 }
@@ -494,6 +659,11 @@ impl Svar1StreamEngine {
             ref_offsets,
             want_ref,
             call_fields,
+            // Wave B PR-B4 (#304): not yet reachable from Python (a later task wires the
+            // `with_seqs("variant-windows")` surface through) -- every `build` caller
+            // (the `#[new]` pymethod below; tests build `Svar1Backend` literals directly)
+            // gets the disabled default.
+            win_mode: None,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),

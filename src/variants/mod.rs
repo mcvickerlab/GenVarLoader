@@ -31,6 +31,54 @@ pub struct VariantsBatch {
     pub ref_seq_offsets: Option<Array1<i64>>,
 }
 
+/// Dtype-tag for the `variant-windows` token LUT (Wave B PR-B4, #304): backends
+/// (`RecordBackend`/`Svar1Backend`) are not generic over `windows::assemble_windows_mode`'s
+/// `Tok` parameter, so the LUT crosses into backend construction as this enum instead —
+/// tagged by whichever numpy dtype `_flat_flanks.build_token_lut` picked for the caller's
+/// token alphabet (`u8` for small alphabets, `i32` once more than 256 distinct tokens are
+/// packed). Mirrors the `assemble_variant_buffers_u8`/`_i32` FFI entry-point split
+/// (`src/ffi/mod.rs`) one level up, at the backend-construction boundary instead of the
+/// PyO3 boundary.
+pub enum TokenLut {
+    U8(Array1<u8>),
+    I32(Array1<i32>),
+}
+
+/// `with_seqs("variant-windows")` configuration (Wave B PR-B4, #304): the ref/alt mode
+/// knobs `windows::assemble_windows_mode` needs (`1` = flanked window, `2` = bare tokenized
+/// allele) plus the dtype-tagged token LUT. Bundled into one struct — rather than four loose
+/// backend fields — so a backend only grows by one `Option<WindowModeConfig>` field; `None`
+/// means "not configured for variant-windows output" (mirrors how `variants: bool` gates
+/// `generate_variants`).
+pub struct WindowModeConfig {
+    pub ref_mode: i64,
+    pub alt_mode: i64,
+    pub flank_len: i64,
+    pub token_lut: TokenLut,
+}
+
+/// One `variant-windows` output token buffer, dtype-tagged to match the backend's
+/// `TokenLut` (Wave B PR-B4, #304). `(data, seq_offsets)` — ragged, one entry per selected
+/// variant.
+pub enum TokBuf {
+    U8(Array1<u8>, Array1<i64>),
+    I32(Array1<i32>, Array1<i64>),
+}
+
+/// `with_seqs("variant-windows")` batch output (Wave B PR-B4, #304): `scalars` carries the
+/// SAME `start`/`ilen`/`row_offsets`/`info_out` a plain `generate_variants` call would
+/// return for the identical kept `v_idxs` — guaranteed by both output modes sharing the
+/// same `kept_v_idxs` selection walk, so the two never silently diverge in which variants
+/// or what order they select. `ref_data`/`ref_seq_offsets` are always `None` here: raw REF
+/// bytes are not part of the variant-windows surface, only the tokenized `ref`/`ref_window`
+/// buffer (in `tok_bufs`) is. `tok_bufs` carries the tokenized window/allele buffers
+/// `windows::assemble_windows_mode` produced, named per its own field-naming
+/// (`ref_window`/`alt_window` for flanked windows, `ref`/`alt` for bare alleles).
+pub struct VariantWindowsBatch {
+    pub scalars: VariantsBatch,
+    pub tok_bufs: Vec<(String, TokBuf)>,
+}
+
 /// Generic per-row gather core. `T: Copy` — no num-traits needed.
 fn gather_rows_impl<T: Copy>(
     geno_offset_idx: ArrayView1<i64>,
