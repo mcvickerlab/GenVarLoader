@@ -286,8 +286,7 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   kind; non-default `var_fields` (Wave B PR-B3a, below) selects which extra fields ride along.
 - **`with_seqs("variant-windows", opt)`** (Wave B PR-B4, issue
   [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) — requires an `opt`
-  ([`VarWindowOpt`](api.md#genvarloader.VarWindowOpt)), same as the written path, and
-  `with_output_format("flat")` (querying in the default `"ragged"` output format raises).
+  ([`VarWindowOpt`](api.md#genvarloader.VarWindowOpt)), same as the written path.
   Unlike the written path's `Dataset.with_seqs("variant-windows", opt)[r, s]`, which returns a
   [`FlatVariantWindows`](api.md#genvarloader.FlatVariantWindows), `StreamingDataset` yields a
   plain `dict[str, Ragged]` per batch: keys `start`/`ilen` (one ragged axis, shape
