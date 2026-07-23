@@ -26,12 +26,18 @@ pub fn word_reads_reset() {
     WORD_READS.store(0, Ordering::Relaxed);
 }
 
-/// Per-variant staged INFO values for one requested field. genoray's `StagedColumn`
-/// has exactly two variants, so "arbitrary dtype" collapses to these two.
+/// Per-variant staged INFO values for one requested field. genoray's VCF/PGEN
+/// `StagedColumn` has exactly two variants (I32/F32), so that path only ever
+/// produces those two. `I16` (Wave B PR-B3b review, #304) exists solely to carry
+/// SVAR1 per-call FORMAT fields registered with a native `int16` dtype (genoray's
+/// `mutcat`) through this SAME channel without a lossy/dtype-breaking upcast to
+/// `I32` -- see `ffi::stream_engine::CallVals`, which is the CSR-scale backing
+/// store this per-batch accumulator is filled from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InfoVals {
     I32(Vec<i32>),
     F32(Vec<f32>),
+    I16(Vec<i16>),
 }
 
 impl InfoVals {
@@ -39,6 +45,7 @@ impl InfoVals {
         match self {
             InfoVals::I32(v) => v.len(),
             InfoVals::F32(v) => v.len(),
+            InfoVals::I16(v) => v.len(),
         }
     }
 

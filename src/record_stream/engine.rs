@@ -372,6 +372,14 @@ impl EngineBackend for RecordBackend {
                             v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
                         )
                     }
+                    // genoray's VCF/PGEN `StagedColumn` never produces `I16` (see
+                    // `InfoVals`'s doc comment) -- this arm exists only for match
+                    // exhaustiveness with the SVAR1-only `I16` variant.
+                    crate::record_stream::transpose::InfoVals::I16(src) => {
+                        crate::record_stream::transpose::InfoVals::I16(
+                            v_idxs.iter().map(|&vi| src[vi as usize]).collect(),
+                        )
+                    }
                 };
                 (col.name.clone(), vals)
             })
@@ -739,6 +747,9 @@ impl RecordStreamEngine {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
                         crate::record_stream::transpose::InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        crate::record_stream::transpose::InfoVals::I16(v) => {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
                     }

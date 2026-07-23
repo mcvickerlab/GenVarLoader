@@ -11,6 +11,7 @@ byte-for-byte on `alt`/`start`/`ilen`.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -71,31 +72,51 @@ def test_streaming_variants_matches_written(streaming_case, backend):
     assert total_variants > 0
 
 
+def _build_af_cached_svar1_store(
+    streaming_case, tmp_path: Path, svar_name: str
+) -> tuple[pl.DataFrame, Path, Path]:
+    """Shared setup for every AF-cached SVAR1 fixture in this module (Minor 4, PR-B3b
+    review, #304): copy `streaming_case("svar1")`'s store to `tmp_path/svar_name` and
+    `SparseVar.cache_afs()` it, WITHOUT writing/opening a `gvl.Dataset` yet -- callers
+    add their own per-call field file(s) (dosage, a custom FORMAT column, ...) on top
+    of the copy before writing. Returns `(regions, reference, svar_path)`.
+    """
+    regions, reference, variants, _ = streaming_case("svar1")
+    svar = tmp_path / svar_name
+    shutil.copytree(variants, svar)
+    SparseVar(str(svar)).cache_afs()
+    return regions, reference, svar
+
+
+def _write_and_open_af_cached(
+    out: Path, regions: pl.DataFrame, reference: Path, svar: Path
+) -> "gvl.Dataset":
+    """`gvl.write` the given (already AF-cached) store and open it back. `var_fields`
+    must explicitly list "AF" -- `Dataset.open`'s default var_fields (`["alt", "ilen",
+    "start"]`) never eagerly loads INFO columns, so without this the cached AF is
+    present in the on-disk schema (passing the `Haps.__post_init__` availability
+    check) but absent from the loaded `variants.info` dict, and
+    `with_settings(min_af=...)` fails downstream at read time with `KeyError: 'AF'`.
+    Same pattern as `test_query_filters.py`/`test_unphased_union.py`.
+    """
+    gvl.write(out, regions, variants=str(svar), overwrite=True)
+    return gvl.Dataset.open(
+        out, reference=reference, var_fields=["alt", "ilen", "start", "AF"]
+    )
+
+
 def _build_af_cached_svar1_case(
     streaming_case, tmp_path: Path
 ) -> tuple[pl.DataFrame, Path, str, "gvl.Dataset"]:
     """Build an AF-cached SVAR1 store: `(regions, reference, variants_path, written)`,
-    the same shape `streaming_case` returns. `SparseVar.cache_afs()` must run before
-    `gvl.write` for `AF` to show up in the written artifact's schema at all. Shared by
+    the same shape `streaming_case` returns. Shared by
     `test_streaming_svar1_af_matches_written` and
     `test_available_var_fields_af_cached_svar1` -- both need this exact store.
     """
-    regions, reference, variants, _ = streaming_case("svar1")
-    svar = tmp_path / "af.svar"
-    shutil.copytree(variants, svar)
-    SparseVar(str(svar)).cache_afs()
-    out = tmp_path / "ds"
-    gvl.write(out, regions, variants=str(svar), overwrite=True)
-    # `var_fields` must explicitly list "AF" -- `Dataset.open`'s default var_fields
-    # (`["alt", "ilen", "start"]`) never eagerly loads INFO columns, so without
-    # this the cached AF is present in the on-disk schema (passing the
-    # `Haps.__post_init__` availability check) but absent from the loaded
-    # `variants.info` dict, and `with_settings(min_af=...)` fails downstream at
-    # read time with `KeyError: 'AF'`. Same pattern as
-    # `test_query_filters.py`/`test_unphased_union.py`.
-    written = gvl.Dataset.open(
-        out, reference=reference, var_fields=["alt", "ilen", "start", "AF"]
+    regions, reference, svar = _build_af_cached_svar1_store(
+        streaming_case, tmp_path, "af.svar"
     )
+    written = _write_and_open_af_cached(tmp_path / "ds", regions, reference, svar)
     return regions, reference, str(svar), written
 
 
@@ -631,8 +652,9 @@ def _build_svar1_dosage_case(
 ) -> tuple[pl.DataFrame, Path, str, "gvl.Dataset"]:
     """SVAR1 store with cached AF (so the AF-filtered parametrization of
     `test_streaming_svar1_dosage_matches_written` actually compacts something --
-    same store `_build_af_cached_svar1_case` builds) PLUS a synthetic per-call
-    `dosages.npy`.
+    same store `_build_af_cached_svar1_case` builds, via the shared
+    `_build_af_cached_svar1_store`/`_write_and_open_af_cached` helpers -- Minor 4,
+    PR-B3b review, #304) PLUS a synthetic per-call `dosages.npy`.
 
     None of the shared `streaming_case` fixtures declare a VCF dosage FORMAT
     field, so `SparseVar.from_vcf(with_dosages=True)` isn't an option here --
@@ -647,10 +669,9 @@ def _build_svar1_dosage_case(
     position would produce the wrong value, not just the right value in the
     wrong place.
     """
-    regions, reference, variants, _ = streaming_case("svar1")
-    svar = tmp_path / "dosage.svar"
-    shutil.copytree(variants, svar)
-    SparseVar(str(svar)).cache_afs()
+    regions, reference, svar = _build_af_cached_svar1_store(
+        streaming_case, tmp_path, "dosage.svar"
+    )
 
     n_calls = (svar / "variant_idxs.npy").stat().st_size // np.dtype(
         V_IDX_TYPE
@@ -660,11 +681,7 @@ def _build_svar1_dosage_case(
     mm.flush()
     del mm
 
-    out = tmp_path / "ds"
-    gvl.write(out, regions, variants=str(svar), overwrite=True)
-    written = gvl.Dataset.open(
-        out, reference=reference, var_fields=["alt", "ilen", "start", "AF"]
-    )
+    written = _write_and_open_af_cached(tmp_path / "ds", regions, reference, svar)
     return regions, reference, str(svar), written
 
 
@@ -704,6 +721,21 @@ def test_streaming_svar1_dosage_matches_written(
                 total += np.atleast_1d(got).shape[0]
     assert total > 0, "vacuous pass: no variants compared"
 
+    # Minor 4 (PR-B3b review, #304): lock in that the `(0.2, 0.8)` parametrization
+    # is a genuine PARTIAL filter, not decorative -- mirrors
+    # `test_streaming_svar1_af_matches_written`'s `0 < total < n_unfiltered`
+    # pattern. Measured: this band drops exactly the `chr1:12` variant
+    # (AF=0.833) from the 7-variant fixture.
+    if min_af is not None or max_af is not None:
+        unfiltered = written.with_settings(var_fields=fields).with_seqs("variants")
+        n_unfiltered = sum(
+            np.atleast_1d(np.asarray(unfiltered[r, s].dosage[h])).shape[0]
+            for r in range(ds.shape[0])
+            for s in range(ds.shape[1])
+            for h in range(sds.ploidy)
+        )
+        assert 0 < total < n_unfiltered
+
 
 @pytest.mark.parametrize("backend", ["vcf", "pgen"])
 def test_dosage_var_field_rejected_on_record_backends(streaming_case, backend):
@@ -715,3 +747,137 @@ def test_dosage_var_field_rejected_on_record_backends(streaming_case, backend):
     assert "dosage" not in sds.available_var_fields
     with pytest.raises(ValueError, match="not available"):
         sds.with_settings(var_fields=["alt", "start", "dosage"])
+
+
+# --- Important 1 (PR-B3b review, #304): custom (non-dosage) FORMAT field dtype
+# preservation -- the pre-fix code coerced EVERY non-float per-call field to
+# int32 (`np.ascontiguousarray(_arr, np.int32)`), silently breaking byte-identical
+# parity for a native int16 field (genoray's real one, `mutcat`) and leaving the
+# Rust `CallVals::I32`/streaming int branch entirely untested (only float32
+# `dosage` was ever exercised). This section closes that gap: a custom int16
+# FORMAT field, registered exactly the way
+# `tests/integration/dataset/test_issue_231_custom_format_fields.py`'s
+# `custom_field_ds` fixture does (metadata.json["fields"] + a raw `<name>.npy`
+# memmap) -- constructing it this way (rather than running
+# `SparseVar.annotate_mutcat(write_back=True)`) is the "most direct means
+# available" in a test fixture: `annotate_mutcat` needs the full
+# adjacency/reference-classification machinery, which none of the shared
+# `streaming_case` fixtures are built to feed, whereas the hand-registration
+# trick is already the codebase's own established way to test this exact
+# surface (issue #231) and is dtype-source-agnostic. ---------------------------
+
+_CUSTOM_FIELD_NAME = "mutcat"
+_CUSTOM_FIELD_DTYPE = "int16"
+
+
+def _build_svar1_custom_format_case(
+    streaming_case, tmp_path: Path
+) -> tuple[pl.DataFrame, Path, str, "gvl.Dataset"]:
+    """SVAR1 store with cached AF (so the AF-filtered parametrization below
+    actually compacts something, same as `_build_svar1_dosage_case`) PLUS a
+    synthetic int16 custom FORMAT field named `mutcat` -- genoray's one real
+    custom FORMAT field (see `genoray/_svar/_annotate.py`'s
+    `SparseVar.annotate_mutcat(write_back=True)`, which always registers it as
+    `int16`). `arange`-valued for the SAME CSR-position-vs-variant-id reason
+    `_build_svar1_dosage_case` documents.
+    """
+    regions, reference, svar = _build_af_cached_svar1_store(
+        streaming_case, tmp_path, "custom_fmt.svar"
+    )
+
+    n_calls = (svar / "variant_idxs.npy").stat().st_size // np.dtype(
+        V_IDX_TYPE
+    ).itemsize
+    mm = np.memmap(
+        svar / f"{_CUSTOM_FIELD_NAME}.npy",
+        dtype=_CUSTOM_FIELD_DTYPE,
+        mode="w+",
+        shape=(n_calls,),
+    )
+    mm[:] = np.arange(n_calls, dtype=_CUSTOM_FIELD_DTYPE)
+    mm.flush()
+    del mm
+
+    # Register the custom field in the SVAR metadata -- same as
+    # `test_issue_231_custom_format_fields.py`'s `custom_field_ds` fixture.
+    meta_path = svar / "metadata.json"
+    meta = json.loads(meta_path.read_text())
+    meta["fields"] = {_CUSTOM_FIELD_NAME: _CUSTOM_FIELD_DTYPE}
+    meta_path.write_text(json.dumps(meta))
+
+    written = _write_and_open_af_cached(tmp_path / "ds", regions, reference, svar)
+    return regions, reference, str(svar), written
+
+
+@pytest.mark.parametrize("min_af,max_af", [(None, None), (0.2, 0.8)])
+def test_streaming_svar1_custom_format_field_matches_written(
+    streaming_case, tmp_path, min_af, max_af
+):
+    """Custom (non-dosage) per-call FORMAT field parity, INCLUDING dtype.
+
+    This is the regression test for Important 1 (PR-B3b review, #304): the
+    pre-fix code force-cast every non-float per-call field through
+    `np.ascontiguousarray(_arr, np.int32)`, so a native `int16` field like
+    `mutcat` streamed back as `int32` -- value-equal but dtype-DIFFERENT from
+    the written path (which preserves the registered dtype verbatim, see
+    `_haps.py`'s `custom_fmt[name]` memmap and
+    `test_issue_231_custom_format_fields.py:113`'s own dtype assertion). Byte-
+    identical parity requires the EXACT dtype, not just equal values, so this
+    test asserts `.dtype` explicitly on top of `assert_array_equal`. It also
+    exercises the Rust `CallVals::I16`/`InfoVals::I16` branch, which
+    `test_streaming_svar1_dosage_matches_written` (float32-only) never touches.
+    """
+    regions, reference, svar, written = _build_svar1_custom_format_case(
+        streaming_case, tmp_path
+    )
+    fields = ["alt", "ilen", "start", _CUSTOM_FIELD_NAME]
+    ds = written.with_settings(
+        var_fields=fields, min_af=min_af, max_af=max_af
+    ).with_seqs("variants")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=svar)
+        .with_settings(var_fields=fields, min_af=min_af, max_af=max_af)
+        .with_seqs("variants")
+    )
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            expected = ds[int(r_idx[k]), int(s_idx[k])]
+            for h in range(sds.ploidy):
+                got = np.asarray(data[k][_CUSTOM_FIELD_NAME][h])
+                exp = np.asarray(expected[_CUSTOM_FIELD_NAME][h])
+                np.testing.assert_array_equal(got, exp)
+                assert got.dtype == np.dtype(_CUSTOM_FIELD_DTYPE), (
+                    f"streamed dtype {got.dtype} != registered dtype "
+                    f"{_CUSTOM_FIELD_DTYPE} -- custom FORMAT field dtype was "
+                    "coerced, breaking byte-identical parity"
+                )
+                assert exp.dtype == np.dtype(_CUSTOM_FIELD_DTYPE)
+                total += np.atleast_1d(got).shape[0]
+    assert total > 0, "vacuous pass: no variants compared"
+
+    # Same partial-filter lock-in as `test_streaming_svar1_dosage_matches_written`
+    # (Minor 4, PR-B3b review): the `(0.2, 0.8)` band must actually drop something.
+    if min_af is not None or max_af is not None:
+        unfiltered = written.with_settings(var_fields=fields).with_seqs("variants")
+        n_unfiltered = sum(
+            np.atleast_1d(np.asarray(unfiltered[r, s][_CUSTOM_FIELD_NAME][h])).shape[0]
+            for r in range(ds.shape[0])
+            for s in range(ds.shape[1])
+            for h in range(sds.ploidy)
+        )
+        assert 0 < total < n_unfiltered
+
+
+def test_available_var_fields_includes_custom_format_field(streaming_case, tmp_path):
+    """`mutcat` shows up in both `available_var_fields` and `servable_var_fields`
+    for streaming -- the int16 dtype is one of the three the FFI can preserve
+    exactly (Important 1, PR-B3b review), so it is NOT relegated to
+    available-but-not-servable the way a numeric INDEX column (e.g. `AF`) is.
+    """
+    regions, reference, svar, _written = _build_svar1_custom_format_case(
+        streaming_case, tmp_path
+    )
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=svar)
+    assert _CUSTOM_FIELD_NAME in sds.available_var_fields
+    assert _CUSTOM_FIELD_NAME in sds.servable_var_fields

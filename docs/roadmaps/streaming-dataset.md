@@ -641,8 +641,23 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   with the written path (`gvl.write()` never persists per-call dosage for those sources).
   `_Svar1Backend` discovers `dosage`/custom-fmt fields the same way the written path's
   `_svar_format_fields` helper does, extends both `available_var_fields` AND
-  `servable_var_fields` (unlike PR-B3a's numeric INDEX columns, these ARE servable), and only
-  crosses the REQUESTED subset into the Rust engine (split by dtype into `CallVals::{F32,I32}`).
+  `servable_var_fields` (unlike PR-B3a's numeric INDEX columns, these ARE servable — but only for
+  a dtype the FFI can carry without coercion, see the dtype-preservation note below), and only
+  crosses the REQUESTED subset into the Rust engine (split by EXACT dtype into
+  `CallVals::{F32,I32,I16}`; the field is memmapped and CSR-length-checked lazily, at
+  `build_engine` time, not eagerly at construction — a store with a stale/truncated field file
+  still opens fine for requests that never touch it).
+  **Dtype preservation (review fix, #304):** the first cut coerced every non-float per-call
+  field to `int32` regardless of its registered dtype, breaking byte-identical parity for
+  genoray's one real custom FORMAT field (`mutcat`, `int16`) and risking silent
+  truncation/wraparound for a hypothetical wider integer dtype. Fixed by widening `CallVals`
+  (and the shared per-batch `InfoVals` accumulator) with an `I16` variant and gating
+  `servable_var_fields` on the field's EXACT dtype being one of `float32`/`int32`/`int16` — the
+  only three genoray custom FORMAT fields actually use; anything else is available but not
+  servable (loud `NotImplementedError`, never a silent cast). Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_svar1_custom_format_field_matches_written`
+  (asserts `.dtype` explicitly, not just value equality; exercises the `I16` branch
+  `test_streaming_svar1_dosage_matches_written`, float32-only, never touched).
   **Key correctness point:** per-call fields are stored parallel to `variant_idxs.npy` on the
   SAME hap-major CSR — indexed by CSR POSITION, not by variant id (the opposite of PR-B3a's INFO
   columns) — `Svar1Backend::generate_variants` gathers them inside the SAME keep branch that

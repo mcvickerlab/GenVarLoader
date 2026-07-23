@@ -323,9 +323,11 @@ Rust engine doesn't gather arbitrary SVAR1 index columns yet (deferred follow-up
 it via `with_settings(var_fields=[..., "AF"])` raises `NotImplementedError` immediately, rather
 than failing later at iterate time. `dosage` and custom per-call FORMAT fields ARE servable (Wave B
 PR-B3b) — they live parallel to the store's sparse genotype CSR, so the Rust engine gathers them
-the same way it gathers genotypes, by CSR position rather than variant id. On VCF/BCF, every
-advertised field is servable (`servable_var_fields == available_var_fields`) — the Rust
-`VcfWindowFiller` wires every declared numeric INFO field through directly.
+the same way it gathers genotypes, by CSR position rather than variant id, and the field's
+registered dtype is preserved **exactly** (not coerced) for `float32`/`int32`/`int16` — the three
+dtypes genoray custom FORMAT fields use today — matching the written path byte-for-byte. On
+VCF/BCF, every advertised field is servable (`servable_var_fields == available_var_fields`) — the
+Rust `VcfWindowFiller` wires every declared numeric INFO field through directly.
 
 `StreamingDataset.active_var_fields` reports the currently-configured list — the requested
 `var_fields`, or the builtin default `["alt", "ilen", "start"]` when never set (reproduced

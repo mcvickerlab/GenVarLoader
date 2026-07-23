@@ -53,6 +53,22 @@ _RESERVED_VAR_FIELD_NAMES = frozenset(
 # backend's `build_engine`).
 _DEFAULT_VAR_FIELDS = ("alt", "ilen", "start")
 
+# Wave B PR-B3b review (#304, Important 1): the streaming FFI (`CallVals`/`InfoVals`
+# in `stream_engine.rs`) can carry a per-call FORMAT/dosage column into Rust WITHOUT
+# a dtype-breaking cast only for these exact dtypes -- `float32` (dosage's fixed
+# `DOSAGE_TYPE`), `int32`, and `int16` (genoray's one real custom FORMAT field,
+# `mutcat`, is always `int16`). A field registered with any OTHER dtype (e.g. a
+# hypothetical `float64`/`int64`/`uint32`) cannot be forwarded losslessly-AND-
+# dtype-preservingly, so `_Svar1Backend.__init__` marks it available but NOT
+# servable -- `with_settings` then raises a clear `NotImplementedError` naming it,
+# rather than `build_engine` silently coercing (the pre-fix behavior: EVERY
+# non-float dtype was force-cast to `int32` via `np.ascontiguousarray`, breaking
+# byte-identical parity with the written path for e.g. `mutcat` and unsafely
+# truncating/wrapping any wider hypothetical integer dtype).
+_SUPPORTED_CALL_FIELD_DTYPES = frozenset(
+    {np.dtype(np.float32), np.dtype(np.int32), np.dtype(np.int16)}
+)
+
 
 def _normalize_var_fields(var_fields: "list[str] | None") -> list[str]:
     """`var_fields`, or the builtin default when `None`. Shared by every backend's
@@ -1295,12 +1311,14 @@ class StreamingDataset:
             :meth:`Dataset.with_settings`.
         var_fields
             Variant fields to emit for ``with_seqs("variants")`` output (Wave B
-            PR-B3a, #304). Must be a subset of :attr:`available_var_fields`; an
-            unknown field raises :class:`ValueError` immediately (not at iterate
+            PR-B3a/PR-B3b, #304). Must be a subset of :attr:`available_var_fields`;
+            an unknown field raises :class:`ValueError` immediately (not at iterate
             time). A field that is available but not yet servable by the streaming
             engine (see :attr:`servable_var_fields`) raises
-            :class:`NotImplementedError` immediately instead (deferred to Wave B
-            PR-B3b). Defaults to ``["alt", "ilen", "start"]`` (see
+            :class:`NotImplementedError` immediately instead -- as of PR-B3b this
+            gap is a SVAR1 numeric INDEX column (e.g. a cached ``AF``), not a
+            per-call FORMAT field (``dosage``/custom FORMAT columns ARE servable
+            since PR-B3b). Defaults to ``["alt", "ilen", "start"]`` (see
             :attr:`active_var_fields`) when never set -- this default reproduces
             today's ``with_seqs("variants")`` output byte-for-byte. Only meaningful
             for ``with_seqs("variants")``; combining it with any other output kind
@@ -1339,8 +1357,11 @@ class StreamingDataset:
             if unservable:
                 raise NotImplementedError(
                     f"var_fields {unservable} are available but not yet servable by "
-                    "the streaming engine for this backend (deferred to Wave B "
-                    f"PR-B3b). Servable: {self.servable_var_fields}."
+                    "the streaming engine for this backend (a SVAR1 numeric INDEX "
+                    "column, e.g. a cached AF, forwarding it through the streaming "
+                    "engine is still deferred follow-up work -- see "
+                    "docs/roadmaps/streaming-dataset.md). "
+                    f"Servable: {self.servable_var_fields}."
                 )
             object.__setattr__(out, "_var_fields", list(var_fields))
         return out
@@ -1447,7 +1468,7 @@ class _Svar1Backend:
         bed: pl.DataFrame | str | Path,
     ) -> None:
         from genoray import SparseVar
-        from genoray._types import DOSAGE_TYPE, V_IDX_TYPE
+        from genoray._types import DOSAGE_TYPE
 
         from ..genvarloader import Svar1Store
         from ._haps import (
@@ -1586,39 +1607,44 @@ class _Svar1Backend:
         # `dosage`/custom-fmt fields ARE wired through `next_batch_variants`'s
         # `info_out` (unlike the `_info` INDEX columns above), so both
         # `available_var_fields` and `servable_var_fields` gain them here.
-        self._call_fields: dict[str, np.memmap] = {}
-        _dosage_path = Path(svar_path) / "dosages.npy"
-        if _dosage_path.exists():
-            self._call_fields["dosage"] = np.memmap(
-                _dosage_path, dtype=DOSAGE_TYPE, mode="r"
-            )
+        #
+        # Minor 3 (PR-B3b review, #304): discovery here is name+dtype ONLY -- no
+        # `np.memmap` open, no CSR-length check. A .svar with a stale/truncated
+        # per-call field file (or one simply too small for its registered dtype,
+        # which `np.memmap` itself would raise on) must still OPEN for
+        # haplotype-only streaming, or a `var_fields` request that never touches
+        # this field -- mirroring the written path (`_haps.py`'s `Haps` only
+        # memmaps a var_field file when `name in var_fields`). The actual memmap +
+        # length guard moves to `build_engine`, which only ever sees fields the
+        # caller actually requested.
+        self._call_field_dtypes: dict[str, np.dtype] = {}
+        if (Path(svar_path) / "dosages.npy").exists():
+            self._call_field_dtypes["dosage"] = np.dtype(DOSAGE_TYPE)
         for _name, _dt in _svar_format_fields(Path(svar_path)).items():
-            if _name in _RESERVED_VAR_FIELD_NAMES or _name in self._call_fields:
+            if _name in _RESERVED_VAR_FIELD_NAMES or _name in self._call_field_dtypes:
                 continue
-            self._call_fields[_name] = np.memmap(
-                Path(svar_path) / f"{_name}.npy", dtype=_dt, mode="r"
-            )
-        # Guard against a stale/corrupt field file silently misaligning with the
-        # store's CSR (issue #304 review): every per-call field must have exactly one
-        # entry per `variant_idxs.npy` entry, or indexing it by CSR position `o` in the
-        # Rust walk would silently read garbage/out-of-range values instead of raising.
-        _n_calls = (Path(svar_path) / "variant_idxs.npy").stat().st_size // np.dtype(
-            V_IDX_TYPE
-        ).itemsize
-        for _name, _arr in self._call_fields.items():
-            if _arr.shape[0] != _n_calls:
-                raise ValueError(
-                    f"SVAR1 per-call field {_name!r} at {svar_path} has "
-                    f"{_arr.shape[0]} entries but the store's variant_idxs CSR has "
-                    f"{_n_calls}; the field file is stale or corrupt."
-                )
+            self._call_field_dtypes[_name] = np.dtype(_dt)
+
+        # Important 1 (PR-B3b review, #304): a field is only SERVABLE if its dtype
+        # can cross the FFI without a dtype-breaking cast (see
+        # `_SUPPORTED_CALL_FIELD_DTYPES`'s doc comment) -- e.g. a custom `mutcat`
+        # FORMAT field (`int16`) is available (schema-visible) but would need this
+        # gate to keep it out of `servable_var_fields` if it were ever registered
+        # with an unsupported dtype; every dtype `_svar_format_fields`/`DOSAGE_TYPE`
+        # actually produce today (`int16`/`float32`) IS supported, so this is a
+        # forward-looking guard, not a currently-exercised gap.
         self.available_var_fields = [
             *self.available_var_fields,
-            *[f for f in self._call_fields if f not in self.available_var_fields],
+            *[f for f in self._call_field_dtypes if f not in self.available_var_fields],
         ]
         self.servable_var_fields = [
             *self.servable_var_fields,
-            *[f for f in self._call_fields if f not in self.servable_var_fields],
+            *[
+                f
+                for f, dt in self._call_field_dtypes.items()
+                if dt in _SUPPORTED_CALL_FIELD_DTYPES
+                and f not in self.servable_var_fields
+            ],
         ]
 
         self._svar_path = str(svar_path)
@@ -1761,42 +1787,87 @@ class _Svar1Backend:
         omitting it.
 
         `var_fields` also selects which per-call FORMAT fields (`dosage` and any
-        genoray custom Number=G FORMAT column, `self._call_fields`) are forwarded
-        (Wave B PR-B3b, #304): only the REQUESTED ones cross into Rust, split by
-        dtype into the constructor's `call_field_{f32,i32}[_names]` parameters --
-        an unrequested field costs no extra allocation/work, matching the `want_ref`/
-        `afs=None` no-op-fast-path convention above. Each is a full copy into Rust
-        residency (`PyReadonlyArray1::to_owned()`, the same pattern already used for
+        genoray custom Number=G FORMAT column, `self._call_field_dtypes`) are
+        forwarded (Wave B PR-B3b, #304): only the REQUESTED ones are memmapped and
+        cross into Rust, split by EXACT dtype into the constructor's
+        `call_field_{f32,i32,i16}[_names]` parameters -- an unrequested field costs
+        no extra allocation/work, matching the `want_ref`/`afs=None` no-op-fast-path
+        convention above. Each is a full copy into Rust residency
+        (`PyReadonlyArray1::to_owned()`, the same pattern already used for
         `v_starts`/`ilens`/`alt_alleles`), unlike `variant_idxs.npy` itself (which
         stays a zero-copy mmap inside `Svar1Store`) -- per-call fields are CSR-scale
         (one entry per genotype call, not per variant), so this is a real cost at
         whole-cohort scale; a follow-up could open them as their own Rust-side mmap
         instead, mirroring `Svar1Store`'s `variant_idxs.npy` handling.
+
+        Minor 3 (PR-B3b review, #304): the per-field memmap open AND the CSR-length
+        guard both happen HERE, not at `__init__` construction time -- so a store
+        with a stale/truncated per-call field file still opens fine for
+        haplotype-only streaming (or any `var_fields` that never names the bad
+        field); the failure only surfaces when the field is actually requested,
+        matching the written path's lazy-load contract (`_haps.py`'s `Haps` only
+        memmaps a var_field file `if name in var_fields`).
         """
         from ..genvarloader import Svar1StreamEngine
 
         _active_fields = _normalize_var_fields(var_fields)
         want_ref = "ref" in _active_fields
         # Wave B PR-B3b (#304): only cross the per-call fields actually requested --
-        # `self._call_fields` may hold every discovered field (dosage + every custom
-        # FORMAT column), but forwarding one the caller never asked for would be
-        # wasted allocation/work for no benefit. Split by dtype (kind) since the
-        # engine's constructor takes two dtype-homogeneous parallel lists, not one
-        # heterogeneous one -- PyO3 has no ergonomic mixed-dtype numpy list type.
+        # `self._call_field_dtypes` may hold every discovered field's name/dtype
+        # (dosage + every custom FORMAT column), but forwarding one the caller never
+        # asked for would be wasted allocation/work for no benefit. Split by EXACT
+        # dtype (Important 1, PR-B3b review) -- NOT dtype kind -- since a dtype that
+        # can't be losslessly represented in one of the engine's three buckets is
+        # already excluded from `servable_var_fields` (see
+        # `_SUPPORTED_CALL_FIELD_DTYPES`), so `with_settings` rejects it long before
+        # `build_engine` ever runs; reaching the `else` branch below is therefore an
+        # internal-consistency bug, not a data condition.
         call_field_f32_names: list[str] = []
         call_field_f32: list[NDArray[np.float32]] = []
         call_field_i32_names: list[str] = []
         call_field_i32: list[NDArray[np.int32]] = []
+        call_field_i16_names: list[str] = []
+        call_field_i16: list[NDArray[np.int16]] = []
+        _n_calls: int | None = None
         for _name in _active_fields:
-            _arr = self._call_fields.get(_name)
-            if _arr is None:
+            _dt = self._call_field_dtypes.get(_name)
+            if _dt is None:
                 continue
-            if np.issubdtype(_arr.dtype, np.floating):
+            if _n_calls is None:
+                from genoray._types import V_IDX_TYPE
+
+                _n_calls = (
+                    Path(self._svar_path) / "variant_idxs.npy"
+                ).stat().st_size // np.dtype(V_IDX_TYPE).itemsize
+            _path = Path(self._svar_path) / (
+                "dosages.npy" if _name == "dosage" else f"{_name}.npy"
+            )
+            _arr = np.memmap(_path, dtype=_dt, mode="r")
+            # Guard against a stale/corrupt field file silently misaligning with the
+            # store's CSR (issue #304 review): the field must have exactly one entry
+            # per `variant_idxs.npy` entry, or indexing it by CSR position `o` in the
+            # Rust walk would silently read garbage/out-of-range values instead of
+            # raising.
+            if _arr.shape[0] != _n_calls:
+                raise ValueError(
+                    f"SVAR1 per-call field {_name!r} at {self._svar_path} has "
+                    f"{_arr.shape[0]} entries but the store's variant_idxs CSR has "
+                    f"{_n_calls}; the field file is stale or corrupt."
+                )
+            if _dt == np.dtype(np.float32):
                 call_field_f32_names.append(_name)
                 call_field_f32.append(np.ascontiguousarray(_arr, np.float32))
-            else:
+            elif _dt == np.dtype(np.int32):
                 call_field_i32_names.append(_name)
                 call_field_i32.append(np.ascontiguousarray(_arr, np.int32))
+            elif _dt == np.dtype(np.int16):
+                call_field_i16_names.append(_name)
+                call_field_i16.append(np.ascontiguousarray(_arr, np.int16))
+            else:  # pragma: no cover -- unreachable, see docstring/comment above
+                raise AssertionError(
+                    f"internal error: per-call field {_name!r} with unsupported "
+                    f"dtype {_dt} reached build_engine despite not being servable"
+                )
 
         contig_names = list(self._contigs)
         contig_starts: list[int] = []
@@ -1873,6 +1944,8 @@ class _Svar1Backend:
             call_field_f32=call_field_f32,
             call_field_i32_names=call_field_i32_names,
             call_field_i32=call_field_i32,
+            call_field_i16_names=call_field_i16_names,
+            call_field_i16=call_field_i16,
         )
 
     def read_window(

@@ -282,19 +282,23 @@ def test_af_cached_svar1_af_field_unservable_raises_early(streaming_case, tmp_pa
     """Regression for Important 1 (Wave B PR-B3a review): an AF-cached SVAR1
     store advertises "AF" via `available_var_fields` (a real on-disk numeric
     index column) but the SVAR1 Rust engine has no general INFO/index-column
-    gather yet -- only `ref` is wired beyond the three defaults
-    (`Svar1Backend::generate_variants` hardcodes `info_out: Vec::new()`).
-    Before the fix, this failure only surfaced from inside the per-batch
-    packing loop after a full `build_engine` + producer thread + first window
-    read; `with_settings` must now reject it immediately, at configuration
-    time, naming the field and the Wave B PR-B3b deferral -- never silently
-    building an engine that can't serve the request.
+    gather yet -- unlike per-call FORMAT/dosage fields, which PR-B3b wired
+    through (see `test_streaming_variants_parity.py`'s
+    `test_streaming_svar1_dosage_matches_written`/
+    `test_streaming_svar1_custom_format_field_matches_written`). Before the
+    fix, this failure only surfaced from inside the per-batch packing loop
+    after a full `build_engine` + producer thread + first window read;
+    `with_settings` must now reject it immediately, at configuration time,
+    naming the field and that this is still deferred follow-up work -- never
+    silently building an engine that can't serve the request. (Minor 1, PR-B3b
+    review, #304: the message no longer says "deferred to PR-B3b" -- PR-B3b IS
+    this task, and it did NOT close this particular gap.)
     """
     regions, reference, svar, _af = _af_cached_svar(streaming_case, tmp_path)
     sds = gvl.StreamingDataset(regions, reference=reference, variants=svar)
     assert "AF" in sds.available_var_fields
     assert "AF" not in sds.servable_var_fields
-    with pytest.raises(NotImplementedError, match="PR-B3b"):
+    with pytest.raises(NotImplementedError, match="numeric INDEX column"):
         sds.with_settings(var_fields=["alt", "ilen", "start", "AF"])
 
 

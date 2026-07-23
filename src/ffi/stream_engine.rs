@@ -70,9 +70,21 @@ use crate::svar1::store::Svar1Store;
 /// buffer `generate_variants` assembles (one value per kept row); this holds the FULL
 /// per-call column, indexed by CSR POSITION -- the same `variant_idxs.npy` position
 /// space `Svar1Store::geno_v_idxs()` itself uses -- not by global variant id.
+///
+/// `I16` (PR-B3b review, #304) exists so a custom FORMAT field registered with a
+/// native `int16` dtype (genoray's one real one, `mutcat`) can be forwarded WITHOUT
+/// the dtype-breaking upcast to `I32` a written-vs-streamed byte-identical-parity
+/// contract can't tolerate (an `int16` field must come back as `int16`, not a
+/// value-equal-but-differently-typed `int32`). `_Svar1Backend.__init__` only ever
+/// marks a field "servable" (see `servable_var_fields`) when its dtype is exactly
+/// one of `float32`/`int32`/`int16` -- anything else is advertised
+/// (`available_var_fields`) but rejected loudly by `with_settings` before a
+/// `CallVals` is ever built for it, so this enum does not need a fourth "give up"
+/// variant.
 enum CallVals {
     F32(Array1<f32>),
     I32(Array1<i32>),
+    I16(Array1<i16>),
 }
 
 /// Per-contig data the engine needs to serve `read_window` and generation for jobs on
@@ -342,6 +354,7 @@ impl EngineBackend for Svar1Backend {
             .map(|(_, v)| match v {
                 CallVals::F32(_) => InfoVals::F32(Vec::new()),
                 CallVals::I32(_) => InfoVals::I32(Vec::new()),
+                CallVals::I16(_) => InfoVals::I16(Vec::new()),
             })
             .collect();
         for r in 0..(n_rows * ploidy) {
@@ -371,6 +384,7 @@ impl EngineBackend for Svar1Backend {
                         match (vals, &mut call_bufs[fi]) {
                             (CallVals::F32(a), InfoVals::F32(b)) => b.push(a[o]),
                             (CallVals::I32(a), InfoVals::I32(b)) => b.push(a[o]),
+                            (CallVals::I16(a), InfoVals::I16(b)) => b.push(a[o]),
                             _ => unreachable!(
                                 "call_fields/call_bufs dtype pairing is fixed at construction"
                             ),
@@ -528,6 +542,7 @@ impl Svar1StreamEngine {
         variants=false, afs=None, min_af=None, max_af=None, want_ref=false,
         call_field_f32_names=Vec::new(), call_field_f32=Vec::new(),
         call_field_i32_names=Vec::new(), call_field_i32=Vec::new(),
+        call_field_i16_names=Vec::new(), call_field_i16=Vec::new(),
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -571,25 +586,34 @@ impl Svar1StreamEngine {
         want_ref: bool,
         // Wave B PR-B3b (#304): per-call FORMAT/dosage columns REQUESTED via
         // `var_fields` (`_Svar1Backend.build_engine` filters, splits by dtype, and
-        // forwards only the active subset -- see that method's doc comment). Two
-        // parallel dtype-homogeneous name/array list pairs, since PyO3 has no
-        // ergonomic mixed-dtype numpy list type. Each array must have exactly one
-        // entry per `variant_idxs.npy` entry (validated below) -- it is indexed by
-        // CSR position in `Svar1Backend::generate_variants`, the SAME position space
+        // forwards only the active subset -- see that method's doc comment). THREE
+        // parallel dtype-homogeneous name/array list pairs (f32/i32/i16), since PyO3
+        // has no ergonomic mixed-dtype numpy list type -- one bucket per `CallVals`
+        // variant, so every field crosses with its dtype preserved exactly (PR-B3b
+        // review: a byte-identical-parity contract can't tolerate an int16 field
+        // silently upcasting to int32). Each array must have exactly one entry per
+        // `variant_idxs.npy` entry (validated below) -- it is indexed by CSR position
+        // in `Svar1Backend::generate_variants`, the SAME position space
         // `store.geno_v_idxs()` uses.
         call_field_f32_names: Vec<String>,
         call_field_f32: Vec<PyReadonlyArray1<f32>>,
         call_field_i32_names: Vec<String>,
         call_field_i32: Vec<PyReadonlyArray1<i32>>,
+        // Wave B PR-B3b review (#304): the int16 bucket -- genoray's one real custom
+        // FORMAT field, `mutcat`, is always `int16`; see `CallVals`'s doc comment for
+        // why this can't just upcast into `call_field_i32`.
+        call_field_i16_names: Vec<String>,
+        call_field_i16: Vec<PyReadonlyArray1<i16>>,
     ) -> PyResult<Self> {
         let store = Svar1Store::open_meta(store_path, n_samples, ploidy)?;
 
         if call_field_f32_names.len() != call_field_f32.len()
             || call_field_i32_names.len() != call_field_i32.len()
+            || call_field_i16_names.len() != call_field_i16.len()
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "Svar1StreamEngine: call_field_{f32,i32}_names must match \
-                 call_field_{f32,i32} in length",
+                "Svar1StreamEngine: call_field_{f32,i32,i16}_names must match \
+                 call_field_{f32,i32,i16} in length",
             ));
         }
         let n_calls = store.geno_v_idxs().len();
@@ -611,6 +635,15 @@ impl Svar1StreamEngine {
                 )));
             }
         }
+        for (name, arr) in call_field_i16_names.iter().zip(&call_field_i16) {
+            let len = arr.as_array().len();
+            if len != n_calls {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Svar1StreamEngine: call field {name:?} has {len} entries but the \
+                     store's variant_idxs CSR has {n_calls}",
+                )));
+            }
+        }
         let call_fields: Vec<(String, CallVals)> = call_field_f32_names
             .into_iter()
             .zip(call_field_f32)
@@ -620,6 +653,12 @@ impl Svar1StreamEngine {
                     .into_iter()
                     .zip(call_field_i32)
                     .map(|(name, a)| (name, CallVals::I32(a.as_array().to_owned()))),
+            )
+            .chain(
+                call_field_i16_names
+                    .into_iter()
+                    .zip(call_field_i16)
+                    .map(|(name, a)| (name, CallVals::I16(a.as_array().to_owned()))),
             )
             .collect();
 
@@ -812,6 +851,9 @@ impl Svar1StreamEngine {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
                         InfoVals::F32(v) => {
+                            dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
+                        }
+                        InfoVals::I16(v) => {
                             dict.set_item(name, Array1::from_vec(v).into_pyarray(py))?
                         }
                     }
