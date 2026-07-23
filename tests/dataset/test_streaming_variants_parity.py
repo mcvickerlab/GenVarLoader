@@ -170,20 +170,28 @@ _AF_VCF_RAW = f"""\
 ##fileformat=VCFv4.2
 ##contig=<ID=chr1,length={len(_AF_REF)}>
 ##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read depth">
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1\tS2\tS3
-chr1\t3\t.\tA\tC,G\t.\t.\tAF=0.1,0.2\tGT\t0|1\t1|2\t2|2\t0|0
-chr1\t10\t.\tG\tC\t.\t.\tAF=0.42\tGT\t1|1\t0|0\t1|0\t0|0
-chr1\t16\t.\tT\tA\t.\t.\tAF=0.15\tGT\t0|0\t1|1\t0|0\t1|0
-chr1\t20\t.\tT\tC\t.\t.\tAF=0.65\tGT\t1|0\t0|1\t1|1\t0|0
-chr1\t25\t.\tA\tT\t.\t.\tAF=0.85\tGT\t0|1\t1|1\t0|0\t1|1
-chr1\t30\t.\tG\tA\t.\t.\tAF=0.55\tGT\t1|1\t0|0\t0|1\t1|0
+chr1\t3\t.\tA\tC,G\t.\t.\tAF=0.1,0.2;DP=11\tGT\t0|1\t1|2\t2|2\t0|0
+chr1\t10\t.\tG\tC\t.\t.\tAF=0.42;DP=13\tGT\t1|1\t0|0\t1|0\t0|0
+chr1\t16\t.\tT\tA\t.\t.\tAF=0.15;DP=17\tGT\t0|0\t1|1\t0|0\t1|0
+chr1\t20\t.\tT\tC\t.\t.\tAF=0.65;DP=19\tGT\t1|0\t0|1\t1|1\t0|0
+chr1\t25\t.\tA\tT\t.\t.\tAF=0.85;DP=23\tGT\t0|1\t1|1\t0|0\t1|1
+chr1\t30\t.\tG\tA\t.\t.\tAF=0.55;DP=29\tGT\t1|1\t0|0\t0|1\t1|0
 """
 # Expected post-`bcftools norm -m -any` AF values, sorted:
 # {0.1 (C@3), 0.15 (A@16), 0.2 (G@3), 0.42 (C@10), 0.55 (A@30), 0.65 (C@20),
 #  0.85 (T@25)}. 0-based `start` for the multiallelic-derived records is 2
 # (pos 3, 1-based).
 _AF_MULTIALLELIC_START = 2  # 0-based start of the split pos-3 C/G records
+
+# `DP` is `Number=1` (not `Number=A`/`Number=.`), so unlike `AF` it is NOT
+# per-ALT: `bcftools norm -m -any` copies the pre-split value onto BOTH
+# records derived from the pos-3 multiallelic site verbatim (no
+# ALT-subsetting ambiguity). Keyed by 1-based POS -- both post-norm pos-3
+# records (C-derived and G-derived) map to the same DP=11.
+_AF_VCF_DP_BY_POS = {3: 11, 10: 13, 16: 17, 20: 19, 25: 23, 30: 29}
 
 
 def _build_af_vcf(tmp_path: Path) -> tuple[Path, Path]:
@@ -249,6 +257,24 @@ def af_vcf_regions() -> pl.DataFrame:
     return pl.DataFrame(
         {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [len(_AF_REF)]}
     )
+
+
+@pytest.fixture(scope="module")
+def af_vcf_case(af_vcf, af_vcf_regions, tmp_path_factory):
+    """`(regions, reference, variants, written)` for the AF/DP VCF fixture, the
+    same shape `streaming_case` returns -- `written` is opened with `AF` eagerly
+    loaded (the one INFO field `gvl.write` actually persists for a VCF source;
+    see `_attach_af_column`) so tests can layer `with_settings(var_fields=...)`
+    on top without re-triggering the `KeyError: 'AF'` gotcha documented on
+    `test_streaming_svar1_af_matches_written`.
+    """
+    vcf_gz, ref = af_vcf
+    out = tmp_path_factory.mktemp("af_vcf_case_ds") / "ds"
+    gvl.write(out, af_vcf_regions, variants=str(vcf_gz), overwrite=True)
+    written = gvl.Dataset.open(
+        out, reference=ref, var_fields=["alt", "ilen", "start", "AF"]
+    )
+    return af_vcf_regions, ref, str(vcf_gz), written
 
 
 @pytest.mark.parametrize(
@@ -341,3 +367,175 @@ def test_streaming_vcf_af_matches_written(
                 f"got {has_multiallelic_start}; "
                 f"start={[np.asarray(cell.start[h]).tolist() for h in range(sds.ploidy)]}"
             )
+
+
+# --- Wave B PR-B3a: var_fields parity (issue #304) --------------------------
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_streaming_ref_var_field_matches_written(streaming_case, backend):
+    """`ref` is byte-identical to the written path on every backend.
+
+    SVAR1 reads REF from its index; VCF/PGEN slice it out of the contig reference at
+    [start, start + alt_len - ilen). The written oracle carries REF directly, so this
+    is the gate on the reference-slice assumption.
+    """
+    regions, reference, variants, written = streaming_case(backend)
+    fields = ["alt", "ilen", "start", "ref"]
+    ds = written.with_settings(var_fields=fields).with_seqs("variants")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=fields)
+        .with_seqs("variants")
+    )
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            expected = ds[int(r_idx[k]), int(s_idx[k])]
+            for h in range(sds.ploidy):
+                np.testing.assert_array_equal(
+                    np.asarray(data[k].ref[h]), np.asarray(expected.ref[h])
+                )
+                total += np.atleast_1d(np.asarray(data[k].ref[h])).shape[0]
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+@pytest.mark.parametrize("field_name", ["AF"])
+def test_streaming_vcf_info_var_field_matches_written(af_vcf_case, field_name):
+    """A Float INFO field (AF) rides along byte-identically between streaming and
+    the written path.
+
+    The task brief also asked for a `Type=Integer` ``DP`` case here (the intended
+    dtype canary: the written column's dtype comes from genoray's index writer,
+    streaming's from the staged `FieldSpec`, and they must agree). That comparison
+    is not possible AS SPECIFIED: `gvl.write` never persists a non-``AF`` numeric
+    INFO field into a queryable written-path column for a VCF source -- see
+    `test_streaming_vcf_available_var_fields_superset_of_written` below for the
+    measured mechanism. `written.with_settings(var_fields=[..., "DP"])` raises
+    before there is anything to compare. `test_streaming_vcf_dp_field_streaming_only`
+    below is the strongest TRUE assertion available for DP: it confirms the written
+    path rejects the request, and separately verifies streaming's DP dtype/values
+    against the fixture's own known ground truth (not the written path).
+    """
+    regions, reference, variants, written = af_vcf_case
+    fields = ["alt", "ilen", "start", field_name]
+    ds = written.with_settings(var_fields=fields).with_seqs("variants")
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=fields)
+        .with_seqs("variants")
+    )
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            expected = ds[int(r_idx[k]), int(s_idx[k])]
+            for h in range(sds.ploidy):
+                got = np.asarray(data[k][field_name][h])
+                exp = np.asarray(expected[field_name][h])
+                assert got.dtype == exp.dtype, (
+                    f"{field_name} dtype divergence: streaming {got.dtype} "
+                    f"vs written {exp.dtype}"
+                )
+                np.testing.assert_array_equal(got, exp)
+                total += np.atleast_1d(got).shape[0]
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+def test_streaming_vcf_dp_field_streaming_only(af_vcf_case):
+    """``DP`` (a `Type=Integer` INFO field declared in the source VCF header, but
+    NOT cached into the written `.gvi` index) is streaming-only.
+
+    Measured mechanism (Wave B PR-B3a review): `gvl.write` only ever attaches ONE
+    top-level numeric INFO column for a VCF source -- ``AF``, via
+    `_attach_af_column` (Wave B PR-B2, #319). Any OTHER declared numeric INFO
+    field (here, ``DP``) IS computed by genoray into a nested ``INFO`` struct
+    column during `_write_gvi_index` (confirmed directly: `variants.arrow`'s
+    schema carries `INFO: Struct({'AF': List(Float32), 'DP': Int32})`), but the
+    written-path schema scan (`_Variants.available_info_fields`) only looks at
+    TOP-LEVEL numeric columns, so `DP` never reaches `available_var_fields` and
+    can never be requested via `with_settings(var_fields=...)`.
+
+    Streaming's VCF backend, by contrast, derives `available_var_fields` from the
+    LIVE VCF header (`_declared_info_numeric_dtypes`) and wires every declared
+    numeric field through the Rust `VcfWindowFiller`, so it CAN serve `DP`. This
+    test confirms both halves: the written path rejects the request, and
+    streaming serves correct dtype + values, checked against the fixture's own
+    known per-position ground truth (`_AF_VCF_DP_BY_POS`) since there is no
+    written oracle to compare against.
+    """
+    regions, reference, variants, written = af_vcf_case
+    fields = ["alt", "ilen", "start", "DP"]
+
+    assert "DP" not in written.available_var_fields
+    with pytest.raises(ValueError, match="DP"):
+        written.with_settings(var_fields=fields)
+
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=fields)
+        .with_seqs("variants")
+    )
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        for k in range(len(r_idx)):
+            for h in range(sds.ploidy):
+                starts = np.atleast_1d(np.asarray(data[k].start[h]))
+                dps = np.atleast_1d(np.asarray(data[k].DP[h]))
+                assert dps.dtype == np.int32, f"DP dtype {dps.dtype}, expected int32"
+                assert dps.shape == starts.shape
+                for pos0, dp in zip(starts, dps):
+                    expected_dp = _AF_VCF_DP_BY_POS[int(pos0) + 1]
+                    assert int(dp) == expected_dp, (
+                        f"DP mismatch at 0-based start={pos0}: "
+                        f"got {dp}, expected {expected_dp}"
+                    )
+                total += dps.shape[0]
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_available_var_fields_matches_written(streaming_case, backend):
+    """Streaming derives the field set from the live source, the written path from
+    the written artifact. They must agree, or one of the two definitions has
+    drifted -- true (equality) for every `streaming_case` backend used here,
+    because none of these fixtures declare a numeric INFO field beyond what
+    `gvl.write` itself caches (`AF`). See
+    `test_streaming_vcf_available_var_fields_superset_of_written` below for the
+    fixture (`af_vcf_case`, with a `DP` field) where VCF genuinely diverges and
+    only `written ⊆ streaming` holds -- that is a real, permanent contract
+    difference, not a bug, so it gets its own test rather than a weakened
+    assertion here.
+    """
+    regions, reference, variants, written = streaming_case(backend)
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    assert set(sds.available_var_fields) == set(written.available_var_fields)
+
+
+def test_streaming_vcf_available_var_fields_superset_of_written(af_vcf_case):
+    """Measured VCF divergence (Wave B PR-B3a review): streaming's
+    `available_var_fields` is a strict superset of the written path's for a VCF
+    source declaring a non-``AF`` numeric INFO field.
+
+    Streaming reports every declared numeric INFO field from the LIVE VCF
+    header. The written path reports only whatever `_Variants
+    .available_info_fields` finds as a TOP-LEVEL numeric column in the written
+    `variants.arrow` -- and `gvl.write` only ever attaches one such column for a
+    VCF source (`AF`, via `_attach_af_column`, Wave B PR-B2/#319). Measured
+    directly against this fixture:
+    written  == {'alt', 'ilen', 'start', 'AF', 'ref'}
+    streaming == {'alt', 'ilen', 'start', 'AF', 'DP', 'ref'}
+    `written ⊆ streaming`, never equal, is the correct contract here -- do not
+    loosen streaming's list to match, and do not treat this as a bug to fix
+    without a design decision on how (or whether) `gvl.write` should surface
+    arbitrary INFO columns as top-level queryable fields.
+    """
+    regions, reference, variants, written = af_vcf_case
+    sds = gvl.StreamingDataset(regions, reference=reference, variants=variants)
+    written_set = set(written.available_var_fields)
+    streaming_set = set(sds.available_var_fields)
+    assert written_set <= streaming_set, (
+        f"written {sorted(written_set)} must be a subset of "
+        f"streaming {sorted(streaming_set)}"
+    )
+    assert "AF" in written_set and "AF" in streaming_set
+    assert "DP" in streaming_set and "DP" not in written_set

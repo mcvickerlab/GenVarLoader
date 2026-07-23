@@ -283,13 +283,58 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   `Dataset.open(...).with_seqs("variants")[r, s]` at `jitter=0`. Streamed variant records carry
   no dataset-global variant id (unlike `AnnotatedHaps.var_idxs`) — each `RaggedVariants` entry is
   self-contained. `min_af`/`max_af` filtering (Wave B PR-B2, below) is wired for this output
-  kind; non-default `var_fields` (e.g. `dosage`/FORMAT columns) on the streaming variants path is
-  not yet wired (**PR-B3**).
+  kind; non-default `var_fields` (Wave B PR-B3a, below) selects which extra fields ride along.
 
-`"variant-windows"`/`"reference"` output kinds and non-default `var_fields` remain **not yet
-implemented** for `StreamingDataset` — later Wave B follow-ups (issue
-[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PRs B3–B4); `with_seqs` raises
+`"variant-windows"`/`"reference"` output kinds remain **not yet implemented** for
+`StreamingDataset` — a later Wave B follow-up (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304), PR-B4); `with_seqs` raises
 `NotImplementedError` for `"variant-windows"`/`"reference"`.
+
+#### Variant fields on streaming output (`var_fields`, Wave B PR-B3a)
+
+`StreamingDataset.with_settings(var_fields=[...])` (issue
+[#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) selects which per-variant fields
+ride along on `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`
+(see "Variant fields (`var_fields`)" above) but valid **only** for `with_seqs("variants")` —
+combining `var_fields` with any other output kind raises `NotImplementedError` (stricter than the
+written path, which allows `var_fields` on `"variant-windows"` too — streaming doesn't support
+that output kind yet). The requestable set is **backend-derived**, not read from an on-disk
+schema, since there is no written artifact:
+
+| Backend | `available_var_fields` |
+|---|---|
+| SVAR1 (`.svar`) | `alt`, `ilen`, `start`, every numeric index column except `POS`/`ILEN` (e.g. `AF`), `ref` |
+| VCF/BCF | `alt`, `ilen`, `start`, every numeric INFO field the live header declares, `ref` |
+| PGEN | `alt`, `ilen`, `start`, `ref` (a PGEN record stream has no INFO path) |
+
+Field names that collide with the underlying FFI dict's fixed keys (`alt`, `alt_offsets`, `start`,
+`ilen`, `offsets`, `ref`, `ref_offsets`) are never advertised — a same-named source column simply
+cannot be requested via `var_fields`.
+
+`available_var_fields` is not always fully **servable**: `StreamingDataset.servable_var_fields`
+narrows it to fields the streaming engine can actually gather today. On SVAR1, an index column
+like `AF` is advertised (it is a real on-disk numeric column) but not yet servable — the Rust
+engine doesn't gather arbitrary SVAR1 index columns yet (deferred to PR-B3b); requesting it via
+`with_settings(var_fields=[..., "AF"])` raises `NotImplementedError` immediately, rather than
+failing later at iterate time. On VCF/BCF, every advertised field is servable (`servable_var_fields
+== available_var_fields`) — the Rust `VcfWindowFiller` wires every declared numeric INFO field
+through directly.
+
+`StreamingDataset.active_var_fields` reports the currently-configured list — the requested
+`var_fields`, or the builtin default `["alt", "ilen", "start"]` when never set (reproduced
+byte-for-byte so unconfigured streaming output matches `with_seqs("variants")`'s pre-`var_fields`
+behavior).
+
+```{caution}
+For a VCF/BCF source, streaming's `available_var_fields` can be a **strict superset** of the
+written path's: `gvl.write()` only ever persists one numeric INFO column into a written dataset's
+queryable schema (`AF`, when the header declares it — see the AF-filtering section below). Any
+*other* declared numeric INFO field (e.g. an `Integer DP`) is something streaming can serve live,
+but the written path cannot expose at all (it stays buried in a nested `INFO` struct column that
+the written-path schema scan never surfaces as a top-level field) — requesting it via
+`Dataset.with_settings(var_fields=[..., "DP"])` raises `ValueError: Missing variant fields: ['DP']`.
+This is a permanent asymmetry between the two paths for VCF/BCF sources, not a bug.
+```
 
 #### Allele-frequency filtering (`min_af`/`max_af`, Wave B PR-B2)
 

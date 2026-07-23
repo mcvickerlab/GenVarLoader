@@ -550,8 +550,9 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   clip, #202) and PR-B1 (streaming `with_seqs("variants")` for SVAR1/VCF/PGEN) both done —
   streaming `StreamingDataset.with_seqs("variants")` now returns `RaggedVariants`
   byte-identical to the corrected written oracle at `jitter=0`, on the SVAR1, VCF, and PGEN
-  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done —
-  see below**); non-default `var_fields` (PR-B3) and `"variant-windows"` (PR-B4) remain. Plan:
+  backends (not `.svar2`, which stays haplotypes-only). `min_af`/`max_af` (**PR-B2, done**) and
+  non-default `var_fields` (**PR-B3a, done — see below**) are wired; per-call FORMAT fields
+  (PR-B3b) and `"variant-windows"` (PR-B4) remain. Plan:
   `docs/superpowers/plans/2026-07-21-streaming-variants-output-b0-b1.md`; backed by the reviewed
   design at `docs/superpowers/specs/2026-07-20-streaming-variants-output-wave-b-design.md`.
   Task 1 (**PR-B0**, region-overlap clip in the *written* `with_seqs("variants")` path, #202)
@@ -606,6 +607,33 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `FieldSpec` staging and `_write_gvi_index`-adjacent AF-attach path already existed at the
   pinned rev. No new exported symbol (two new `with_settings` kwargs only) — no `api.md`
   change. Design: `docs/superpowers/specs/2026-07-21-streaming-variants-min-max-af-b2-design.md`.
+- ✅ **Variants-output surface, Wave B PR-B3a (`var_fields`) — issue
+  [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** `StreamingDataset
+  .with_settings(var_fields=[...])` selects which extra per-variant fields ride along on
+  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)` but valid
+  **only** for `with_seqs("variants")` (raises `NotImplementedError` on any other output kind —
+  stricter than the written path, which also allows `var_fields` on `"variant-windows"`;
+  streaming doesn't support that output kind yet, PR-B4). New `available_var_fields`,
+  `servable_var_fields`, and `active_var_fields` properties. The requestable set is
+  **backend-derived**: SVAR1 offers its numeric index columns (e.g. `AF`) + `ref`; VCF/BCF
+  offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
+  `servable_var_fields` narrows `available_var_fields` to what the engine can actually gather
+  today — SVAR1 index columns like `AF` are advertised but not yet servable (requesting one
+  raises `NotImplementedError` at `with_settings` time, deferred to **PR-B3b**, per-call FORMAT
+  fields); VCF/BCF and PGEN are fully servable. Byte-identical parity gated against the written
+  oracle on `ref` (all three backends) and on VCF INFO fields (`AF`). **Measured, permanent
+  divergence (not a bug):** for a VCF/BCF source, `written.available_var_fields ⊊
+  streaming.available_var_fields` — `gvl.write()` only ever persists one numeric INFO column
+  (`AF`) into a queryable written schema; any other declared numeric INFO field (e.g. an
+  Integer `DP`) streaming can serve live but the written path cannot expose at all (buried in a
+  nested `INFO` struct column the written-path schema scan never surfaces as a top-level
+  field) — requesting it from a written `Dataset` raises `ValueError`. Gated by
+  `tests/dataset/test_streaming_variants_parity.py::test_streaming_vcf_available_var_fields_superset_of_written`
+  and `::test_streaming_vcf_dp_field_streaming_only`. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`. Design:
+  `docs/superpowers/specs/2026-07-22-streaming-variants-wave-b-b3-b4-design.md`; plan:
+  `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md`. Branch:
+  `spec/streaming-waveb-b3b4`.
 
 ## Sequencing
 
