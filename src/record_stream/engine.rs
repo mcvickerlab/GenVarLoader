@@ -104,6 +104,11 @@ struct RecordBackend {
     /// at the top of that override (bails if `false`) and surfaced to Python via
     /// `next_batch_variants`. `false` (default) preserves pre-Task-2 behavior exactly.
     variants: bool,
+    /// Wave B PR-B2 (#317/#319): inclusive AF bounds folded into `generate_variants`'
+    /// per-variant keep. `Some` only when AF filtering is requested; `None` (or an empty
+    /// `slot.afs`) ⇒ no-op, preserving pre-PR-B2 parity exactly.
+    min_af: Option<f32>,
+    max_af: Option<f32>,
 }
 
 impl RecordBackend {
@@ -272,8 +277,17 @@ impl EngineBackend for RecordBackend {
                     let v_start = slot.v_starts[vidx as usize] as i64;
                     let v_ilen = slot.ilens[vidx as usize] as i64;
                     let v_end = v_start - v_ilen.min(0) + 1;
-                    let keep = v_start < r_e as i64 && v_end > r_s as i64;
-                    if keep {
+                    // Wave B PR-B2: AND an AF keep onto the region-overlap keep. Empty
+                    // slot.afs (no AF requested / PGEN) ⇒ af_keep always true (no-op),
+                    // preserving pre-PR-B2 parity. Inclusive bounds, matching the written
+                    // oracle and the SVAR1 fold.
+                    let af_keep = if slot.afs.is_empty() {
+                        true
+                    } else {
+                        let af = slot.afs[vidx as usize];
+                        self.min_af.is_none_or(|m| af >= m) && self.max_af.is_none_or(|m| af <= m)
+                    };
+                    if v_start < r_e as i64 && v_end > r_s as i64 && af_keep {
                         v_idxs.push(vidx);
                     }
                 }
@@ -326,6 +340,8 @@ impl RecordStreamEngine {
         output_length: i64,
         annotated: bool,
         variants: bool,
+        min_af: Option<f32>,
+        max_af: Option<f32>,
     ) -> Self {
         let backend = RecordBackend {
             filler,
@@ -338,6 +354,8 @@ impl RecordStreamEngine {
             output_length,
             annotated,
             variants,
+            min_af,
+            max_af,
         };
         Self {
             core: StreamEngineCore::new(Arc::new(backend), batch_size),
@@ -390,7 +408,7 @@ impl RecordStreamEngine {
         contig_names, contig_ref_bytes,
         job_contig_idx, job_region_starts, job_region_ends, job_s_lo, job_s_hi,
         fasta_path, pad_char, parallel, batch_size, output_length, annotated=false,
-        variants=false,
+        variants=false, min_af=None, max_af=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -412,6 +430,8 @@ impl RecordStreamEngine {
         output_length: i64,
         annotated: bool,
         variants: bool,
+        min_af: Option<f32>,
+        max_af: Option<f32>,
     ) -> PyResult<Self> {
         let n_contigs = contig_names.len();
         if contig_ref_bytes.len() != n_contigs {
@@ -490,6 +510,8 @@ impl RecordStreamEngine {
                     output_length,
                     annotated,
                     variants,
+                    min_af,
+                    max_af,
                 ))
             }
             "pgen" => {
@@ -525,6 +547,8 @@ impl RecordStreamEngine {
                     output_length,
                     annotated,
                     variants,
+                    min_af,
+                    max_af,
                 ))
             }
             other => Err(PyValueError::new_err(format!(
@@ -825,6 +849,8 @@ mod tests {
             -1,   // ragged
             false, // annotated
             false, // variants
+            None,  // min_af
+            None,  // max_af
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -857,6 +883,8 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // min_af
+            None,  // max_af
         );
         assert!(engine.next_batch_core().is_none());
         assert!(engine.next_batch_core().is_none());
@@ -887,6 +915,8 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // min_af
+            None,  // max_af
         );
 
         match engine.next_batch_core() {
@@ -1001,6 +1031,8 @@ mod tests {
             -1,    // ragged
             false, // annotated
             false, // variants
+            None,  // min_af
+            None,  // max_af
         );
 
         let mut batches: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
@@ -1057,6 +1089,8 @@ mod tests {
             output_length: -1,
             annotated: false,
             variants: true,
+            min_af: None,
+            max_af: None,
         };
 
         let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
@@ -1102,6 +1136,8 @@ mod tests {
             output_length: -1,
             annotated: false,
             variants: true,
+            min_af: None,
+            max_af: None,
         };
 
         let n_rows = backend.jobs[0].regions.len() * 2; // regions * n_samples
@@ -1121,5 +1157,101 @@ mod tests {
             out.alt_seq_offsets.as_slice().unwrap(),
             &[0, 1, 2, 3, 4]
         );
+    }
+
+    /// Wave B PR-B2 (#317/#319): the AF keep must AND-compose with the region-overlap
+    /// clip, not OR or replace it. Single hap carries three window-local variants, each
+    /// probing a different corner of the 2x2 (region, af) truth table against
+    /// `min_af=Some(0.1)`:
+    ///   v0@12 (af=0.05): region PASS ([10,20) contains 12), af FAIL (0.05 < 0.1)  -> drop
+    ///   v1@25 (af=0.5):  region FAIL (25 not in [10,20)), af PASS (0.5 >= 0.1)    -> drop
+    ///   v2@14 (af=0.5):  region PASS, af PASS                                     -> KEEP
+    /// Only v2 satisfies both, so the correct (AND) output is exactly `{v2}`. Any of the
+    /// following bugs changes the result (each is a distinct wrong answer, not a vacuous
+    /// pass): using `||` instead of `&&` keeps all three (v0 via region, v1 via af, v2
+    /// via both) -> `row_offsets=[0,3]`; dropping the af term entirely keeps `{v0,v2}`
+    /// -> `row_offsets=[0,2]`, `start=[12,14]`; dropping the region term entirely (af-only)
+    /// keeps `{v1,v2}` -> `row_offsets=[0,2]`, `start=[25,14]`.
+    #[test]
+    fn generate_variants_af_keep_and_composes_with_region_clip() {
+        let slot = DecodedWindow {
+            v_starts: vec![12, 25, 14],
+            ilens: vec![0, 0, 0],
+            alt_alleles: vec![b'A', b'C', b'G'],
+            alt_offsets: vec![0, 1, 2, 3],
+            geno_v_idxs: vec![0, 1, 2], // single hap carries all three local variants
+            geno_offsets: vec![0, 3],
+            global_v_idxs: vec![100, 101, 102], // ignored for variants output
+            afs: vec![0.05f32, 0.5, 0.5],
+        };
+        let backend = RecordBackend {
+            filler: Box::new(StubFiller),
+            contigs: vec![chr1()],
+            jobs: vec![RecordJob {
+                contig_idx: 0,
+                regions: vec![(10, 20)],
+                s_lo: 0,
+                s_hi: 1,
+            }],
+            n_samples: 1,
+            ploidy: 1,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+            min_af: Some(0.1),
+            max_af: None,
+        };
+
+        let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
+        // Only v2 (region PASS, af PASS) survives the AND-composed keep.
+        assert_eq!(out.start.as_slice().unwrap(), &[14]);
+        assert_eq!(out.ilen.as_slice().unwrap(), &[0]);
+        assert_eq!(out.alt_data.as_slice().unwrap(), &[b'G']);
+        assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 1]);
+    }
+
+    /// Companion to the AND-composition test above: with `afs` present but no bounds set
+    /// (`min_af=None, max_af=None`), the AF term must be a pure no-op — identical to the
+    /// pre-PR-B2 region-only clip. Same three-variant fixture as above; without a keep
+    /// bound the af=0.05 and af=0.5 variants are both eligible, so the result reduces to
+    /// the region clip alone: v0@12 and v2@14 (both inside `[10,20)`) are kept, v1@25 is
+    /// dropped.
+    #[test]
+    fn generate_variants_af_present_but_unbounded_is_region_clip_only() {
+        let slot = DecodedWindow {
+            v_starts: vec![12, 25, 14],
+            ilens: vec![0, 0, 0],
+            alt_alleles: vec![b'A', b'C', b'G'],
+            alt_offsets: vec![0, 1, 2, 3],
+            geno_v_idxs: vec![0, 1, 2],
+            geno_offsets: vec![0, 3],
+            global_v_idxs: vec![100, 101, 102],
+            afs: vec![0.05f32, 0.5, 0.5],
+        };
+        let backend = RecordBackend {
+            filler: Box::new(StubFiller),
+            contigs: vec![chr1()],
+            jobs: vec![RecordJob {
+                contig_idx: 0,
+                regions: vec![(10, 20)],
+                s_lo: 0,
+                s_hi: 1,
+            }],
+            n_samples: 1,
+            ploidy: 1,
+            pad_char: b'N',
+            parallel: false,
+            output_length: -1,
+            annotated: false,
+            variants: true,
+            min_af: None,
+            max_af: None,
+        };
+
+        let out = backend.generate_variants(0, &slot, 0, 1).unwrap();
+        assert_eq!(out.start.as_slice().unwrap(), &[12, 14]);
+        assert_eq!(out.row_offsets.as_slice().unwrap(), &[0, 2]);
     }
 }
