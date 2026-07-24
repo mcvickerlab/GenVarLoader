@@ -798,6 +798,111 @@ class Svar2Haps(Haps[_H]):
             typed.append(np.asarray(bufs[j], np.uint8).view(dt))
         return typed
 
+    def measure_variant_payload(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]:
+        """Per-instance variant count, ref-window span, and ALT-allele byte sum.
+
+        Runs the SAME per-instance decode (``decode_variants_from_svar2_readbound``)
+        that :meth:`_reconstruct_variants`/:meth:`_reconstruct_variant_windows` use, so
+        callers that only need cheap per-instance *measures* -- not the full
+        reconstructed output -- can share this single counting entry point instead of
+        re-deriving the ``p_eff``/fold logic (or, worse, reading
+        ``self.genotypes``/``self.variants``, which are permanently-empty SVAR1-shaped
+        placeholders for this reconstructor -- see issue #315). Used by
+        ``Dataset._output_bytes_per_instance`` for the ``"variants"``/``"variant-windows"``
+        estimate branches.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
+
+        Returns:
+            ``(n_vars_total, ref_span_sum, alt_bytes_sum)``, each shape ``(len(idx),)``
+            int64:
+
+            - ``n_vars_total``: total variant count per instance, folded across ploidy
+              per the ``unphased_union`` union-count contract (naive sum of
+              per-haplotype counts, no dedup) -- the same semantics
+              ``Dataset.n_variants()`` documents for the SVAR1 path.
+            - ``ref_span_sum``: sum of ``1 + max(-ilen, 0)`` (the ``ref="window"``
+              per-variant span) over the instance's variants.
+            - ``alt_bytes_sum``: sum of bare ALT-allele byte lengths over the
+              instance's variants.
+        """
+        regions = np.asarray(regions, np.int32)
+        P = int(self.genotypes.shape[-2])
+        b = len(idx)
+        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
+        contig_ids = regions[:, 0].astype(np.int64)
+        groups = self._contig_groups(contig_ids)
+
+        n_vars_total = np.zeros(b, np.int64)
+        ref_span_sum = np.zeros(b, np.int64)
+        alt_bytes_sum = np.zeros(b, np.int64)
+
+        for ci, qsel in groups:
+            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+            work_bytes = max(
+                len(qsel) * P * 64,
+                sum(
+                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
+                    for ranges in gi[2:]
+                )
+                * 16,
+            )
+            pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
+                decode_variants_from_svar2_readbound(
+                    self.store,
+                    self.ds_contigs[ci],
+                    gi[0],
+                    gi[1],
+                    gi[2],
+                    gi[3],
+                    gi[4],
+                    gi[5],
+                    P,
+                    [],  # no extra fields needed -- only counts/spans/bytes
+                    np.ascontiguousarray(regions[qsel, 2], np.uint32),
+                    self.filter == "exonic",
+                    should_parallelize(work_bytes),
+                )
+            )
+            ilen = np.asarray(ilen, np.int32)
+            str_off = np.asarray(str_off, np.int64)
+            var_off = np.asarray(var_off, np.int64)
+
+            # Fold ploidy per the SAME p_eff/union rule the reconstructors apply:
+            # var_off[::P] takes each query's FIRST haplotype-row start offset,
+            # which (haplotype rows are contiguous per query) equals the start of
+            # the whole P-haplotype block -- i.e. the un-deduped union count.
+            row_off = (
+                np.ascontiguousarray(var_off[::P]) if self.unphased_union else var_off
+            )
+            row_lens = np.diff(row_off)
+
+            span = (1 + np.maximum(-ilen, 0)).astype(np.int64)
+            span_csum = np.concatenate([[np.int64(0)], np.cumsum(span, dtype=np.int64)])
+            row_span = span_csum[row_off[1:]] - span_csum[row_off[:-1]]
+
+            bytelen = np.diff(str_off)
+            byte_csum = np.concatenate(
+                [[np.int64(0)], np.cumsum(bytelen, dtype=np.int64)]
+            )
+            row_bytes = byte_csum[row_off[1:]] - byte_csum[row_off[:-1]]
+
+            if self.unphased_union:
+                n_vars_total[qsel] = row_lens
+                ref_span_sum[qsel] = row_span
+                alt_bytes_sum[qsel] = row_bytes
+            else:
+                n_vars_total[qsel] = row_lens.reshape(len(qsel), P).sum(-1)
+                ref_span_sum[qsel] = row_span.reshape(len(qsel), P).sum(-1)
+                alt_bytes_sum[qsel] = row_bytes.reshape(len(qsel), P).sum(-1)
+
+        return n_vars_total, ref_span_sum, alt_bytes_sum
+
     def _reconstruct_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
     ) -> RaggedVariants:

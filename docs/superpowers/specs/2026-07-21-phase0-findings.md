@@ -4,6 +4,25 @@
 **Issue:** [#315](https://github.com/mcvickerlab/GenVarLoader/issues/315)
 **Gate for:** Task 5 (Layer 1 — restore the estimate's upper-bound for the pinned case)
 
+> **Correction (2026-07-23):** the "SVAR2 unreachable / every backend opens as `Haps`"
+> claim below (see "Why the design doc's hypothesized mechanism does not apply here") is
+> **wrong**. The real Hartwig corpus is SVAR2-format-2.0.0 and **does** reach `Svar2Haps`
+> on the released `Dataset.open` + `to_dataloader` path — that is exactly what this doc's
+> "not available in this environment" gap was hiding. Once the real corpus was symlinked
+> in, `type(view._seqs).__name__ == "Svar2Haps"` was confirmed directly. The real
+> divergence this doc couldn't pin turned out to be `Svar2Haps`-specific: its
+> `n_vars_total`/`ref_span`/`alt_alleles` terms all read the permanently-empty
+> SVAR1-shaped placeholders (`Svar2Haps.genotypes`/`.variants`) that exist only to satisfy
+> `isinstance(_, Haps)` checks, so the estimate under-counts to a flat 32 B/instance
+> regardless of real content. This is a genuinely separate root cause from anything on the
+> `Haps` path analyzed below (which remains correct as measured — `M == K == W` still
+> holds there). See
+> [2026-07-23-phase0-realcorpus-findings.md](./2026-07-23-phase0-realcorpus-findings.md)
+> for the full pin and
+> [2026-07-23-svar2-variant-windows-slot-fit-design.md](./2026-07-23-svar2-variant-windows-slot-fit-design.md)
+> for the fix design. The rest of this document (below) is preserved as originally
+> written for the historical record of the `Haps`-path analysis, which is still accurate.
+
 ## Summary (the pin)
 
 **The estimate `Dataset._output_bytes_per_instance` is a byte-exact per-instance
@@ -84,6 +103,12 @@ logic (`_svar2_haps.py`, `p_eff = 1 if unphased_union else P`), but it is **not 
 from the released `Dataset.open` + `to_dataloader` path (#315's scope): every backend —
 including a SparseVar source — opens as `Haps`, verified this session. SVAR2 is
 StreamingDataset-only (out of scope per the design doc and CLAUDE.md).
+
+> **This paragraph is superseded — see the 2026-07-23 correction note at the top of this
+> document.** A SVAR2-format-2.0.0 dataset (the real Hartwig corpus) *does* open as
+> `Svar2Haps` on this exact released path; "every backend opens as `Haps`" was true only
+> of the backends available to this session (VCF/PGEN/SVAR1), not SVAR2, which was
+> untested here for lack of a real corpus.
 
 ## Consequence for the plan
 
