@@ -1454,6 +1454,24 @@ class Dataset:
             # union semantics require either way.
             real_ploidy = haps_obj.genotypes.shape[-2]
 
+            # Svar2Haps: self.n_variants (-> self.genotypes.lengths) and
+            # _allele_bytes_sum (-> self.genotypes[...]/self.variants.alt) both
+            # read permanently-empty SVAR1-shaped placeholders for this
+            # reconstructor (see Svar2Haps.from_path) -- they are never
+            # populated because svar2 reconstructs read-bound straight from the
+            # on-disk store. Re-derive n_vars_total (and, below, the alt byte
+            # sum) from the SAME per-instance decode
+            # measure_variant_payload/_reconstruct_variants use, instead of
+            # those placeholders (issue #315).
+            from ._svar2_haps import Svar2Haps
+
+            svar2_alt_bytes: NDArray[np.int64] | None = None
+            if isinstance(haps_obj, Svar2Haps):
+                regions_arr = self._full_regions[r_idx]
+                n_vars_total, _svar2_ref_span_unused, svar2_alt_bytes = (
+                    haps_obj.measure_variant_payload(ds_idx, regions_arr)
+                )
+
             # "start" is unconditionally emitted by the flat/ragged variant
             # builders regardless of var_fields (see get_variants_flat's
             # "start: ALWAYS"), so charge it independent of var_fields
@@ -1471,9 +1489,17 @@ class Dataset:
                     dosage_dtype = haps_obj.dosages.data.dtype
                     total += n_vars_total * dosage_dtype.itemsize
                 elif f in ("alt", "ref"):
-                    # Allele scan: _allele_bytes_sum returns (len(ds_idx) * real_ploidy,).
-                    per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
-                    total += per_ploid.reshape(-1, real_ploidy).sum(-1)
+                    if svar2_alt_bytes is not None:
+                        # Svar2Haps: "ref" is never in available_var_fields (its
+                        # .variants.ref is always None), so this is always "alt".
+                        assert f == "alt", (
+                            "Svar2Haps does not support the bare 'ref' var_field"
+                        )
+                        total += svar2_alt_bytes
+                    else:
+                        # Allele scan: _allele_bytes_sum returns (len(ds_idx) * real_ploidy,).
+                        per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
+                        total += per_ploid.reshape(-1, real_ploidy).sum(-1)
                 else:
                     # INFO column: numeric, known dtype from on-disk schema.
                     # _info_field_dtype guards Svar2Haps, whose .variants is a
@@ -1583,16 +1609,34 @@ class Dataset:
             # what unphased_union's un-deduped union semantics require either
             # way (see the "variants" branch above for the same fix).
             real_ploidy = haps_obj.genotypes.shape[-2]
-            # alt bytes are always stored on disk (unlike ref); exact sum
-            # reused by both alt="window" (flank5 . alt . flank3) and
-            # alt="allele" (bare alt), same primitive the "variants" branch
-            # uses for alt/ref.
-            alt_alleles = (
-                haps_obj._allele_bytes_sum(ds_idx, "alt")
-                .reshape(-1, real_ploidy)
-                .sum(-1)
-            )
-            if opt.ref == "allele":
+
+            # Svar2Haps: self.n_variants/self.genotypes/self.variants are
+            # permanently-empty SVAR1-shaped placeholders for this
+            # reconstructor (see Svar2Haps.from_path) -- svar2 reconstructs
+            # read-bound straight from the on-disk store, never populating
+            # them. Re-derive n_vars_total/ref_span/alt_alleles from the SAME
+            # per-instance decode _reconstruct_variant_windows uses, instead of
+            # those placeholders (issue #315). ref="allele" is unreachable
+            # here for Svar2Haps -- with_seqs already rejects it (its
+            # .variants.ref is always None) -- so ref="window" (the ilen-span
+            # branch below) is the only case that needs covering.
+            from ._svar2_haps import Svar2Haps
+
+            if isinstance(haps_obj, Svar2Haps):
+                regions_arr = self._full_regions[r_idx]
+                n_vars_total, ref_span, alt_alleles = haps_obj.measure_variant_payload(
+                    ds_idx, regions_arr
+                )
+            elif opt.ref == "allele":
+                # alt bytes are always stored on disk (unlike ref); exact sum
+                # reused by both alt="window" (flank5 . alt . flank3) and
+                # alt="allele" (bare alt), same primitive the "variants" branch
+                # uses for alt/ref.
+                alt_alleles = (
+                    haps_obj._allele_bytes_sum(ds_idx, "alt")
+                    .reshape(-1, real_ploidy)
+                    .sum(-1)
+                )
                 # bare REF allele bytes. with_seqs('variant-windows', ...)
                 # already rejects ref="allele" when self.variants.ref is
                 # None, so _allele_bytes_sum is safe to call here.
@@ -1602,6 +1646,15 @@ class Dataset:
                     .sum(-1)
                 )
             else:
+                # alt bytes are always stored on disk (unlike ref); exact sum
+                # reused by both alt="window" (flank5 . alt . flank3) and
+                # alt="allele" (bare alt), same primitive the "variants" branch
+                # uses for alt/ref.
+                alt_alleles = (
+                    haps_obj._allele_bytes_sum(ds_idx, "alt")
+                    .reshape(-1, real_ploidy)
+                    .sum(-1)
+                )
                 # ref="window" reads [start-L, end+L) from the *reference
                 # genome*, not the stored REF allele -- which may not even be
                 # present (e.g. an ALT-only Haps, like get_dummy_dataset()).
