@@ -1467,6 +1467,13 @@ class Dataset:
 
             svar2_alt_bytes: NDArray[np.int64] | None = None
             if isinstance(haps_obj, Svar2Haps):
+                # NB: unlike the reference/track branches, we do NOT widen
+                # regions_arr by self.jitter here. The Svar2Haps read-bound
+                # decode guards jitter>0 (raises NotImplementedError, "right-
+                # clip"; see _svar2_haps.py and its jitter_guard tests), so this
+                # branch only ever runs at jitter=0 and the raw region is the
+                # exact decode window. If that guard is ever lifted (right-clip
+                # added), widen by self.jitter here to keep est an upper bound.
                 regions_arr = self._full_regions[r_idx]
                 n_vars_total, _svar2_ref_span_unused, svar2_alt_bytes = (
                     haps_obj.measure_variant_payload(ds_idx, regions_arr)
@@ -1623,6 +1630,13 @@ class Dataset:
             from ._svar2_haps import Svar2Haps
 
             if isinstance(haps_obj, Svar2Haps):
+                # NB: not widened by self.jitter (unlike the reference/track
+                # branches) -- the Svar2Haps read-bound decode guards jitter>0
+                # (raises NotImplementedError, "right-clip"; see _svar2_haps.py
+                # and its jitter_guard tests), so this branch only runs at
+                # jitter=0 and the raw region is the exact decode window. If that
+                # guard is lifted, widen by self.jitter here to keep est an
+                # upper bound.
                 regions_arr = self._full_regions[r_idx]
                 n_vars_total, ref_span, alt_alleles = haps_obj.measure_variant_payload(
                     ds_idx, regions_arr
