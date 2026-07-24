@@ -202,6 +202,17 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
     store uses its own tiny reference, see `_svar2_slot_src`). Written with
     ``max_jitter=0``: variant-windows/variants mode raises NotImplementedError
     on an SVAR2 dataset written with max_jitter>0 (no right-clip support).
+
+    The bed repeats the same 4-variant window 80x (still only 4 distinct
+    variants / 2 samples -- "tiny" in data terms): the "variants" (non-window)
+    output branch's real payload for this fixture's handful of variants is
+    small enough to sit under slot_overhead_bytes' 4096-byte floor at low
+    instance counts, masking the #315 defect there even though the same
+    zeroed-placeholder bug applies (see _impl.py:1437-1563). Per-instance
+    offset overhead in the (buggy) estimate grows slower than per-instance
+    real payload, so replicating windows (not variant complexity) is enough
+    to cross the floor and expose the sibling defect too -- confirmed
+    empirically before picking 80 (green up to ~40 regions, red by 60+).
     """
     import polars as pl
     from genoray import SparseVar2, _core
@@ -223,8 +234,13 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
     )
     assert (store / "meta.json").exists(), "svar2 conversion did not finish"
 
+    n_regions = 80
     bed = pl.DataFrame(
-        {"chrom": ["chr1", "chr1"], "chromStart": [0, 20], "chromEnd": [20, 40]}
+        {
+            "chrom": ["chr1"] * n_regions,
+            "chromStart": [0] * n_regions,
+            "chromEnd": [40] * n_regions,
+        }
     )
     out = tmp_path_factory.mktemp("svar2_slot_gvl") / "ds.gvl"
     gvl.write(

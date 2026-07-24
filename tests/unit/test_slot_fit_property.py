@@ -84,9 +84,15 @@ def test_slot_fit_svar2_backend(phased_svar2_gvl, svar2_slot_reference):
     # SCOPE ADD-ON: the sibling "variants" (non-window) output branch reads
     # the same permanently-empty Svar2Haps.genotypes/.variants placeholders
     # (n_vars_total via self.n_variants(), alt bytes via _allele_bytes_sum),
-    # so it is presumed similarly under-counting (see "What Task 3 must
-    # change" in the Phase-0 findings doc). Locks the sibling defect so
-    # Task 3's shared fix must cover it too.
+    # so it under-counts identically (see "What Task 3 must change" in the
+    # Phase-0 findings doc). This is also RED before the fix -- confirmed by
+    # running it in isolation -- because `phased_svar2_gvl` replicates the
+    # variant window 80x (see its docstring): "variants" mode's real payload
+    # for a handful of variants sits under slot_overhead_bytes' 4096-byte
+    # floor at low instance counts, masking the defect there even though it
+    # applies; enough instances make the (buggy, ~flat) estimate fall behind
+    # the (correctly variant-count-scaling) real payload. Locks the sibling
+    # defect so Task 3's shared fix must cover it too.
     for uu in (True, False):
         variants_view = (
             ds.with_tracks(False)
