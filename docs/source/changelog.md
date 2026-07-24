@@ -76,6 +76,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.40.2 (2026-07-24)
+
+### Fix
+
+- **dataloader**: #315 estimate upper-bounds Svar2Haps variant-windows payload
+
 ## v0.40.1 (2026-07-23)
 
 ### Fix
