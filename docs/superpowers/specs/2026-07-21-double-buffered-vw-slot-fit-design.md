@@ -1,9 +1,10 @@
 # double_buffered variant-windows slot-fit (#315)
 
 **Date:** 2026-07-21
-**Status:** Partially implemented — Layers 2a/2b/2c + Phase 0 done; **Layer 1 (estimate
-fix) deferred**, blocked on the real-corpus pin. See
-[Phase 0 findings](./2026-07-21-phase0-findings.md).
+**Status:** ✅ Fully implemented — Layers 2a/2b/2c + Phase 0 done; **Layer 1 (estimate
+fix) done (2026-07-23)**, resolved via the real-corpus pin. See
+[Phase 0 findings](./2026-07-21-phase0-findings.md) and
+[2026-07-23-phase0-realcorpus-findings.md](./2026-07-23-phase0-realcorpus-findings.md).
 **Issue:** [#315](https://github.com/mcvickerlab/GenVarLoader/issues/315)
 **Branch/target:** `fix/315-double-buffered-vw-slot` → `main` (this is the *released*
 `gvl.Dataset.to_dataloader` double-buffer path, **not** StreamingDataset work — see the
@@ -255,7 +256,7 @@ for prose docs).
 | **2c** — schema-derived slot overhead (drop magic 4096) | ✅ done | `slot_overhead_bytes(dataset)` in `_slot_overhead.py`, wired into `_double_buffered_loader.py`; floored at 4096. |
 | **2a** — producer write-time guard | ✅ done | `SlotOverflowError(ValueError)` in `_shm_layout.py`; `write_chunk` translates the cryptic numpy overflow into an actionable "lower batch_size / raise buffer_bytes" error. |
 | **2b** — upper-bound property test | ✅ done | `tests/unit/test_slot_fit_property.py`; asserts `est + slot_overhead ≥ real` across ref/alt × unphased_union × flank × {dummy,VCF,PGEN,SVAR} (44 views, all pass). |
-| **1** — estimate upper-bound fix for the pinned case | ⏸ **deferred / blocked** | No reproducible divergence to fix; the design doc's hypothesized `to_packed()` mismatch is structurally impossible on the `Haps` path (Phase 0). Needs the **real Hartwig corpus** to pin, or a scope decision to adopt the **grow-or-split** escalation. Layer 1 must not proceed on a guess. |
+| **1** — estimate upper-bound fix for the pinned case | ✅ **done (2026-07-23)** | Real-corpus pin (not synthetic): the Hartwig corpus is SVAR2-format and reconstructs via `Svar2Haps`, not `Haps` — the estimate's `n_vars_total`/`ref_span`/`alt_alleles` terms all read `Svar2Haps`'s permanently-empty SVAR1-shaped placeholders (`.genotypes`/`.variants`), collapsing to a flat 32 B/instance regardless of real content. Fixed via a shared `Svar2Haps.measure_variant_payload` entry point that re-sources all three terms from the same read-bound decode/fold the reconstructor itself uses, so estimator and reconstructor cannot drift apart again. Confirmed on the real corpus: `to_dataloader(mode="double_buffered")` over the exact reported 40×7089 config now yields batches with no `SlotOverflowError`. See [2026-07-23-svar2-variant-windows-slot-fit-design.md](./2026-07-23-svar2-variant-windows-slot-fit-design.md) and [2026-07-23-phase0-realcorpus-findings.md](./2026-07-23-phase0-realcorpus-findings.md). |
 | **3** — `realign_tracks` propagation (Bug A) | ⬜ separate issue + PR | Out of scope for this PR. |
 
 **Net effect shipped so far:** the reported Hartwig config no longer fails with a cryptic
