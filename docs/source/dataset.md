@@ -168,5 +168,18 @@ win = ds.with_seqs("variant-windows", gvl.VarWindowOpt(...)).with_output_format(
 win.fields["AF"]  # same field, alongside win.fields["start"]/["ilen"]
 ```
 
+Allele fields index per variant, aligned with the scalar fields on the same shared offsets:
+
+```python
+rv = ds.with_seqs("variants")[0, 0]
+
+for pos, alt in zip(rv.start[0][0], rv.alt[0][0]):
+    print(pos, alt)  # 10 b'A'  /  20 b'GG'
+```
+
+This requires **seqpro >= 0.22**. On earlier versions `rv.alt[0][0]` returned the
+haplotype's alleles concatenated into one `bytes`, which misaligns against
+`rv.start` as soon as a window contains an indel.
+
 See the `genvarloader` skill's `.svar2` `var_fields` section for the field-provenance and
 dummy-fill details.
