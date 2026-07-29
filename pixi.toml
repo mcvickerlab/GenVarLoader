@@ -101,7 +101,7 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.21.1"
+seqpro = "==0.22.0"
 # genoray >=3.0.0 (first release with the INFO/FORMAT field-read API) as the prebuilt
 # abi3 wheel from PyPI — one cp310-abi3 wheel covers py310-313 on both platforms.
 genoray = ">=3.0.0,<4"
