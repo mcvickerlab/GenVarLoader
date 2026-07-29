@@ -11616,7 +11616,7 @@ packages:
   name: genvarloader
   requires_dist:
   - seqpro>=0.22
-  - genoray>=3.0.0,<4
+  - genoray>=3.3.1,<4
   - numpy
   - loguru
   - natsort

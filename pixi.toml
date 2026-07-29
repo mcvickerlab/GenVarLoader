@@ -102,9 +102,11 @@ numba = "==0.59.1"
 pyarrow = ">=21"
 hirola = "==0.3"
 seqpro = "==0.22.0"
-# genoray >=3.0.0 (first release with the INFO/FORMAT field-read API) as the prebuilt
-# abi3 wheel from PyPI — one cp310-abi3 wheel covers py310-313 on both platforms.
-genoray = ">=3.0.0,<4"
+# genoray >=3.3.1 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
+# py310-313 on both platforms. 3.0.0 was the first release with the INFO/FORMAT field-read
+# API; 3.3.1 is the first whose seqpro cap (<0.23) admits seqpro>=0.22. Mirrors the
+# pyproject floor.
+genoray = ">=3.3.1,<4"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
