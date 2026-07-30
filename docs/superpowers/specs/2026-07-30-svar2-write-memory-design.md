@@ -107,7 +107,8 @@ pub fn find_ranges_haps(
     hap_lo: usize, hap_hi: usize,   // half-open, into the selected hap axis
     out_snp: &mut [i64],            // (hap_hi - hap_lo, R, 2), hap-major
     out_indel: &mut [i64],
-    out_max_ends: &mut [u32],       // (R,), partial max over this hap slice
+    // returns Vec<u64>: (R,) partial max of the packed (pos << 21) | ext
+    // composite key over this hap slice. 0 = no variant.
 )
 ```
 
@@ -124,10 +125,12 @@ input, with the store read once instead of `R` times.
 `find_ranges_haps` produces **hap-major** `(H, R, 2)` — what the column-outer
 loop naturally produces and what `par_chunks_mut` can write safely.
 
-The existing `find_ranges` binding keeps its region-major `(R*H, 2)` contract.
-`bundle_to_dict` already copies once when flattening, so emitting region-major
-from a hap-major source is a change of index expression, not an extra copy.
-`_gather_ranges` and the read path (`_svar2_haps.py`) are untouched.
+The existing `find_ranges` binding keeps its region-major `(R*H, 2)` contract by
+transposing the hap-major fill back into its `Vec<Range<usize>>`. That is one
+extra copy of the payload, paid only on the un-chunked path: `find_ranges` is the
+small-batch read-path entry point, while the population-scale writer uses the
+chunked API and never builds a bundle at all. `_gather_ranges` and the read path
+(`_svar2_haps.py`) are untouched.
 
 `find_ranges` becomes a thin wrapper over `find_ranges_haps` covering all haps.
 
@@ -143,7 +146,7 @@ class RangesChunk:
     n_samples: int
     vk_snp_range: NDArray[np.int64]      # (n_samples, ploidy, R, 2), hap-major
     vk_indel_range: NDArray[np.int64]
-    max_ends: NDArray[np.int32]          # (R,), partial max over this chunk
+    max_end_keys: NDArray[np.int64]      # (R,), packed key; 0 = no variant
 
 
 @dataclass(frozen=True)
@@ -157,7 +160,7 @@ class RangesStream:
     dense_snp_range: NDArray[np.int32]   # (R, 2)
     dense_indel_range: NDArray[np.int32] # (R, 2)
     sample_cols: NDArray[np.int64]       # (S,)
-    dense_max_ends: NDArray[np.int32]    # (R,), dense-channel contribution
+    dense_max_end_keys: NDArray[np.int64] # (R,), dense-channel contribution
     chunks: Iterator[RangesChunk]
 
 
@@ -228,8 +231,15 @@ carried by any selected hap:
   degrades to `dense_in_region x H_selected` bit probes for that region. Bounded
   and documented, not guarded against.
 
-The dense contribution is eager (`RangesStream.dense_max_ends`); the consumer
-reduces `np.maximum` over it and each chunk's `max_ends`.
+The dense contribution is eager (`RangesStream.dense_max_end_keys`); the
+consumer reduces `np.maximum` over it and each chunk's `max_end_keys`, then
+unpacks once.
+
+**The reduction unit is the packed key, not an unpacked end.** The SVAR1 rule
+orders by position first and end second, so reducing unpacked ends across hap
+chunks would let a lower-position variant with a longer deletion win. Packing
+`ext` (bounded) rather than the absolute end is what makes an integer `max` over
+the key reproduce that ordering.
 
 This replaces gvl's `_svar2_region_max_ends`.
 
@@ -272,16 +282,20 @@ refusal would block valid large builds.
 stream = svar2._find_ranges_chunked(c, starts, ends, samples=samples, max_mem=max_mem)
 dense_snp[lo:hi] = stream.dense_snp_range
 dense_indel[lo:hi] = stream.dense_indel_range
-me = stream.dense_max_ends.copy()
+keys = stream.dense_max_end_keys.copy()
 for ch in stream.chunks:
     s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
     vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
     vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
-    np.maximum(me, ch.max_ends, out=me)
+    np.maximum(keys, ch.max_end_keys, out=keys)
     vk_snp.flush()
     vk_indel.flush()
     pbar.update(rc * ch.n_samples / S)
-max_ends[lo:hi] = me
+mask = (1 << 21) - 1
+region_ends = np.asarray(ends, np.int64).copy()
+has = keys > 0                       # 0 = no variant; keep the original chromEnd
+region_ends[has] = (keys[has] >> 21) + (keys[has] & mask)
+max_ends[lo:hi] = region_ends.astype(np.int32)
 ```
 
 `transpose(2, 0, 1, 3)` turns `(n_samples, ploidy, R, 2)` into
