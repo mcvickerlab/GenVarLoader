@@ -108,3 +108,51 @@ gvl.write(
 Both formats store a back-reference in the dataset's `metadata.json` instead of duplicating per-variant arrays, so the source store must remain accessible when the dataset is later opened with [`gvl.Dataset.open()`](api.md#genvarloader.Dataset.open) (override its location with `svar=`/`svar2=` if it has moved).
 
 `.svar2` additionally produces a small write-time cache under `<path>/genotypes/svar2_ranges/` and reads back through an all-Rust, read-bound path with no interval-search-tree build and no dense-union rebuild per read — see [the FAQ](faq.md) for the read-path and on-disk-size tradeoffs, and [the format reference](format.md) for the on-disk layout. `.svar2` currently has a Phase-1 scope: a handful of output combinations (`annotated` haplotypes, `min_af`/`max_af`, spliced variant-window/track outputs, etc.) aren't wired yet and raise `NotImplementedError` — see the `genvarloader` skill or `format.md` for the full list. Haplotype and `variants` output support splicing and `var_filter="exonic"`.
+
+## Reusing a variant index across cohorts
+
+If several cohorts are sample subsets of one parent PGEN, do **not** pre-split the
+PGEN with `plink2 --keep`. Point `gvl.write` at the parent and pass `samples=`:
+
+```python
+gvl.write("cohort_A.gvl", bed, "parent.pgen", samples=cohort_A_samples)
+gvl.write("cohort_B.gvl", bed, "parent.pgen", samples=cohort_B_samples)
+```
+
+genoray caches the parent PGEN's variant index on disk (`.pvar.gvi`, keyed by the `.pvar`'s
+mtime); `samples=` only subsets at the genotype-extraction level and never touches that index, so
+a second `gvl.write` against the same parent path reuses the cached index instead of rescanning
+the PVAR — and gvl hardlinks that cached index file into each dataset's
+`genotypes/variants.arrow`. Splitting the PGEN first (`plink2 --keep`) produces a distinct `.pvar`
+per cohort, which forces the expensive per-cohort index rebuild.
+
+## Merging datasets
+
+[`gvl.concat()`](api.md#genvarloader.concat) merges datasets that were written from **one shared
+variant source** (the same PGEN/VCF variant table, or the same `.svar`/`.svar2` store — merging
+datasets built from different variant sources raises), along either axis:
+
+```python
+gvl.concat("merged.gvl", ["chr1.gvl", "chr2.gvl"], axis="regions")
+gvl.concat("merged.gvl", ["cohortA.gvl", "cohortB.gvl"], axis="samples")
+```
+
+`axis="regions"` requires identical samples in identical order across every input, and
+concatenates their regions. `axis="samples"` requires identical regions across every input and
+disjoint sample sets, and merges the samples into sorted order. Both axes merge tracks and
+annotation tracks alongside the genotypes, and require at least two input datasets.
+
+`gvl.concat` streams data at the byte level rather than re-deriving anything from the source
+variants, so its cost is dominated by I/O rather than computation. As an order-of-magnitude
+expectation (not a measured figure — this hasn't been benchmarked), it moves roughly the full
+size of the merged dataset at sequential-IO speed, so a merge of a very large dataset (e.g. on the
+order of a terabyte) could plausibly take hours rather than minutes. It's worth doing against the
+alternative of re-extracting genotypes from scratch, not as a routine step.
+
+For contig-sharded `.svar2` workflows there is a cheaper path at the variant-store layer:
+`genoray.SparseVar2.concat(output, sources, mode="copy")` merges disjoint-contig `.svar2` stores
+that share identical samples/ploidy/fields, then a single `gvl.write` call over the merged store
+only needs to populate `.svar2`'s small per-`(region, sample, ploid)` cache ranges rather than
+touch the bulk variant data. This is a different operation from `gvl.concat`, which merges already
+*written* `.gvl` dataset directories — `SparseVar2.concat` merges the upstream `.svar2` stores
+before `gvl.write` ever runs.
