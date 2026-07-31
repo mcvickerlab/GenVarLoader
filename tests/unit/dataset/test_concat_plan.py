@@ -91,3 +91,80 @@ def test_coalesce_runs_are_monotonic_within_each_source():
 def test_provenance_rejects_unknown_axis():
     with pytest.raises(ValueError, match="axis must be"):
         provenance("chromosomes", [(1, 1)], ploidy=1)
+
+
+# --- `order` generalizes provenance to interleaved (non-block) merges --------
+#
+# On-disk GVL stores are sorted along both axes (samples.sort() in write(),
+# _prep_bed sorts regions), so the true merged slot order is the sorted order,
+# not necessarily dataset-0's-block-then-dataset-1's-block. Block-concatenation
+# (the `order=None` default) only happens to coincide with the sorted order when
+# the inputs' key ranges don't interleave. These tests use an `order` where they
+# DO interleave, and assert the mapping block-concatenation could not produce.
+
+
+def test_provenance_regions_with_interleaved_order():
+    # ds0 has 2 regions, ds1 has 1; but the TRUE sorted merged order is
+    # ds1's region, then ds0's two regions (e.g. ds1's region sorts first).
+    shape_per_ds = [(2, 2), (1, 2)]
+    order = np.array([[1, 0], [0, 0], [0, 1]])
+    prov = provenance("regions", shape_per_ds, ploidy=1, order=order)
+    assert prov.tolist() == [
+        [1, 0],
+        [1, 1],  # merged region 0 <- ds1's region 0
+        [0, 0],
+        [0, 1],  # merged region 1 <- ds0's region 0
+        [0, 2],
+        [0, 3],  # merged region 2 <- ds0's region 1
+    ]
+    # Block concatenation (order=None) cannot produce this: it always puts all
+    # of ds0 first.
+    block = provenance("regions", shape_per_ds, ploidy=1)
+    assert prov.tolist() != block.tolist()
+
+
+def test_provenance_samples_with_interleaved_order():
+    # ds0 has 2 samples (w=0,1), ds1 has 1 (w=0); the TRUE sorted sample order
+    # interleaves: ds0's sample 0, then ds1's sample, then ds0's sample 1.
+    shape_per_ds = [(2, 2), (2, 1)]
+    order = np.array([[0, 0], [1, 0], [0, 1]])
+    prov = provenance("samples", shape_per_ds, ploidy=1, order=order)
+    assert prov.tolist() == [
+        [0, 0],
+        [1, 0],
+        [0, 1],  # region 0
+        [0, 2],
+        [1, 1],
+        [0, 3],  # region 1
+    ]
+    block = provenance("samples", shape_per_ds, ploidy=1)
+    assert prov.tolist() != block.tolist()
+
+
+def test_provenance_regions_interleaved_order_coalesces_and_covers_all_slots():
+    shape_per_ds = [(3, 2), (2, 2)]
+    # ds1's regions interleave between ds0's: ds0 r0, ds1 r0, ds0 r1, ds1 r1, ds0 r2
+    order = np.array([[0, 0], [1, 0], [0, 1], [1, 1], [0, 2]])
+    prov = provenance("regions", shape_per_ds, ploidy=2, order=order)
+    runs = coalesce(prov)
+    # Every merged region is independent (S*P contiguous both sides), so
+    # interleaving must still yield exactly one run per merged region.
+    assert len(runs) == len(order)
+    covered = np.zeros(len(prov), dtype=np.int32)
+    for r in runs:
+        n = r.src_stop - r.src_start
+        covered[r.dst_start : r.dst_start + n] += 1
+    assert (covered == 1).all()
+
+
+def test_provenance_samples_interleaved_order_covers_all_slots():
+    shape_per_ds = [(2, 3), (2, 2)]
+    # merged sample order interleaves ds0 and ds1's samples.
+    order = np.array([[0, 0], [1, 0], [0, 1], [1, 1], [0, 2]])
+    prov = provenance("samples", shape_per_ds, ploidy=2, order=order)
+    runs = coalesce(prov)
+    covered = np.zeros(len(prov), dtype=np.int32)
+    for r in runs:
+        n = r.src_stop - r.src_start
+        covered[r.dst_start : r.dst_start + n] += 1
+    assert (covered == 1).all()

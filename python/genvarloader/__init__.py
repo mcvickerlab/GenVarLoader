@@ -11,6 +11,7 @@ from seqpro.rag import Ragged
 
 from . import data_registry
 from ._bigwig import BigWigs
+from ._dataset._concat import concat
 from ._dataset._flat_variants import DummyVariant, VarWindowOpt
 from ._dataset._flat_variants import _FlatAlleles as FlatAlleles
 from ._dataset._flat_variants import _FlatVariants as FlatVariants
@@ -69,6 +70,7 @@ __all__ = [
     "SitesSchema",
     "Table",
     "VarWindowOpt",
+    "concat",
     "data_registry",
     "get_dummy_dataset",
     "get_splice_bed",

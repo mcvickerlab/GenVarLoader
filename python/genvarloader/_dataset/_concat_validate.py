@@ -231,6 +231,11 @@ def validate_concat(inputs: list[ConcatInput], axis: str) -> None:
             if names is None:
                 continue
             for nm in names:
+                if nm is None:
+                    # A BED "name" field of "." (no name) reads back as null.
+                    # Absent names are not identity: only collisions between two
+                    # actual names are ambiguous after merging.
+                    continue
                 if nm in names_seen:
                     raise ValueError(
                         f"duplicate region name {nm!r} in inputs #{names_seen[nm]} "

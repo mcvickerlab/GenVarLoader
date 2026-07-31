@@ -36,6 +36,7 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
+from .._fasta_cache import Fingerprint
 from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
@@ -96,6 +97,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
     format_version: SemanticVersion | None = None
     svar_link: SvarLink | None = None
     svar2_link: Svar2Link | None = None
+    variants_fingerprint: "Fingerprint | None" = None
 
     @property
     def n_samples(self) -> int:
