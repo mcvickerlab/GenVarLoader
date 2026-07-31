@@ -281,3 +281,275 @@ def test_concat_samples_interleaved_genotypes_self_consistent(
     out = tmp_path / "merged.gvl"
     gvl.concat(out, interleaved_sample_shards, axis="samples")
     _assert_sample_axis_self_consistent(interleaved_sample_shards, out)
+
+
+# --- Task 6: svar backend, tracks, annot tracks -----------------------------
+
+
+@pytest.fixture(scope="session")
+def svar_region_shards(tmp_path_factory, concat_case) -> tuple[list[Path], Path]:
+    assert concat_case.svar_path is not None, (
+        "concat_case has no svar_path; svar concat coverage is blocked -- see "
+        "task-6-report.md"
+    )
+    d = tmp_path_factory.mktemp("concat_svar")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    half = bed.height // 2
+    shards = []
+    for i, part in enumerate([bed[:half], bed[half:]]):
+        p = d / f"shard{i}.gvl"
+        gvl.write(p, part, concat_case.svar_path, samples=concat_case.samples)
+        shards.append(p)
+    whole = d / "whole.gvl"
+    gvl.write(whole, bed, concat_case.svar_path, samples=concat_case.samples)
+    return shards, whole
+
+
+def test_concat_svar_regions_matches_single_shot(tmp_path, svar_region_shards):
+    import numpy as np
+
+    shards, whole = svar_region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    got = np.fromfile(out / "genotypes" / "offsets.npy", dtype=np.int64)
+    exp = np.fromfile(whole / "genotypes" / "offsets.npy", dtype=np.int64)
+    assert (got == exp).all()
+
+
+def test_concat_svar_preserves_link(tmp_path, svar_region_shards):
+    import json
+
+    shards, whole = svar_region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    got = json.loads((out / "metadata.json").read_text())
+    exp = json.loads((whole / "metadata.json").read_text())
+    assert got["svar_link"]["fingerprint"] == exp["svar_link"]["fingerprint"]
+
+
+def test_concat_regions_reads_equal_to_single_shot(tmp_path, region_shards, reference):
+    """The real acceptance check: every merged cell reads identically."""
+    import numpy as np
+
+    shards, whole = region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    a = gvl.Dataset.open(out, reference).with_seqs("haplotypes")
+    b = gvl.Dataset.open(whole, reference).with_seqs("haplotypes")
+    assert a.shape == b.shape
+    for r in range(a.shape[0]):
+        for s in range(a.shape[1]):
+            ha, hb = a[r, s], b[r, s]
+            assert np.array_equal(ha.to_padded(b"N"), hb.to_padded(b"N")), (r, s)
+
+
+def test_concat_samples_reads_equal_to_single_shot(tmp_path, sample_shards, reference):
+    """Sample axis asserts read equality, NOT byte identity.
+
+    extend_to_length sizes each region's window to the max over the cohort present
+    at write time, so a shard's stored variant set can legitimately differ from the
+    full write's. Byte identity is not expected here. Per the task brief: if this
+    fails, DO NOT weaken the assertion -- a read-level divergence here is a real
+    finding, not test flakiness.
+    """
+    import numpy as np
+
+    shards, whole = sample_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="samples")
+
+    a = gvl.Dataset.open(out, reference).with_seqs("haplotypes")
+    b = gvl.Dataset.open(whole, reference).with_seqs("haplotypes")
+    assert a.shape == b.shape
+    for r in range(a.shape[0]):
+        for s in range(a.shape[1]):
+            ha, hb = a[r, s], b[r, s]
+            assert np.array_equal(ha.to_padded(b"N"), hb.to_padded(b"N")), (r, s)
+
+
+# --- Task 6 Correction 1: interleaved-sample coverage for tracks and svar --
+#
+# `interleaved_sample_shards` (above) only covers the pgen/vcf genotypes path.
+# Correction 1's bug (omitting `order=` reintroduces block-concatenation) is
+# specific to each store that has its own gather call, so the per-sample track
+# gather and the svar offsets gather each need their own interleaved-sample
+# case -- a block-layout shard (`sample_shards`) cannot distinguish "order
+# handled correctly" from "order silently dropped".
+
+
+@pytest.fixture(scope="session")
+def interleaved_sample_track_shards(tmp_path_factory, concat_case) -> list[Path]:
+    """Track-bearing analogue of `interleaved_sample_shards`.
+
+    Same interleaving as `interleaved_sample_shards` (shard 0 = s0+s2, shard 1
+    = s1, so the merged sorted order is shard0, shard1, shard0), but with a
+    per-sample BigWig track attached so the track gather's `order` handling
+    (not just the genotypes gather's) is exercised.
+    """
+    import pyBigWig
+
+    d = tmp_path_factory.mktemp("concat_sample_track_interleaved")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    samples = sorted(concat_case.samples)
+    assert samples == ["s0", "s1", "s2"], (
+        f"fixture assumes samples s0/s1/s2 to interleave; got {samples}"
+    )
+    groups = [["s0", "s2"], ["s1"]]
+
+    contig_sizes = [("chr1", 1_300_000), ("chr2", 1_300_000)]
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(concat_case.samples):
+        bw_path = d / f"{sample}.bw"
+        with pyBigWig.open(str(bw_path), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            # cover the whole contig so every region overlaps regardless of
+            # its exact coordinates; value differs per sample so a slot mixup
+            # (wrong `order`) would read another sample's value.
+            value = float(i + 1)
+            bw.addEntries(
+                ["chr1", "chr2"],
+                [0, 0],
+                ends=[1_300_000, 1_300_000],
+                values=[value, value],
+            )
+        bw_paths[sample] = str(bw_path)
+
+    shards = []
+    for i, grp in enumerate(groups):
+        p = d / f"shard{i}.gvl"
+        track = gvl.BigWigs("sig", {s: bw_paths[s] for s in grp})
+        gvl.write(p, bed, concat_case.pgen_path, tracks=track, samples=grp)
+        shards.append(p)
+    return shards
+
+
+def _read_track(p: Path, name: str):
+    import numpy as np
+
+    d = p / "intervals" / name
+    return (
+        np.fromfile(d / "offsets.npy", dtype=np.int64),
+        np.fromfile(d / "starts.npy", dtype=np.int32),
+        np.fromfile(d / "ends.npy", dtype=np.int32),
+        np.fromfile(d / "values.npy", dtype=np.float32),
+    )
+
+
+def test_concat_samples_track_interleaved_self_consistent(
+    tmp_path, interleaved_sample_track_shards
+):
+    """Per-sample track gather must respect the interleaved merged sample
+    order, not a block layout. For every (region, shard-local-sample) slot, the
+    merged track's slice at the corresponding merged-sample slot must equal
+    the shard's own slice."""
+    import numpy as np
+
+    shards = interleaved_sample_track_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="samples")
+
+    merged_offsets, merged_starts, merged_ends, merged_values = _read_track(out, "sig")
+    merged_samples, n_regions, _ploidy = _sample_meta(out)
+    s_merged = len(merged_samples)
+
+    for shard in shards:
+        shard_offsets, shard_starts, shard_ends, shard_values = _read_track(
+            shard, "sig"
+        )
+        shard_samples, shard_n_regions, _ = _sample_meta(shard)
+        assert shard_n_regions == n_regions
+        s_shard = len(shard_samples)
+
+        for w, sample in enumerate(shard_samples):
+            j = merged_samples.index(sample)
+            for r in range(n_regions):
+                shard_slot = r * s_shard + w
+                merged_slot = r * s_merged + j
+
+                shard_sl = slice(
+                    shard_offsets[shard_slot], shard_offsets[shard_slot + 1]
+                )
+                merged_sl = slice(
+                    merged_offsets[merged_slot], merged_offsets[merged_slot + 1]
+                )
+                assert np.array_equal(
+                    shard_starts[shard_sl], merged_starts[merged_sl]
+                ), (sample, r, "starts")
+                assert np.array_equal(shard_ends[shard_sl], merged_ends[merged_sl]), (
+                    sample,
+                    r,
+                    "ends",
+                )
+                assert np.array_equal(
+                    shard_values[shard_sl], merged_values[merged_sl]
+                ), (sample, r, "values")
+
+
+@pytest.fixture(scope="session")
+def interleaved_sample_svar_shards(tmp_path_factory, concat_case) -> list[Path]:
+    """svar-backend analogue of `interleaved_sample_shards`: same s0+s2 /
+    s1 interleaving, but built from `concat_case.svar_path` so the svar
+    offsets gather's `order` handling is exercised (distinct code path from
+    the pgen/vcf genotypes gather and the track gather)."""
+    assert concat_case.svar_path is not None, (
+        "concat_case has no svar_path; svar concat coverage is blocked -- see "
+        "task-6-report.md"
+    )
+    d = tmp_path_factory.mktemp("concat_sample_svar_interleaved")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    samples = sorted(concat_case.samples)
+    assert samples == ["s0", "s1", "s2"], (
+        f"fixture assumes samples s0/s1/s2 to interleave; got {samples}"
+    )
+    groups = [["s0", "s2"], ["s1"]]
+
+    shards = []
+    for i, grp in enumerate(groups):
+        p = d / f"shard{i}.gvl"
+        gvl.write(p, bed, concat_case.svar_path, samples=grp)
+        shards.append(p)
+    return shards
+
+
+def test_concat_samples_svar_interleaved_self_consistent(
+    tmp_path, interleaved_sample_svar_shards
+):
+    """svar's `offsets.npy` holds absolute indices into the shared external
+    store, so a correctly-ordered merge is byte-identical per slot (not just
+    read-equivalent): for every (region, shard-local-sample, ploid) slot, the
+    merged (2, R, S, P) offsets at the corresponding merged-sample slot must
+    equal the shard's own slot exactly."""
+    import json
+
+    import numpy as np
+
+    shards = interleaved_sample_svar_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="samples")
+
+    merged_meta = json.loads((out / "genotypes" / "svar_meta.json").read_text())
+    _two, R, s_merged, P = merged_meta["shape"]
+    merged_offsets = np.fromfile(
+        out / "genotypes" / "offsets.npy", dtype=np.int64
+    ).reshape(2, R, s_merged, P)
+    merged_samples, n_regions, _ = _sample_meta(out)
+    assert n_regions == R
+
+    for shard in shards:
+        shard_meta = json.loads((shard / "genotypes" / "svar_meta.json").read_text())
+        _two, shard_r, s_shard, shard_p = shard_meta["shape"]
+        assert shard_r == R
+        assert shard_p == P
+        shard_offsets = np.fromfile(
+            shard / "genotypes" / "offsets.npy", dtype=np.int64
+        ).reshape(2, R, s_shard, P)
+        shard_samples, _, _ = _sample_meta(shard)
+
+        for w, sample in enumerate(shard_samples):
+            j = merged_samples.index(sample)
+            assert np.array_equal(
+                shard_offsets[:, :, w, :], merged_offsets[:, :, j, :]
+            ), f"sample {sample!r}: shard {shard} != merged"
