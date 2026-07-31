@@ -172,7 +172,7 @@ See the `genvarloader` skill's `.svar2` section for the full narrative and `var_
 | `0.18.0` | Variant coordinates switched to 1-based. |
 | `0.25.0` | `metadata.json` gains `svar_link`; old `genotypes/link.svar` symlink layout deprecated. `Metadata.version` typed as `SemanticVersion` (on-disk JSON unchanged). |
 | `0.37.0` | `metadata.json` gains `svar2_link`; `.svar2` accepted as a `gvl.write` variant source, cached under `genotypes/svar2_ranges/` and read via a read-bound, all-Rust path. |
-| `0.41.0` | `metadata.json` gains `variants_fingerprint`, set when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from an input dataset; `Dataset.open` verifies it and raises on mismatch. |
+| `0.41.0 (unreleased)` | `metadata.json` gains `variants_fingerprint`, set when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from an input dataset; `Dataset.open` verifies it and raises on mismatch. |
 
 > **Upgrading legacy datasets.** A dataset written before `0.25.0` that was built from an
 > `.svar` will still open (with a `DeprecationWarning`). Run

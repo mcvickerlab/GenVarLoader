@@ -158,6 +158,24 @@ def validate_concat(inputs: list[ConcatInput], axis: str) -> None:
     if len(inputs) < 2:
         raise ValueError(f"concat needs at least two datasets, got {len(inputs)}")
 
+    for i, inp in enumerate(inputs):
+        coord_cols = ["chrom", "chromStart", "chromEnd"]
+        dupes = (
+            inp.bed.select(coord_cols)
+            .filter(pl.struct(coord_cols).is_duplicated())
+            .unique()
+        )
+        if dupes.height > 0:
+            chrom, start, end = dupes.row(0)
+            raise ValueError(
+                f"input #{i} has duplicate regions at {chrom}:{start}-{end} "
+                "(identical chrom/chromStart/chromEnd within a single input's "
+                "bed); this makes the merged sort order ambiguous for that "
+                "input's rows, which can silently swap which stored region a "
+                "read returns. Deduplicate the input before concatenating. "
+                "(Identical coordinates across different inputs are fine.)"
+            )
+
     ref = inputs[0]
     for i, inp in enumerate(inputs[1:], start=1):
         if inp.backend != ref.backend:
@@ -224,6 +242,16 @@ def validate_concat(inputs: list[ConcatInput], axis: str) -> None:
                 raise ValueError(
                     f"axis='regions' requires identical samples in identical order; "
                     f"input #{i} differs from input #0"
+                )
+        ref_cols = set(ref.bed.columns) - {"r_idx_map"}
+        for i, inp in enumerate(inputs[1:], start=1):
+            inp_cols = set(inp.bed.columns) - {"r_idx_map"}
+            if inp_cols != ref_cols:
+                raise ValueError(
+                    f"input #{i}'s bed has columns {sorted(inp_cols)}, expected "
+                    f"{sorted(ref_cols)} (from input #0); all inputs must have the "
+                    f"same bed columns to concatenate. Differing columns: "
+                    f"{sorted(inp_cols ^ ref_cols)}"
                 )
         names_seen: dict[str, int] = {}
         for i, inp in enumerate(inputs):

@@ -126,7 +126,13 @@ class OpenRequest:
             return
         va = self.path / "genotypes" / "variants.arrow"
         if not va.exists():
-            return
+            raise ValueError(
+                f"Dataset at {self.path}: metadata.json records a "
+                f"variants_fingerprint but genotypes/variants.arrow is missing. "
+                f"The variant index (hardlinked from the source dataset) was "
+                f"deleted or moved out of band; variant indices cannot be "
+                f"resolved without it. Rebuild the dataset."
+            )
         from .._fasta_cache import fingerprint as _fingerprint
 
         if va.stat().st_size != fp.size_bytes or _fingerprint(va).digest != fp.digest:

@@ -143,6 +143,17 @@ def test_rejects_single_input():
         validate_concat([_mk(["a"], 2)], "regions")
 
 
+def test_rejects_mismatched_bed_columns_on_region_axis():
+    """A missing/extra bed column (e.g. `name`) must raise a clear ValueError
+    naming the offending input, not surface polars' raw SchemaError from the
+    downstream `pl.concat(..., how="vertical_relaxed")`."""
+    a = _mk(["a"], 2)
+    b = _mk(["a"], 2)
+    b = replace(b, bed=b.bed.with_columns(name=pl.Series(["r0", "r1"])))
+    with pytest.raises(ValueError, match="bed has columns"):
+        validate_concat([a, b], "regions")
+
+
 def test_rejects_duplicate_region_names_on_region_axis():
     a = _mk(["a"], 2)
     b = _mk(["a"], 2)  # identical coordinates -> identical derived names
@@ -154,6 +165,30 @@ def test_rejects_duplicate_region_names_on_region_axis():
 
 def test_identical_coordinates_without_names_are_allowed():
     """Coordinate collisions are fine; only *name* collisions raise."""
+    validate_concat([_mk(["a"], 2), _mk(["a"], 2)], "regions")
+
+
+# --- final review fix 1: duplicate (chrom, chromStart, chromEnd) rows *within*
+# a single input make the merged union-sort's tie order ambiguous relative to
+# that input's own stored sort order, which can silently swap which stored
+# region a read returns. Cross-input collisions stay legal (see
+# test_identical_coordinates_without_names_are_allowed above). ---
+
+
+def test_rejects_within_input_duplicate_coordinates():
+    a = _mk(["a"], 2)
+    # Force both rows of input #0 to identical coordinates.
+    a = replace(
+        a,
+        bed=a.bed.with_columns(chromStart=pl.lit(0), chromEnd=pl.lit(50)),
+    )
+    with pytest.raises(ValueError, match="input #0 has duplicate regions"):
+        validate_concat([a, _mk(["a"], 2)], "regions")
+
+
+def test_across_input_identical_coordinates_still_pass():
+    """Each input's own bed has unique rows; only the union has duplicates
+    across inputs, which remains legal."""
     validate_concat([_mk(["a"], 2), _mk(["a"], 2)], "regions")
 
 

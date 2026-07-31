@@ -41,9 +41,15 @@ def _merged_bed(
     stored regions (see ``concat``), not recomputed from this frame.
     """
     if axis == "samples":
-        bed = inputs[0].bed.drop("r_idx_map", strict=False)
-        gvl_bed, _contigs, r_map = _prep_bed(bed, None)
-        return bed.with_columns(r_idx_map=pl.Series(r_map)), gvl_bed, None
+        # Regions are validated identical across inputs on this axis (same bed,
+        # same row order), so input #0's already-stored `r_idx_map` (input row ->
+        # regions.npy row, computed once by `write` via `_prep_bed`) is directly
+        # reusable -- recomputing it here would re-run the same unstable
+        # `sp.bed.sort` a second time for no benefit, re-exposing the tie-order
+        # seam `validate_concat`'s duplicate-coordinate check now closes off.
+        bed = inputs[0].bed
+        gvl_bed, _contigs, _r_map = _prep_bed(bed.drop("r_idx_map", strict=False), None)
+        return bed, gvl_bed, None
 
     parts = []
     for d, inp in enumerate(inputs):
@@ -222,7 +228,8 @@ def _gather_svar_offsets(
             out[r.dst_start : r.dst_start + n] = srcs[r.src][r.src_start : r.src_stop]
         planes.append(out)
     with open(out_dir / "offsets.npy", "wb") as f:
-        f.write(np.stack(planes).tobytes())
+        for plane in planes:
+            plane.tofile(f)
 
 
 def _concat_svar2_ranges(
@@ -415,7 +422,7 @@ def concat(
                 itemsize=np.dtype(V_IDX_TYPE).itemsize,
             )
             with open(geno / "offsets.npy", "wb") as f:
-                f.write(merged.tobytes())
+                merged.tofile(f)
         elif ref.backend == "svar":
             geno = tmp / "genotypes"
             geno.mkdir(parents=True, exist_ok=True)
@@ -479,7 +486,7 @@ def concat(
                     )
                 assert merged_t is not None
                 with open(out_t / "offsets.npy", "wb") as f:
-                    f.write(merged_t.tobytes())
+                    merged_t.tofile(f)
 
         # annot tracks: sample-independent, offsets over R only. On the sample
         # axis every input SHOULD have identical track data (same regions, no
@@ -523,7 +530,7 @@ def concat(
                         )
                     assert merged_a is not None
                     with open(out_a / "offsets.npy", "wb") as f:
-                        f.write(merged_a.tobytes())
+                        merged_a.tofile(f)
 
         with open(tmp / "metadata.json", "w") as f:
             f.write(Metadata(**meta).model_dump_json())

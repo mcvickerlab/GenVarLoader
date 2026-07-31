@@ -949,3 +949,20 @@ def test_open_accepts_absent_fingerprint(tmp_path, region_shards, reference):
     (out / "metadata.json").write_text(json.dumps(meta))
 
     gvl.Dataset.open(out, reference)  # must not raise
+
+
+def test_open_rejects_missing_variants_arrow_with_recorded_fingerprint(
+    tmp_path, region_shards, reference
+):
+    """A dataset that records a `variants_fingerprint` requires
+    genotypes/variants.arrow to be present -- a deleted hardlink target must
+    raise loudly, not silently skip verification."""
+    shards, _ = region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    va = out / "genotypes" / "variants.arrow"
+    va.unlink()
+
+    with pytest.raises(ValueError, match="variants.arrow is missing"):
+        gvl.Dataset.open(out, reference)
