@@ -422,3 +422,36 @@ def test_svar2_region_max_ends_large_positions():
     ref = _reference_region_max_ends(svar2, "chrBig", starts, ends, ["S0"])
     np.testing.assert_array_equal(got, ref)
     np.testing.assert_array_equal(got, np.array([3_000_001, 5_000_003], np.int32))
+
+
+def test_svar2_ranges_cache_bytes():
+    """Both var-key channels: 2 * R * S * P * 2 endpoints * 8 bytes."""
+    from genvarloader._dataset._write import _svar2_ranges_cache_bytes
+
+    assert _svar2_ranges_cache_bytes(1, 1, 2) == 2 * 1 * 1 * 2 * 2 * 8
+    # The scale from gvl#333: ~98 GiB for one chromosome/panel.
+    big = _svar2_ranges_cache_bytes(3964, 414830, 2)
+    assert 90 * 1024**3 < big < 110 * 1024**3
+
+
+def test_svar2_preflight_warns_when_disk_is_short(tmp_path, monkeypatch):
+    """A projected cache larger than free space must warn, not silently proceed."""
+    from collections import namedtuple
+
+    from loguru import logger
+
+    from genvarloader._dataset import _write
+
+    Usage = namedtuple("Usage", "total used free")
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        monkeypatch.setattr(
+            _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
+        )
+        n = _write._svar2_preflight(tmp_path, 3964, 414830, 2)
+    finally:
+        logger.remove(sink)
+
+    assert n == _write._svar2_ranges_cache_bytes(3964, 414830, 2)
+    assert any("free" in m for m in msgs), msgs

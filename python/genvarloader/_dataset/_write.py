@@ -323,7 +323,12 @@ def write(
                     metadata["svar_link"] = _svar_link
                 elif isinstance(variants, SparseVar2):
                     gvl_bed, _svar2_link = _write_from_svar2(
-                        path, gvl_bed, variants, samples, extend_to_length
+                        path,
+                        gvl_bed,
+                        variants,
+                        samples,
+                        extend_to_length,
+                        effective_max_mem,
                     )
                     metadata["svar2_link"] = _svar2_link
                 metadata["ploidy"] = variants.ploidy
@@ -1121,12 +1126,64 @@ def _svar2_region_max_ends(
     return out.astype(np.int32)
 
 
+def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Permanent on-disk size of the two ``svar2_ranges`` var-key caches.
+
+    Each of ``vk_snp_range`` and ``vk_indel_range`` is a
+    ``(regions, samples, ploidy, 2)`` int64 array. These are NOT small: one
+    chromosome of a 414k-sample cohort over ~4k regions is ~98 GiB.
+
+    Args:
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Total bytes both channels will occupy on disk.
+    """
+    return 2 * n_regions * n_samples * ploidy * 2 * 8
+
+
+def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Log the projected ``svar2_ranges`` cache size and warn if disk is short.
+
+    Warns rather than raising: free-space reporting is unreliable on some
+    network filesystems, and a false refusal would block a valid large build.
+
+    Args:
+        out_dir: Directory the cache will be written to.
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Projected total bytes of the two var-key caches.
+    """
+    n_bytes = _svar2_ranges_cache_bytes(n_regions, n_samples, ploidy)
+    logger.info(
+        f"svar2 range cache: {format_memory(n_bytes)} for {n_regions} regions "
+        f"x {n_samples} samples x ploidy {ploidy}."
+    )
+    try:
+        free = shutil.disk_usage(out_dir).free
+    except OSError:
+        return n_bytes
+    if n_bytes > free:
+        logger.warning(
+            f"svar2 range cache needs {format_memory(n_bytes)} but only "
+            f"{format_memory(free)} is free at {out_dir}. The write will likely "
+            f"fail with ENOSPC."
+        )
+    return n_bytes
+
+
 def _write_from_svar2(
     path: Path,
     bed: pl.DataFrame,
     svar2: SparseVar2,
     samples: list[str],
     extend_to_length: bool,
+    max_mem: int,
 ) -> tuple[pl.DataFrame, Svar2Link]:
     # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
     # store cannot represent them, and SparseVar2 exposes no index to re-check.
@@ -1143,6 +1200,7 @@ def _write_from_svar2(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     R, S, P = bed.height, len(samples), svar2.ploidy
+    _svar2_preflight(out_dir, R, S, P)
     vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
     vk_indel = np.memmap(
         out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
