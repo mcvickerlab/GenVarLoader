@@ -11,6 +11,7 @@ import polars as pl
 from numpy.typing import NDArray
 
 from .._atomic import atomic_dir
+from .._fasta_cache import fingerprint as _bounded_fingerprint
 from ._concat_io import copy_runs, gather_fixed, link_or_copy_buffered
 from ._concat_plan import Run, coalesce, provenance
 from ._concat_validate import (
@@ -141,6 +142,49 @@ def _merge_regions_npy_samples_axis(paths: list[Path]) -> "NDArray[np.int32]":
         )
         merged[:, 2] = np.maximum(merged[:, 2], s[:, 2])
     return merged
+
+
+def _assert_annot_track_matches(name: str, src_dirs: list[Path]) -> None:
+    """Verify an annot track's on-disk data agrees across inputs before copying it.
+
+    Copied verbatim from input #0 (the design spec's rule for
+    ``axis="samples"``: "sample-independent; fingerprint-compare across
+    inputs, then copy input[0]").
+
+    Annotation tracks are sample-*independent* but not dataset-independent:
+    each input's own ``_write_annot_track`` call ran against that input's own
+    stored ``regions.npy`` (``_write.py:354-356``), and ``extend_to_length``
+    can extend ``chromEnd`` by a different amount per input depending on which
+    samples were present at that input's write time -- precisely the case
+    ``_merge_regions_npy_samples_axis``'s elementwise-max exists to handle. If
+    chromEnd diverged, input #0's annot data was computed over a *narrower*
+    window than the merged (max) region, and linking it verbatim would
+    silently under-cover the merged dataset's annotation reads. This compare
+    turns that into a raised error instead of a silent truncation.
+
+    Reuses the existing bounded fingerprint idiom (``_fasta_cache.fingerprint``,
+    blake2b over the first 1 MiB + total size -- the same one
+    ``variants_fingerprint`` uses for ``genotypes/variants.arrow``) rather than
+    hashing whole files, which keeps this bounded even if a track's payload is
+    large.
+    """
+    ref_dir = src_dirs[0]
+    ref_fps = {
+        fname: _bounded_fingerprint(ref_dir / f"{fname}.npy")
+        for fname in ("starts", "ends", "values", "offsets")
+    }
+    for i, d in enumerate(src_dirs[1:], start=1):
+        for fname, ref_fp in ref_fps.items():
+            fp = _bounded_fingerprint(d / f"{fname}.npy")
+            if fp != ref_fp:
+                raise ValueError(
+                    f"annot track {name!r}: input #{i}'s {fname}.npy differs from "
+                    f"input #0's ({fp} vs {ref_fp}). axis='samples' requires "
+                    "identical annotation data across inputs -- this usually means "
+                    "extend_to_length produced a different chromEnd per input (see "
+                    "_merge_regions_npy_samples_axis), so input #0's annot_intervals "
+                    "no longer covers the merged (elementwise-max) region window."
+                )
 
 
 def _gather_svar_offsets(
@@ -438,17 +482,20 @@ def concat(
                     f.write(merged_t.tobytes())
 
         # annot tracks: sample-independent, offsets over R only. On the sample
-        # axis every input has the identical track (same regions, no sample
-        # dependence), so it's just linked from input #0. On the region axis
-        # it needs the same region ordering as everything else -- derived from
-        # the same `order` the region axis already computed above, NOT a block
-        # concatenation.
+        # axis every input SHOULD have identical track data (same regions, no
+        # sample dependence) -- but "should" is not "does": extend_to_length
+        # can diverge chromEnd per input, so this is fingerprint-verified
+        # (per the design spec) before linking from input #0, not assumed. On
+        # the region axis it needs the same region ordering as everything
+        # else -- derived from the same `order` the region axis already
+        # computed above, NOT a block concatenation.
         if ref.annot_tracks:
             for name in ref.annot_tracks:
                 out_a = tmp / "annot_intervals" / name
                 out_a.mkdir(parents=True, exist_ok=True)
                 src_dirs = [p / "annot_intervals" / name for p in paths]
                 if axis == "samples":
+                    _assert_annot_track_matches(name, src_dirs)
                     for fname in ("starts", "ends", "values", "offsets"):
                         link_or_copy_buffered(
                             src_dirs[0] / f"{fname}.npy", out_a / f"{fname}.npy"

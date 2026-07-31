@@ -553,3 +553,368 @@ def test_concat_samples_svar_interleaved_self_consistent(
             assert np.array_equal(
                 shard_offsets[:, :, w, :], merged_offsets[:, :, j, :]
             ), f"sample {sample!r}: shard {shard} != merged"
+
+
+# --- Task 6 fix round 1 -----------------------------------------------------
+#
+# Finding 1: annot tracks on axis="samples" were linked from input #0 with no
+# verification that the inputs' annot data actually agrees, even though
+# Correction 3 (regions.npy = elementwise max of chromEnd) exists precisely
+# because per-input extend_to_length CAN diverge -- silently copying input
+# #0's (potentially narrower) annot data would under-cover the merged
+# dataset's reads. Fixed by `_assert_annot_track_matches` (fingerprint-compare
+# before copy, per the design spec's `annot_intervals/<n>/` rule).
+#
+# Finding 2: annot tracks had zero test coverage, and region-axis per-sample
+# tracks were untested (only the sample axis was covered). Both addressed
+# below with fixtures constructed to be genuinely discriminating, not
+# block-layout shards that happen to pass either way.
+
+
+def _make_annot_df(bed, offset: float = 0.0):
+    """A bed-like annotation frame with one 1bp interval per region, anchored
+    at that region's own chromStart so it's guaranteed to overlap (any
+    interval `[chromStart, chromStart+1)` is inside `[chromStart, chromEnd)`
+    for every region here, since every region spans more than 1bp). `score`
+    encodes the region's chromStart (offset by `offset`), which makes a
+    region mixup detectable rather than incidentally passing on equal scores.
+    """
+    import polars as pl
+
+    return bed.select(
+        "chrom",
+        "chromStart",
+        (pl.col("chromStart") + 1).alias("chromEnd"),
+        (pl.col("chromStart").cast(pl.Float64) + offset).alias("score"),
+    )
+
+
+def _read_annot(p: Path, name: str):
+    import numpy as np
+
+    d = p / "annot_intervals" / name
+    return (
+        np.fromfile(d / "offsets.npy", dtype=np.int64),
+        np.fromfile(d / "starts.npy", dtype=np.int32),
+        np.fromfile(d / "ends.npy", dtype=np.int32),
+        np.fromfile(d / "values.npy", dtype=np.float32),
+    )
+
+
+def _ds_of_sorted_from_output(out: Path, part_lens: list[int]) -> list[int]:
+    """Recover, for an axis="regions" merge, which input each on-disk
+    (sorted) region row came from.
+
+    Inverts `input_regions.arrow`'s `r_idx_map` (input-row-order ->
+    sorted/on-disk-order), the same information `_region_order` derives
+    internally, rather than hand-computing or assuming a sort order. Used to
+    PROVE a fixture is genuinely interleaved instead of trusting a comment.
+    """
+    import numpy as np
+    import polars as pl
+
+    ib = pl.read_ipc(out / "input_regions.arrow")
+    r_map = ib["r_idx_map"].to_numpy()
+    ds_id = np.concatenate([np.full(n, i) for i, n in enumerate(part_lens)])
+    ds_of_sorted = np.empty(len(r_map), dtype=np.int64)
+    ds_of_sorted[r_map] = ds_id
+    return ds_of_sorted.tolist()
+
+
+def _n_runs(seq: list) -> int:
+    """Count maximal contiguous same-value runs. A block-concatenation layout
+    has exactly `n_datasets` runs; more than that means genuine interleaving."""
+    if not seq:
+        return 0
+    return 1 + sum(a != b for a, b in zip(seq, seq[1:]))
+
+
+def _region_keys(path: Path) -> list[tuple[int, int]]:
+    """A dataset's own on-disk region order, as `(chrom_idx, chromStart)` keys
+    (columns 0 and 1 of `regions.npy`, per `bed_to_regions`). Region identity
+    by coordinate, not row position: `gvl.write` always stores regions sorted
+    on disk, a permutation of whatever row order the caller's bed was in."""
+    import numpy as np
+
+    regions = np.load(path / "regions.npy")
+    return [(int(c), int(s)) for c, s in zip(regions[:, 0], regions[:, 1])]
+
+
+def _region_key_to_row(path: Path) -> dict[tuple[int, int], int]:
+    return {key: i for i, key in enumerate(_region_keys(path))}
+
+
+# --- Finding 2b: region-axis per-sample tracks, currently unverified -------
+
+
+@pytest.fixture(scope="session")
+def region_track_shards(tmp_path_factory, concat_case) -> tuple[list[Path], list[int]]:
+    """Region-axis analogue of `interleaved_sample_track_shards`.
+
+    `concat_case`'s bed is NOT already in genomic sort order (verified via
+    `_ds_of_sorted_from_output` in the test below, not assumed here) -- so
+    unlike the sample axis, no special row-selection trick is needed to
+    produce a genuinely interleaved merge: a plain contiguous split (as
+    `region_shards` already uses) interleaves once `_prep_bed` re-sorts it
+    into on-disk order. A per-sample BigWig track is attached so the track
+    gather's `order` handling is exercised on the region axis, which
+    (pre-fix-round-1) only had sample-axis coverage.
+    """
+    import pyBigWig
+
+    d = tmp_path_factory.mktemp("concat_region_track")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    half = bed.height // 2
+    assert half >= 2, "need >=4 regions for a meaningful interleave check"
+    parts = [bed[:half], bed[half:]]
+
+    contig_sizes = [("chr1", 1_300_000), ("chr2", 1_300_000)]
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(concat_case.samples):
+        bw_path = d / f"{sample}.bw"
+        with pyBigWig.open(str(bw_path), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            # cover the whole contig so every region overlaps regardless of
+            # its exact coordinates; value differs per sample so a slot mixup
+            # (wrong `order`) would read another sample's value.
+            value = float(i + 1)
+            bw.addEntries(
+                ["chr1", "chr2"],
+                [0, 0],
+                ends=[1_300_000, 1_300_000],
+                values=[value, value],
+            )
+        bw_paths[sample] = str(bw_path)
+    track = gvl.BigWigs("sig", bw_paths)
+
+    shards = []
+    for i, part in enumerate(parts):
+        p = d / f"shard{i}.gvl"
+        gvl.write(
+            p, part, concat_case.pgen_path, tracks=track, samples=concat_case.samples
+        )
+        shards.append(p)
+    return shards, [part.height for part in parts]
+
+
+def test_concat_regions_track_interleaved_self_consistent(
+    tmp_path, region_track_shards
+):
+    """Per-sample track gather on the REGION axis. First proves (does not
+    assume) the fixture is genuinely interleaved -- more runs of
+    dataset-of-origin than there are shards -- then checks every shard's own
+    (region, sample) track slice against the merged dataset's slice at the
+    corresponding on-disk region row.
+
+    Region rows are located by their own ``(chrom_idx, chromStart)`` coordinate
+    in each dataset's stored ``regions.npy``, not by raw input-row position:
+    ``gvl.write`` always stores regions in its own sorted on-disk order, which
+    is a permutation of the raw bed row order fed into that write call, so a
+    shard's own on-disk row index is generally NOT the same as its position in
+    the raw bed part used to build the fixture.
+    """
+    import numpy as np
+
+    shards, part_lens = region_track_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    ds_of_sorted = _ds_of_sorted_from_output(out, part_lens)
+    assert _n_runs(ds_of_sorted) > len(shards), (
+        "fixture reduced to a block layout; not a discriminating interleave test"
+    )
+
+    merged_offsets, merged_starts, merged_ends, merged_values = _read_track(out, "sig")
+    merged_samples, _n_regions, _ = _sample_meta(out)
+    s = len(merged_samples)
+    merged_key_to_row = _region_key_to_row(out)
+
+    for shard, n in zip(shards, part_lens):
+        shard_offsets, shard_starts, shard_ends, shard_values = _read_track(
+            shard, "sig"
+        )
+        shard_samples, shard_n_regions, _ = _sample_meta(shard)
+        assert shard_samples == merged_samples
+        assert shard_n_regions == n
+
+        for shard_r, key in enumerate(_region_keys(shard)):
+            merged_r = merged_key_to_row[key]
+            for w in range(s):
+                shard_slot = shard_r * s + w
+                merged_slot = merged_r * s + w
+                shard_sl = slice(
+                    shard_offsets[shard_slot], shard_offsets[shard_slot + 1]
+                )
+                merged_sl = slice(
+                    merged_offsets[merged_slot], merged_offsets[merged_slot + 1]
+                )
+                assert np.array_equal(
+                    shard_starts[shard_sl], merged_starts[merged_sl]
+                ), (shard, shard_r, w, "starts")
+                assert np.array_equal(shard_ends[shard_sl], merged_ends[merged_sl]), (
+                    shard,
+                    shard_r,
+                    w,
+                    "ends",
+                )
+                assert np.array_equal(
+                    shard_values[shard_sl], merged_values[merged_sl]
+                ), (shard, shard_r, w, "values")
+
+
+# --- Finding 2a: annot tracks, previously zero coverage ---------------------
+
+
+@pytest.fixture(scope="session")
+def region_annot_shards(tmp_path_factory, concat_case) -> tuple[list[Path], Path]:
+    """Region-axis annot-track fixture: same contiguous split as
+    `region_track_shards` (and, per that fixture, genuinely interleaved after
+    sorting -- checked again in the test rather than assumed), with a
+    `annot_tracks={"ann": ...}` source shared by both shards and the
+    single-shot oracle."""
+    d = tmp_path_factory.mktemp("concat_region_annot")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    half = bed.height // 2
+    assert half >= 2, "need >=4 regions for a meaningful interleave check"
+    parts = [bed[:half], bed[half:]]
+    annot_df = _make_annot_df(bed)
+
+    shards = []
+    for i, part in enumerate(parts):
+        p = d / f"shard{i}.gvl"
+        gvl.write(
+            p,
+            part,
+            concat_case.pgen_path,
+            annot_tracks={"ann": annot_df},
+            samples=concat_case.samples,
+        )
+        shards.append(p)
+
+    whole = d / "whole.gvl"
+    gvl.write(
+        whole,
+        bed,
+        concat_case.pgen_path,
+        annot_tracks={"ann": annot_df},
+        samples=concat_case.samples,
+    )
+    return shards, whole
+
+
+def test_concat_regions_annot_tracks_matches_single_shot(tmp_path, region_annot_shards):
+    """Region-axis annot gather must reproduce a single-shot write exactly:
+    annot tracks are sample-independent and the region axis is
+    disjoint-and-gathered (kind (a) over R per the design spec), so byte
+    identity -- not just read-equality -- is the right bar here."""
+    import numpy as np
+
+    shards, whole = region_annot_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    got = _read_annot(out, "ann")
+    exp = _read_annot(whole, "ann")
+    for g, e, label in zip(got, exp, ("offsets", "starts", "ends", "values")):
+        assert np.array_equal(g, e), label
+
+
+@pytest.fixture(scope="session")
+def sample_annot_matching_shards(
+    tmp_path_factory, concat_case
+) -> tuple[list[Path], Path]:
+    """Sample-axis annot-track fixture where both shards legitimately carry
+    the SAME annot source (the expected/supported case): the fingerprint
+    compare added for Finding 1 must NOT raise here, and the merged data must
+    equal a single-shot write's."""
+    d = tmp_path_factory.mktemp("concat_sample_annot_matching")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    samples = sorted(concat_case.samples)
+    half = len(samples) // 2
+    assert half >= 1, "need >=2 samples to shard"
+    groups = [samples[:half], samples[half:]]
+    annot_df = _make_annot_df(bed)
+
+    shards = []
+    for i, grp in enumerate(groups):
+        p = d / f"shard{i}.gvl"
+        gvl.write(
+            p, bed, concat_case.pgen_path, annot_tracks={"ann": annot_df}, samples=grp
+        )
+        shards.append(p)
+
+    whole = d / "whole.gvl"
+    gvl.write(
+        whole,
+        bed,
+        concat_case.pgen_path,
+        annot_tracks={"ann": annot_df},
+        samples=samples,
+    )
+    return shards, whole
+
+
+def test_concat_samples_annot_tracks_matches_single_shot(
+    tmp_path, sample_annot_matching_shards
+):
+    """The fingerprint compare added for Finding 1 must not raise a false
+    positive when the inputs' annot data genuinely agrees, and the linked
+    result must match a single-shot write."""
+    import numpy as np
+
+    shards, whole = sample_annot_matching_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="samples")  # must not raise
+
+    got = _read_annot(out, "ann")
+    exp = _read_annot(whole, "ann")
+    for g, e, label in zip(got, exp, ("offsets", "starts", "ends", "values")):
+        assert np.array_equal(g, e), label
+
+
+@pytest.fixture(scope="session")
+def sample_annot_mismatched_shards(tmp_path_factory, concat_case) -> list[Path]:
+    """Sample-axis annot-track fixture where the two shards are deliberately
+    given DIFFERENT annot source content for the same track name `"ann"`.
+
+    This is a direct, deterministic trigger for Finding 1's raise path: it
+    does not depend on `extend_to_length` organically diverging per-input
+    chromEnd (which this session's small fixture does not reliably do -- see
+    `test_concat_samples_reads_equal_to_single_shot`'s pass), so the compare
+    itself is exercised regardless of whether that specific root cause fires
+    for this dataset.
+    """
+    d = tmp_path_factory.mktemp("concat_sample_annot_mismatched")
+    bed = gvl.read_bedlike(concat_case.bed_path)
+    samples = sorted(concat_case.samples)
+    half = len(samples) // 2
+    assert half >= 1, "need >=2 samples to shard"
+    groups = [samples[:half], samples[half:]]
+    annot_dfs = [_make_annot_df(bed, offset=0.0), _make_annot_df(bed, offset=100.0)]
+
+    shards = []
+    for i, grp in enumerate(groups):
+        p = d / f"shard{i}.gvl"
+        gvl.write(
+            p,
+            bed,
+            concat_case.pgen_path,
+            annot_tracks={"ann": annot_dfs[i]},
+            samples=grp,
+        )
+        shards.append(p)
+    return shards
+
+
+def test_concat_samples_annot_tracks_mismatch_raises(
+    tmp_path, sample_annot_mismatched_shards
+):
+    """Finding 1: divergent annot data across inputs must raise, not be
+    silently linked from input #0 (which would silently serve input #0's
+    stale/mismatched data for every sample, including those from input #1)."""
+    shards = sample_annot_mismatched_shards
+    out = tmp_path / "merged.gvl"
+    with pytest.raises(ValueError, match=r"annot track 'ann'") as excinfo:
+        gvl.concat(out, shards, axis="samples")
+    assert "input #1" in str(excinfo.value)
+    assert not out.exists()
