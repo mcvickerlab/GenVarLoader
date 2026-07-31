@@ -192,6 +192,27 @@ def test_across_input_identical_coordinates_still_pass():
     validate_concat([_mk(["a"], 2), _mk(["a"], 2)], "regions")
 
 
+def test_within_input_duplicate_coordinates_allowed_on_sample_axis():
+    """The duplicate-coordinate guard exists because axis='regions' re-sorts the
+    union of all inputs' beds, making tie order ambiguous. axis='samples' never
+    re-sorts (it reuses input 0's stored r_idx_map verbatim), so it has no
+    tie-order exposure and must accept the same duplicate coordinates that
+    axis='regions' rejects -- e.g. the same window stored on both strands
+    (chr1:100-200 twice), which is the standard shape for a per-shard cohort
+    build merged by sample."""
+    a = _mk(["a"], 2)
+    a = replace(
+        a,
+        bed=a.bed.with_columns(chromStart=pl.lit(100), chromEnd=pl.lit(200)),
+    )
+    b = replace(_mk(["b"], 2), bed=a.bed)
+
+    validate_concat([a, b], "samples")
+
+    with pytest.raises(ValueError, match="input #0 has duplicate regions"):
+        validate_concat([a, b], "regions")
+
+
 # --- fix round 1, finding 2: variant-source identity must be enforced by content,
 # not just by the coarse backend string. ---
 
