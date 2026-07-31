@@ -131,6 +131,8 @@ Notable:
 
 **Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.
 
+**`max_mem` and `.svar2`:** for a `.svar2` variant source, `max_mem` also bounds the genotype range-cache write — ranges are produced in per-sample chunks sized to fit the budget rather than a whole contig at once. It does not bound the permanent `genotypes/svar2_ranges/` cache's on-disk size; that scales with `regions x samples x ploidy` and is governed by disk space (see "Common gotchas" below and `format.md`).
+
 Source: `python/genvarloader/_dataset/_write.py`.
 
 **Atomic creation:** `gvl.write` builds into a private sibling temp directory and publishes via an atomic `os.replace`. A best-effort `filelock` avoids redundant rebuilds when parallel jobs share the same destination, but correctness relies on the rename — the lock is advisory only. **Datasets do not auto-rebuild**; if the on-disk artifact is missing or corrupt, re-run `gvl.write`.
@@ -457,6 +459,12 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
+- **SVAR2 range caches scale with `regions x samples x ploidy`.** `gvl.write`
+  with a `.svar2` source writes a permanent
+  `2 x regions x samples x ploidy x 2 x 8` byte cache under
+  `genotypes/svar2_ranges/`. That is ~98 GiB for ~4,000 regions over 414,830
+  diploid samples. `max_mem` bounds RAM during the write; it does not bound this
+  on-disk cache.
 
 ## Maintaining this skill
 

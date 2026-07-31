@@ -147,6 +147,9 @@ def write(
             budget is too small to fit even a single variant chunk. Otherwise
             ``max_mem`` is a soft limit on overall usage and may be exceeded by
             a small amount.
+            For a ``.svar2`` variant source this also bounds the genotype
+            range-cache write: ranges are produced in per-sample chunks sized to
+            fit the budget rather than a whole contig at once.
         extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
             Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
             haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
