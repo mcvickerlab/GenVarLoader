@@ -79,6 +79,23 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.41.0 (2026-07-31)
+
+### BREAKING CHANGE
+
+- indexing a RaggedVariants allele field by integer
+(rv.alt[b][h], rv.ref[b][h]) now yields per-variant alleles instead of
+one concatenated bytes object. Callers relying on the concatenated
+value can recover it with b"".join(...). Requires seqpro>=0.22.
+
+### Fix
+
+- **svar2**: normalize contig names on the read path (#336)
+- seqpro>=0.22 for per-variant allele indexing (#330)
+
 ## v0.40.2 (2026-07-24)
 
 ### Fix
