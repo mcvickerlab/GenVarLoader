@@ -11,9 +11,13 @@ from pathlib import Path
 import polars as pl
 
 from .._fasta_cache import Fingerprint, fingerprint
+from ._svar2_link import Svar2Fingerprint, _resolve_svar2
+from ._svar_link import SvarFingerprint, _resolve_svar
 from ._write import Metadata
 
 __all__ = ["ConcatInput", "load_inputs", "validate_concat", "variants_fingerprint"]
+
+VariantFingerprint = Fingerprint | SvarFingerprint | Svar2Fingerprint
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class ConcatInput:
     tracks: list[str]
     annot_tracks: list[str]
     has_dosages: bool
+    fingerprint: VariantFingerprint | None = None
 
 
 def _backend_of(path: Path, meta: Metadata) -> str:
@@ -39,6 +44,52 @@ def _backend_of(path: Path, meta: Metadata) -> str:
     if (path / "genotypes").is_dir():
         return "pgen_vcf"
     return "tracks_only"
+
+
+def _resolved_svar_dir(path: Path, meta: Metadata) -> Path | None:
+    """Resolve the externally-linked svar/svar2 store, if this dataset has one.
+
+    Mirrors the resolution order used by :class:`Haps` (``_haps.py``): svar2
+    link first, then svar link, then ``None`` for pgen/vcf and tracks-only
+    datasets, which have no external store.
+    """
+    if meta.svar2_link is not None:
+        return _resolve_svar2(path, meta.svar2_link, None)
+    if meta.svar_link is not None:
+        return _resolve_svar(path, meta.svar_link, None)
+    return None
+
+
+def _has_dosages(path: Path, meta: Metadata) -> bool:
+    """True iff the resolved variant store contains ``dosages.npy``.
+
+    Dosages only ever live inside an externally-linked svar/svar2 store (see
+    ``_haps.py:_has_dosage_file_on_disk``); pgen/vcf and tracks-only datasets
+    never have dosages.
+    """
+    svar_dir = _resolved_svar_dir(path, meta)
+    if svar_dir is None:
+        return False
+    return (svar_dir / "dosages.npy").exists()
+
+
+def _variant_source_fingerprint(
+    path: Path, meta: Metadata
+) -> VariantFingerprint | None:
+    """Identity of the variant table/store backing this dataset, if any.
+
+    svar/svar2-backed datasets already carry a fingerprint of their linked
+    store on ``meta``; reuse it instead of re-hashing an external store.
+    pgen/vcf datasets fall back to :func:`variants_fingerprint` over their own
+    ``genotypes/variants.arrow``. Tracks-only datasets have no variant source.
+    """
+    if meta.svar2_link is not None:
+        return meta.svar2_link.fingerprint
+    if meta.svar_link is not None:
+        return meta.svar_link.fingerprint
+    if (path / "genotypes").is_dir():
+        return variants_fingerprint(path)
+    return None
 
 
 def load_inputs(paths: list[Path]) -> list[ConcatInput]:
@@ -66,7 +117,8 @@ def load_inputs(paths: list[Path]) -> list[ConcatInput]:
                 backend=_backend_of(p, meta),
                 tracks=tracks,
                 annot_tracks=annot,
-                has_dosages=(p / "genotypes" / "dosages.npy").exists(),
+                has_dosages=_has_dosages(p, meta),
+                fingerprint=_variant_source_fingerprint(p, meta),
             )
         )
     return out
@@ -112,6 +164,16 @@ def validate_concat(inputs: list[ConcatInput], axis: str) -> None:
             raise ValueError(
                 f"input #{i} uses variant source {inp.backend!r} but input #0 uses "
                 f"{ref.backend!r}; all inputs must share the same variant source"
+            )
+        if (
+            ref.fingerprint is not None
+            and inp.fingerprint is not None
+            and inp.fingerprint != ref.fingerprint
+        ):
+            raise ValueError(
+                f"input #{i} has a different variant source than input #0 "
+                "(variants fingerprint mismatch); all inputs must share one "
+                "variant source"
             )
         if inp.meta.ploidy != ref.meta.ploidy:
             raise ValueError(
