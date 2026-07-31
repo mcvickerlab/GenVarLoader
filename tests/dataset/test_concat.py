@@ -918,3 +918,34 @@ def test_concat_samples_annot_tracks_mismatch_raises(
         gvl.concat(out, shards, axis="samples")
     assert "input #1" in str(excinfo.value)
     assert not out.exists()
+
+
+def test_open_rejects_mutated_variants_arrow(tmp_path, region_shards, reference):
+    shards, _ = region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    # Break the hardlink, then corrupt the copy so the fingerprint mismatches.
+    va = out / "genotypes" / "variants.arrow"
+    data = bytearray(va.read_bytes())
+    va.unlink()
+    data[:16] = b"\x00" * 16
+    va.write_bytes(bytes(data))
+
+    with pytest.raises(ValueError, match="variants.arrow"):
+        gvl.Dataset.open(out, reference)
+
+
+def test_open_accepts_absent_fingerprint(tmp_path, region_shards, reference):
+    """Datasets written before the field exists must still open."""
+    import json
+
+    shards, _ = region_shards
+    out = tmp_path / "merged.gvl"
+    gvl.concat(out, shards, axis="regions")
+
+    meta = json.loads((out / "metadata.json").read_text())
+    meta["variants_fingerprint"] = None
+    (out / "metadata.json").write_text(json.dumps(meta))
+
+    gvl.Dataset.open(out, reference)  # must not raise

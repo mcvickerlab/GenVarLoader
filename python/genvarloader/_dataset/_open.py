@@ -63,6 +63,7 @@ class OpenRequest:
         """Resolve the request into a :class:`Dataset`."""
         self._validate_path()
         metadata = self._load_metadata()
+        self._verify_variants_fingerprint(metadata)
         idxer, bed, regions = self._build_indexer(metadata)
         self._warn_truncated_tracks(metadata, regions)
         reference = self._resolve_reference(metadata.contigs)
@@ -107,6 +108,34 @@ class OpenRequest:
         _check_dataset_format_version(metadata, self.path)
         validate_dataset(metadata, self.path)
         return metadata
+
+    def _verify_variants_fingerprint(self, metadata: Metadata) -> None:
+        """Verify the hardlinked variants.arrow still matches what was recorded.
+
+        Absent fingerprints (datasets written before the field existed) skip the
+        check, mirroring the pre-0.25.0 svar_link migration path.
+
+        Args:
+            metadata: The dataset's parsed metadata.
+
+        Raises:
+            ValueError: If the recorded fingerprint does not match the file.
+        """
+        fp = metadata.variants_fingerprint
+        if fp is None:
+            return
+        va = self.path / "genotypes" / "variants.arrow"
+        if not va.exists():
+            return
+        from .._fasta_cache import fingerprint as _fingerprint
+
+        if va.stat().st_size != fp.size_bytes or _fingerprint(va).digest != fp.digest:
+            raise ValueError(
+                f"Dataset at {self.path}: genotypes/variants.arrow does not match the "
+                f"fingerprint recorded when the dataset was created. The variant index "
+                f"was modified out of band; variant indices would resolve against the "
+                f"wrong table. Rebuild the dataset."
+            )
 
     def _build_indexer(
         self, metadata: Metadata
