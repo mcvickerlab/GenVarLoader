@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
+from genoray._contigs import ContigNormalizer
 from genoray._types import POS_TYPE, V_IDX_TYPE
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
@@ -200,6 +201,15 @@ class Svar2Haps(Haps[_H]):
     Populated from ``SparseVar2.available_fields``. These keys are additionally
     advertised in ``available_var_fields`` so users can request them via ``var_fields``.
     """
+    _ds_to_store: list[str | None] = field(init=False)
+    """``ds_contigs`` mapped to the store's spelling, parallel to ``ds_contigs``.
+
+    The dataset and its .svar2 store may name contigs differently (e.g. a UCSC-named
+    ``chr1`` reference/GTF over an Ensembl-named ``1`` store) — the write path
+    reconciles the two, so the read path must too. ``None`` marks a dataset contig
+    with no equivalent in the store; that is only an error if such a contig is
+    actually queried, so it is raised lazily by :meth:`_store_contig`.
+    """
 
     def __post_init__(self):
         # Deliberately does NOT call Haps.__post_init__ (that reads an SVAR1
@@ -209,6 +219,22 @@ class Svar2Haps(Haps[_H]):
         self.available_var_fields = ["alt", "ilen", "start"] + [
             k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS
         ]
+        # Resolve once per contig at open, not once per query.
+        self._ds_to_store = ContigNormalizer(self.store_contigs).norm(self.ds_contigs)
+
+    def _store_contig(self, ci: int) -> str:
+        """Return the .svar2 store's spelling of dataset contig index ``ci``.
+
+        The read-bound Rust kernels look contigs up in the store's own keyspace, so
+        they must be handed the store's spelling rather than the dataset's.
+        """
+        contig = self._ds_to_store[ci]
+        if contig is None:
+            raise ValueError(
+                f"Dataset contig {self.ds_contigs[ci]!r} has no equivalent in the"
+                f" .svar2 store, whose contigs are {self.store_contigs}."
+            )
+        return contig
 
     # ---- construction ----
 
@@ -462,7 +488,7 @@ class Svar2Haps(Haps[_H]):
                 out,
                 g_bounds,
                 self.store,
-                self.ds_contigs[ci],
+                self._store_contig(ci),
                 gi[0],
                 gi[1],
                 gi[2],
@@ -509,7 +535,7 @@ class Svar2Haps(Haps[_H]):
             gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], ploidy)
             d = hap_diffs_from_svar2_readbound(
                 self.store,
-                self.ds_contigs[ci],
+                self._store_contig(ci),
                 gi[0],
                 gi[1],
                 gi[2],
@@ -614,7 +640,7 @@ class Svar2Haps(Haps[_H]):
                 g_total = int(hap_lengths[qsel].sum())
             g_data, g_off = reconstruct_haplotypes_from_svar2_readbound(
                 self.store,
-                self.ds_contigs[ci],
+                self._store_contig(ci),
                 gi[0],
                 gi[1],
                 gi[2],
@@ -718,7 +744,7 @@ class Svar2Haps(Haps[_H]):
             g_total = int(track_ofsts_g[-1])
             out_data, out_off = shift_and_realign_tracks_from_svar2_readbound(
                 self.store,
-                self.ds_contigs[ci],
+                self._store_contig(ci),
                 gi[0],
                 gi[1],
                 gi[2],
@@ -855,7 +881,7 @@ class Svar2Haps(Haps[_H]):
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
-                    self.ds_contigs[ci],
+                    self._store_contig(ci),
                     gi[0],
                     gi[1],
                     gi[2],
@@ -947,7 +973,7 @@ class Svar2Haps(Haps[_H]):
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
-                    self.ds_contigs[ci],
+                    self._store_contig(ci),
                     gi[0],
                     gi[1],
                     gi[2],
@@ -1092,7 +1118,7 @@ class Svar2Haps(Haps[_H]):
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
-                    self.ds_contigs[ci],
+                    self._store_contig(ci),
                     gi[0],
                     gi[1],
                     gi[2],
