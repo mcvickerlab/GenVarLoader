@@ -153,7 +153,10 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
             samples=sorted_samples,
         )
         # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal _find_ranges'
-        # row-major (R*S*P, 2). This pins the reshape done in _write_from_svar2.
+        # row-major (R*S*P, 2). This is the layout oracle: it pins the transposed,
+        # chunked write in _write_from_svar2 (hap-major chunks reordered via
+        # `.transpose(2, 0, 1, 3)` into the region-major memmap) against genoray's
+        # unchunked, row-major `_find_ranges` bundle.
         np.testing.assert_array_equal(
             vk_snp[lo:hi].reshape(rc * S * P, 2),
             np.asarray(d["vk_snp_range"], np.int64),

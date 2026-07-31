@@ -88,7 +88,6 @@ Written only when the dataset's variant source is a `.svar2` store. `R` = number
 | `vk_indel_range.npy` | `(R, S, P, 2)` | Same, for the indel variant-key column. |
 | `dense_snp_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense SNP store. |
 | `dense_indel_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense indel store. |
-| `region_starts.npy` | `(R,)` | Per-region write-time start coordinate. Retained for parity/debugging; the read path derives per-query starts from the (post-jitter) query regions and does **not** read this array's values. |
 | `sample_cols.npy` | `(S,)` | Maps the dataset's selected-sample slot to the `.svar2` store's original sample index. |
 | `svar2_meta.json` | — | Records each array's `shape`/`dtype` plus `ploidy`. |
 
