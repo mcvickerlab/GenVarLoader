@@ -1,6 +1,10 @@
 """Unit tests for gvl.concat's buffered streaming IO primitives."""
 
+import errno
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from genvarloader._dataset._concat_io import (
     copy_runs,
@@ -93,6 +97,42 @@ def test_link_or_copy_produces_identical_bytes(tmp_path):
     dst = tmp_path / "dst.bin"
     link_or_copy_buffered(src, dst)
     assert dst.read_bytes() == src.read_bytes()
+    # Must be an actual hardlink (same inode), not a copy that merely happens
+    # to have matching bytes.
+    src_stat, dst_stat = src.stat(), dst.stat()
+    assert (dst_stat.st_dev, dst_stat.st_ino) == (src_stat.st_dev, src_stat.st_ino)
+
+
+def test_link_or_copy_falls_back_on_exdev(tmp_path, monkeypatch):
+    def _raise_exdev(self, target):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(Path, "hardlink_to", _raise_exdev)
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"variant table bytes")
+    dst = tmp_path / "dst.bin"
+    link_or_copy_buffered(src, dst)
+
+    assert dst.read_bytes() == src.read_bytes()
+    # A real copy landed, not a link: distinct inode proves the fallback ran.
+    src_stat, dst_stat = src.stat(), dst.stat()
+    assert (dst_stat.st_dev, dst_stat.st_ino) != (src_stat.st_dev, src_stat.st_ino)
+
+
+def test_link_or_copy_reraises_non_exdev_errors(tmp_path, monkeypatch):
+    def _raise_eperm(self, target):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(Path, "hardlink_to", _raise_eperm)
+
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"variant table bytes")
+    dst = tmp_path / "dst.bin"
+    with pytest.raises(OSError) as exc_info:
+        link_or_copy_buffered(src, dst)
+    assert exc_info.value.errno == errno.EPERM
+    assert not dst.exists()
 
 
 def test_copy_runs_writes_nothing_for_no_runs(tmp_path):
