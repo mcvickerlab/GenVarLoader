@@ -81,9 +81,14 @@ Single-threaded. No rayon, no native-extension threading. The work is memory- an
 disk-bandwidth-bound, not compute-bound, so parallelism buys nothing and costs NFS
 process-hygiene risk.
 
-**Read sources via `np.memmap(mode="r")`; write destinations via buffered `file.write()`
-in 16 MiB chunks.** This is measured, not assumed — see §3.2. Writing into a
-`np.memmap(mode="w+")` destination is ~21x slower on NFSv3.
+**Use buffered IO on both sides — `seek()`+`read()` for sources, `write()` for
+destinations, in 16 MiB chunks. No `np.memmap` anywhere in the bulk data path.** This is
+measured, not assumed — see §3.2. On NFSv3 *any* memmap in the path, read or write, costs
+~5-6x; only buffered-read -> buffered-write runs at full wire speed. On local XFS all
+patterns are equivalent, so buffered IO is never the wrong choice.
+
+Since runs are already coalesced into large contiguous ranges, `seek()`+`read(n)` per run
+gives large sequential reads and loses nothing relative to a memmap gather.
 
 **Iterate in destination order.** A buffered write stream must be filled sequentially, so
 destination-ordered iteration is required, not merely preferred. It is also
@@ -106,23 +111,55 @@ Flush periodically; `/carter`-style NFS mounts are `hard` with no `intr`.
 
 ### 3.2 Measured basis
 
-512 MiB, each source read exactly once so all reads are cold. Mount:
-`carter-storage:/carter` -> `nfs vers=3,rsize=1048576,wsize=1048576,hard,proto=tcp`.
+512 MiB, 16 MiB chunks, 3 repetitions. Sources are evicted from the page cache with
+`posix_fadvise(POSIX_FADV_DONTNEED)` before every read, so reads are genuinely cold on
+both filesystems (no root required). Run on `carter-cn-03` under Slurm job 13336789.
 
-| pattern | throughput |
-|---|---|
-| memmap read -> buffered write | **316 MB/s** |
-| buffered read -> buffered write | 142 MB/s |
-| buffered read -> memmap write | 15.2 MB/s |
-| memmap read -> memmap write | 13.6 MB/s |
+**NFSv3** — `carter-storage:/carter` -> `nfs vers=3,rsize=1048576,wsize=1048576,hard,proto=tcp`:
 
-Chunk size on the buffered path: 1 MiB = 178 MB/s, 16 MiB = 241 MB/s, 64 MiB = 240 MB/s.
-16 MiB is the knee.
+| pattern | rep1 | rep2 | rep3 |
+|---|---|---|---|
+| buffered read -> buffered write | **85.6** | **102.0** | **93.0** MB/s |
+| memmap read -> buffered write | 16.9 | 19.7 | 14.4 MB/s |
+| buffered read -> memmap write | 13.8 | 15.7 | 12.6 MB/s |
+| memmap read -> memmap write | 13.6 | 14.1 | 14.4 MB/s |
 
-Caveats: single runs on a shared node, so the exact figures are soft; the 21x gap is far
-outside that noise. Only NFSv3 was measured. `os.copy_file_range` is unavailable in this
-environment (Python 3.10 conda build) and NFSv3 has no server-side copy, so reflink /
-server-side copy is off the table regardless.
+**Local XFS** — `/dev/md0` on `/tmp`, node-local:
+
+| pattern | rep1 | rep2 | rep3 |
+|---|---|---|---|
+| buffered read -> buffered write | 101.2 | 106.7 | 98.8 MB/s |
+| memmap read -> buffered write | 103.1 | 103.1 | 100.1 MB/s |
+| buffered read -> memmap write | 101.2 | 98.7 | 98.8 MB/s |
+| memmap read -> memmap write | 107.9 | 105.1 | 108.2 MB/s |
+
+Two conclusions:
+
+1. **On local XFS the pattern does not matter** — all four are within noise of ~100 MB/s,
+   which is the device limit. memmap is not harmful here.
+2. **On NFSv3 any memmap in the path costs ~5-6x**, whether it is the read side, the
+   write side, or both. Page faults go out as 4 KiB RPCs instead of using the mount's
+   1 MiB `rsize`/`wsize`. Buffered IO on NFS matches local-disk throughput.
+
+Corrects an earlier measurement in this design that reported memmap reads at 316 MB/s and
+concluded they were the *fastest* option. That run did not evict the page cache and the
+sources had just been written, so it was measuring RAM, not NFS. The corrected finding is
+the opposite: memmap reads are slow on NFS too.
+
+Chunk size on the buffered path (NFS): 1 MiB = 178 MB/s, 16 MiB = 241 MB/s,
+64 MiB = 240 MB/s, so 16 MiB is the knee. Those figures predate the fadvise fix and are
+warm-cache inflated in absolute terms, but the *relative* shape (1 MiB too small, no gain
+past 16 MiB) is what the chunk-size choice rests on.
+
+`os.copy_file_range` is unavailable in this environment (Python 3.10 conda build) and
+NFSv3 has no server-side copy, so reflink / server-side copy is off the table regardless.
+
+Caveat: a shared node, so absolute figures are soft. The 5-6x NFS gap and the flat local
+result are both far outside that noise.
+
+**Not measured: random access.** These are sequential-streaming numbers. gvl's *read*
+path does random fancy-indexed access into memmapped arrays, which is a different
+workload; nothing here says that is slow. See §8 / #338.
 
 The same finding applies to `gvl.write`'s existing bulk output and is filed separately as
 [#338](https://github.com/mcvickerlab/GenVarLoader/issues/338).
@@ -130,7 +167,7 @@ The same finding applies to `gvl.write`'s existing bulk output and is filed sepa
 ### 3.3 Cost model
 
 Bytes moved is approximately the size of the merged dataset, at sequential-IO speed.
-This is not free — a 1 TB merge is roughly an hour at the measured 316 MB/s. It pays off
+This is not free — at the measured ~93 MB/s a 1 TB merge is roughly 3 hours. It pays off
 only against re-extracting genotypes, which is substantially more expensive. The design
 should not pretend otherwise, and the docs should state it.
 
