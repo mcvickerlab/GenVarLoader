@@ -22,6 +22,7 @@ from genoray import PGEN, VCF, SparseVar, SparseVar2
 from genoray import exprs as _gexprs
 from genoray._svar import dense2sparse
 from genoray._svar._convert import _dense2sparse_with_length
+from genoray._svar2_batch import MAX_END_SHIFT
 from genoray._types import V_IDX_TYPE
 from genoray._contigs import ContigNormalizer
 from genoray._utils import format_memory, parse_memory
@@ -147,6 +148,9 @@ def write(
             budget is too small to fit even a single variant chunk. Otherwise
             ``max_mem`` is a soft limit on overall usage and may be exceeded by
             a small amount.
+            For a ``.svar2`` variant source this also bounds the genotype
+            range-cache write: ranges are produced in per-sample chunks sized to
+            fit the budget rather than a whole contig at once.
         extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
             Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
             haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
@@ -323,7 +327,12 @@ def write(
                     metadata["svar_link"] = _svar_link
                 elif isinstance(variants, SparseVar2):
                     gvl_bed, _svar2_link = _write_from_svar2(
-                        path, gvl_bed, variants, samples, extend_to_length
+                        path,
+                        gvl_bed,
+                        variants,
+                        samples,
+                        extend_to_length,
+                        effective_max_mem,
                     )
                     metadata["svar2_link"] = _svar2_link
                 metadata["ploidy"] = variants.ploidy
@@ -1064,61 +1073,55 @@ def _write_from_svar(
     ), svar_link
 
 
-def _svar2_region_max_ends(
-    svar2: SparseVar2,
-    contig: str,
-    starts: NDArray[np.integer],
-    ends: NDArray[np.integer],
-    samples: list[str],
-) -> NDArray[np.int32]:
-    """SVAR1 parity: per region, the end (``pos - min(ilen, 0)``) of the highest-position variant over the SELECTED samples' haplotypes. Regions with no variants keep their original ``chromEnd``.
+def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Permanent on-disk size of the two ``svar2_ranges`` var-key caches.
 
-    ``SparseVar2.decode`` reports 0-based ``pos`` (unlike ``SparseVar.index``'s
-    1-based VCF ``POS``, which SVAR1's ``v_ends`` formula is written against), so
-    ``pos`` is converted to 1-based here before applying the same formula --
-    otherwise every extension would be off by one (masked in most regions
-    because the un-extended ``chromEnd`` already dominates the max).
+    Each of ``vk_snp_range`` and ``vk_indel_range`` is a
+    ``(regions, samples, ploidy, 2)`` int64 array. These are NOT small: one
+    chromosome of a 414k-sample cohort over ~4k regions is ~98 GiB.
 
-    Vectorized as a per-region scatter-max over a ``(pos << 21) | end`` composite
-    key, which reproduces the pos-then-end tie-break exactly (a single haplotype
-    never carries two variants at the same position, so a global per-region max
-    over the selected samples' variants equals the original per-hap-argmax loop).
+    Args:
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Total bytes both channels will occupy on disk.
     """
-    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
-    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = np.asarray(dec.data["pos"], np.int64)
-    ilen_arr = np.asarray(dec.data["ilen"], np.int64)
-    off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
-    out = np.asarray(ends, np.int64).copy()  # default = chromEnd
-    if pos_arr.size:
-        n_hap = R * S_all * P
-        counts = np.diff(off)  # variants per hap
-        hap_of_var = np.repeat(np.arange(n_hap), counts)  # region-major hap per variant
-        s_of_hap = (np.arange(n_hap) // P) % S_all
-        keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
-        region_of_var = hap_of_var // (S_all * P)
-        # end = pos + ext, where ext = 1 - min(ilen, 0) (1-based bump plus the
-        # deletion extension: SNP/INS -> 1, DEL -> 1 + |ilen|). Pack the BOUNDED
-        # `ext` into the low bits, NOT the absolute `end` (which is ~pos-sized and
-        # would overflow past ~2 Mb into any contig), so the composite key orders
-        # by pos then by end; recover end = pos + ext on unpack.
-        ext_var = 1 - np.minimum(ilen_arr, 0)  # small: 1 + deletion length
-        SHIFT = 21
-        # raise (not assert) so it still fails fast under `python -O`: a pathological
-        # >~2 Mb deletion footprint would otherwise silently corrupt the packed key.
-        if int(ext_var.max(initial=0)) >= (1 << SHIFT):
-            raise ValueError("variant footprint exceeds tie-break packing width")
-        key = (pos_arr << SHIFT) | ext_var
-        key_k = key[keep]
-        region_k = region_of_var[keep]
-        if key_k.size:
-            best = np.full(R, -1, np.int64)
-            np.maximum.at(best, region_k, key_k)  # per-region max composite key
-            has = best >= 0
-            # end = pos + ext = (key >> SHIFT) + (key & mask)
-            out[has] = (best[has] >> SHIFT) + (best[has] & ((1 << SHIFT) - 1))
-    return out.astype(np.int32)
+    return 2 * n_regions * n_samples * ploidy * 2 * 8
+
+
+def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Log the projected ``svar2_ranges`` cache size and warn if disk is short.
+
+    Warns rather than raising: free-space reporting is unreliable on some
+    network filesystems, and a false refusal would block a valid large build.
+
+    Args:
+        out_dir: Directory the cache will be written to.
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Projected total bytes of the two var-key caches.
+    """
+    n_bytes = _svar2_ranges_cache_bytes(n_regions, n_samples, ploidy)
+    logger.info(
+        f"svar2 range cache: {format_memory(n_bytes)} for {n_regions} regions "
+        f"x {n_samples} samples x ploidy {ploidy}."
+    )
+    try:
+        free = shutil.disk_usage(out_dir).free
+    except OSError:
+        return n_bytes
+    if n_bytes > free:
+        logger.warning(
+            f"svar2 range cache needs {format_memory(n_bytes)} but only "
+            f"{format_memory(free)} is free at {out_dir}. The write will likely "
+            f"fail with ENOSPC."
+        )
+    return n_bytes
 
 
 def _write_from_svar2(
@@ -1127,6 +1130,7 @@ def _write_from_svar2(
     svar2: SparseVar2,
     samples: list[str],
     extend_to_length: bool,
+    max_mem: int,
 ) -> tuple[pl.DataFrame, Svar2Link]:
     # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
     # store cannot represent them, and SparseVar2 exposes no index to re-check.
@@ -1143,6 +1147,7 @@ def _write_from_svar2(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     R, S, P = bed.height, len(samples), svar2.ploidy
+    _svar2_preflight(out_dir, R, S, P)
     vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
     vk_indel = np.memmap(
         out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
@@ -1184,20 +1189,39 @@ def _write_from_svar2(
         ends = df["chromEnd"].to_numpy()
         # extend_to_length is validated at function entry (False raises); the
         # read-bound kernel sizes haplotype output at read time.
-        d = svar2._find_ranges(c, starts, ends, samples=samples)
+        stream = svar2._find_ranges_chunked(
+            c, starts, ends, samples=samples, max_mem=max_mem
+        )
+        dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
+        dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(
+            rc, 2
+        )
 
-        # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
-        vk_snp[lo:hi] = np.asarray(d["vk_snp_range"], np.int64).reshape(rc, S, P, 2)
-        vk_indel[lo:hi] = np.asarray(d["vk_indel_range"], np.int64).reshape(rc, S, P, 2)
-        dense_snp[lo:hi] = np.asarray(d["dense_snp_range"], np.int64).reshape(rc, 2)
-        dense_indel[lo:hi] = np.asarray(d["dense_indel_range"], np.int64).reshape(rc, 2)
+        # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity picks
+        # the highest-POSITION variant (ties by end), so a lower-position variant
+        # with a longer deletion must not win the cross-chunk reduction.
+        keys = stream.dense_max_end_keys.copy()
+        for ch in stream.chunks:
+            s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
+            # Chunks are hap-major (samples, ploidy, regions, 2); the cache is
+            # region-major. transpose() is a view -- numpy copies straight into
+            # the memmap with no intermediate array.
+            vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
+            vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
+            np.maximum(keys, ch.max_end_keys, out=keys)
+            # Bound the dirty page cache: at cohort scale these memmaps are tens
+            # of GiB and the kernel would otherwise reclaim at unpredictable times.
+            vk_snp.flush()
+            vk_indel.flush()
+            pbar.update(rc * ch.n_samples / S)
 
-        # max_ends: SVAR1 parity, per region end of the max-position variant
-        # over the selected samples' haplotypes (see _svar2_region_max_ends).
-        max_ends[lo:hi] = _svar2_region_max_ends(svar2, c, starts, ends, samples)
+        mask = (1 << MAX_END_SHIFT) - 1
+        region_ends = np.asarray(ends, np.int64).copy()
+        has = keys > 0  # 0 is the "no variant in this region" sentinel
+        region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
+        max_ends[lo:hi] = region_ends.astype(np.int32)
 
         contig_offset += df.height
-        pbar.update(df.height)
     pbar.close()
     for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
         mm.flush()

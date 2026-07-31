@@ -83,7 +83,7 @@ SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=`
 
 `.svar2` is genoray's newer sparse columnar variant store. Pass it to `gvl.write` exactly like a `.svar`, BCF, or PGEN — `gvl.write(path, bed, variants="cohort.svar2")` or `variants=SparseVar2("cohort.svar2")`. Like `.svar`, the dataset stores a back-reference (`metadata.json` → `svar2_link`) instead of duplicating per-variant arrays, so the `.svar2` store must remain accessible at read time.
 
-Unlike `.svar` (whose read path builds an interval search tree + a per-read dense-union over the queried window), a `.svar2`-backed dataset reconstructs via a **read-bound** path: `gvl.write` caches small per-`(region, sample, ploid)` variant-key ranges under `<dataset>/genotypes/svar2_ranges/` (sized to the dataset's *selected* samples, not the full `.svar2` cohort), and at read time gvl gathers directly off that cache and calls all-Rust kernels — **no interval-search-tree build and no dense-union rebuild per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts. See `docs/source/faq.md`.
+Unlike `.svar` (whose read path builds an interval search tree + a per-read dense-union over the queried window), a `.svar2`-backed dataset reconstructs via a **read-bound** path: `gvl.write` caches per-`(region, sample, ploid)` variant-key ranges under `<dataset>/genotypes/svar2_ranges/` (sized to the dataset's *selected* samples, not the full `.svar2` cohort) — **not small at cohort scale**, see the "Common gotchas" bullet below — and at read time gvl gathers directly off that cache and calls all-Rust kernels — **no interval-search-tree build and no dense-union rebuild per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts. See `docs/source/faq.md`.
 
 `.svar2` is resolved at `Dataset.open` time in the same order as `.svar`: caller `svar2=` arg → recorded relative path → recorded absolute path → sibling `*.svar2`. `Dataset.open(path, svar2=<override>)` mirrors `svar=`. See `docs/source/format.md` ("`.svar2` resolution at open time").
 
@@ -130,6 +130,8 @@ Notable:
 - Inner-joins samples across `variants` and all `tracks`.
 
 **Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.
+
+**`max_mem` and `.svar2`:** for a `.svar2` variant source, `max_mem` also bounds the genotype range-cache write — ranges are produced in per-sample chunks sized to fit the budget rather than a whole contig at once. It does not bound the permanent `genotypes/svar2_ranges/` cache's on-disk size; that scales with `regions x samples x ploidy` and is governed by disk space (see "Common gotchas" below and `format.md`).
 
 Source: `python/genvarloader/_dataset/_write.py`.
 
@@ -457,6 +459,12 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
+- **SVAR2 range caches scale with `regions x samples x ploidy`.** `gvl.write`
+  with a `.svar2` source writes a permanent
+  `2 x regions x samples x ploidy x 2 x 8` byte cache under
+  `genotypes/svar2_ranges/`. That is ~98 GiB for ~4,000 regions over 414,830
+  diploid samples. `max_mem` bounds RAM during the write; it does not bound this
+  on-disk cache.
 
 ## Maintaining this skill
 
