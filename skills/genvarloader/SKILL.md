@@ -164,6 +164,42 @@ Each track subdirectory is published **atomically** (built into a temp sibling, 
 
 Source: `python/genvarloader/_dataset/_write.py`.
 
+## `gvl.concat` — merge on-disk datasets
+
+```python
+gvl.concat(
+    path,              # str | Path — destination directory
+    datasets,          # Sequence[str | Path | Dataset] — 2+ inputs
+    axis,               # "regions" | "samples"
+    *,
+    overwrite=False,
+    max_mem="4g",       # advisory; accepted for symmetry with gvl.write
+) -> None
+```
+
+Merges datasets that all share **one variant source** — the same PGEN/VCF variant table (checked
+via a content fingerprint, not just backend type) or the same `.svar`/`.svar2` store; merging
+datasets built from different variant sources raises `ValueError`. Requires at least two inputs.
+
+- `axis="regions"`: inputs must have **identical samples in identical order**; their regions are
+  concatenated (sorted by contig/position) into the output.
+- `axis="samples"`: inputs must have **identical regions** and **disjoint sample sets**; their
+  samples are merged into sorted order.
+
+Both axes merge per-sample tracks and annotation tracks alongside the genotypes. Supported
+backends: PGEN/VCF, `.svar`, `.svar2`. For a PGEN/VCF source, `variants.arrow` is hardlinked from
+the first input and a fingerprint is recorded on the merged `metadata.json`; `Dataset.open`
+re-verifies it, so an out-of-band rewrite of the variant index raises instead of silently
+misresolving.
+
+**Cost:** `gvl.concat` streams bytes rather than re-deriving anything, so its cost tracks I/O, not
+compute — it moves roughly the full size of the merged dataset. Only worth it against the
+alternative of re-extracting genotypes from scratch, not as a routine step. See "Merging datasets"
+in `docs/source/write.md` for the full cost discussion and the `genoray.SparseVar2.concat`
+store-level alternative for contig-sharded `.svar2` workflows.
+
+Source: `python/genvarloader/_dataset/_concat.py`, `_concat_validate.py`.
+
 ## `Dataset.open` — key arguments
 
 ```python
@@ -420,6 +456,8 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | FAQ (`with_*` design, typing)         | `docs/source/faq.md`                                   |
 | Auto-generated reference              | `docs/source/api.md` → https://genvarloader.readthedocs.io |
 | `gvl.write` / `gvl.update` internals  | `python/genvarloader/_dataset/_write.py`               |
+| `gvl.concat` internals + preconditions | `python/genvarloader/_dataset/_concat.py`, `_concat_validate.py` |
+| Sharded-build / merge workflow        | `docs/source/write.md` ("Merging datasets"), `docs/source/faq.md` |
 | Track re-alignment internals          | `python/genvarloader/_dataset/_tracks.py`, `_reconstruct.py` |
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
@@ -465,6 +503,11 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
   `genotypes/svar2_ranges/`. That is ~98 GiB for ~4,000 regions over 414,830
   diploid samples. `max_mem` bounds RAM during the write; it does not bound this
   on-disk cache.
+- **`gvl.concat` requires one shared variant source and at least two inputs.** Mismatched variant
+  sources (checked by fingerprint, not just backend type), `axis="regions"` with differing sample
+  sets/order, or `axis="samples"` with differing regions or overlapping samples all raise
+  `ValueError` before any bytes move. It moves roughly the full merged-dataset size at
+  sequential-IO speed — not a routine step.
 
 ## Maintaining this skill
 

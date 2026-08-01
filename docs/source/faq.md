@@ -82,6 +82,15 @@ Both are sparse columnar variant archives from [`genoray`](https://github.com/mc
 
 One documented difference in raw output: for a pure deletion, `with_seqs("variants")` on a `.svar` dataset reports the VCF anchor base as ALT (e.g. `b"G"` for `GTA>G`), while a `.svar2` dataset reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a bug. Reconstructed haplotypes are unaffected; only `RaggedVariants.alt` differs (and `FlatVariantWindows.alt`/`.alt_window` for `"variant-windows"`), and only for pure-deletion records. `ref_window` is byte-identical between the two backends.
 
+## Can I build a dataset in parallel shards and merge them?
+
+Yes. Split your BED across jobs, `gvl.write` one dataset per shard, then merge with
+[`gvl.concat(out, shards, axis="regions")`](api.md#genvarloader.concat). All shards must be
+written from the same variant source (same PGEN/VCF table, or the same `.svar`/`.svar2` store)
+and have identical samples in identical order. See "Merging datasets" in the
+[write guide](write.md) for the cost model and the `axis="samples"` alternative (merging disjoint
+cohorts over shared regions).
+
 ## How can I get personalized protein/spliced RNA sequences?
 
 Write a dataset from an exon-level BED containing transcript and exon-order columns,
