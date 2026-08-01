@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.40.2"
+version = "0.41.0"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -11,11 +11,10 @@ license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.14" # >= 3.14 blocked by pyarrow/genoray
 dependencies = [
     "seqpro>=0.22",
-    # >=3.0.0 carried the INFO/FORMAT field-read API gvl relies on; >=3.3.1 is the first
-    # release whose seqpro cap (<0.23) admits the seqpro>=0.22 above. Earlier 3.x pin
-    # seqpro<0.22, so they are unsatisfiable here — state that instead of making the
-    # resolver discover it.
-    "genoray>=3.3.1,<4",
+    # >=3.4.0 carries SparseVar2._find_ranges_chunked, the memory-bounded chunked
+    # range API _write_from_svar2 consumes to avoid materializing a whole
+    # contig's ranges at once (gvl#333).
+    "genoray>=3.4.0,<4",
     "numpy",
     "loguru",
     "natsort",
