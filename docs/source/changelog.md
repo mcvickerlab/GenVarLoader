@@ -82,6 +82,29 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.42.0 (2026-08-03)
+
+### Feat
+
+- **write**: preflight the svar2 range cache and accept max_mem
+- **concat**: verify variants.arrow fingerprint at open
+- **concat**: tracks, annot tracks, and svar/svar2 backends
+- **concat**: gvl.concat entry point for PGEN/VCF-backed datasets
+- **concat**: buffered streaming IO primitives
+- **concat**: preconditions and variants.arrow fingerprint
+- **concat**: provenance map and run coalescing for dataset merge
+
+### Fix
+
+- **write**: bound svar2 genotype-writing memory with max_mem
+- **concat**: scope duplicate-coordinate guard to axis="regions"
+- **concat**: close tie-order/schema gaps and drop full-array copies
+- **concat**: verify annot-track data agrees before copying on sample axis
+- **concat**: resolve has_dosages/fingerprint from the real store, enforce one variant source
+
 ## v0.41.0 (2026-07-31)
 
 ### BREAKING CHANGE
