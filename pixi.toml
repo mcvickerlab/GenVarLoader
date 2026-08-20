@@ -105,8 +105,8 @@ seqpro = "==0.22.0"
 # genoray >=3.4.0 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
 # py310-313 on both platforms. 3.4.0 carries SparseVar2._find_ranges_chunked, the
 # memory-bounded chunked range API _write_from_svar2 consumes (gvl#333). Mirrors
-# the pyproject floor.
-genoray = ">=3.4.0,<4"
+# the pyproject range, which spans 3.x and 4.x.
+genoray = ">=3.4.0,<5"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"

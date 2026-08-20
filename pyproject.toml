@@ -13,8 +13,10 @@ dependencies = [
     "seqpro>=0.22",
     # >=3.4.0 carries SparseVar2._find_ranges_chunked, the memory-bounded chunked
     # range API _write_from_svar2 consumes to avoid materializing a whole
-    # contig's ranges at once (gvl#333).
-    "genoray>=3.4.0,<4",
+    # contig's ranges at once (gvl#333). 4.x is supported: its breaking changes
+    # (SparseVar2.from_vcf(tune=) removal, from_vcf_list(max_mem=) semantics)
+    # are on APIs GVL never calls.
+    "genoray>=3.4.0,<5",
     "numpy",
     "loguru",
     "natsort",
