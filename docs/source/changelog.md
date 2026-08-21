@@ -85,6 +85,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.42.1 (2026-08-21)
+
+### Fix
+
+- **deps**: pick up genoray 4.0.1 and drop tracing from the build
+
 ## v0.42.0 (2026-08-03)
 
 ### Feat
