@@ -22,8 +22,14 @@ seqpro-core = "0.1"
 # genoray crates are pulled straight from GitHub (no crates.io publish). Cargo finds
 # each package by name inside the repo — no in-repo path is given or needed. Bump `rev`
 # to pull newer genoray code; both crates must share the same rev (one clone, one repo).
-svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "1bac5f99a8a656d22fe37dad5a05223cd33d348b" }
-genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "1bac5f99a8a656d22fe37dad5a05223cd33d348b", package = "genoray", default-features = false }
+# Currently tag 4.0.1. Keep this rev in step with the `genoray` Python pin: the Rust
+# code here reads svar2 stores that the Python package writes, so a format change that
+# lands in one and not the other is invisible until it corrupts a read.
+# `default-features = false` selects genoray's query-only core; since 4.0.1 that also
+# excludes `tracing`/`tracing-subscriber`, which are gated behind its `conversion`
+# feature (d-laub/genoray#165).
+svar2-codec = { git = "https://github.com/d-laub/genoray.git", rev = "d66ec0e03d097fa8c338567b0938924be67315db" }
+genoray_core = { git = "https://github.com/d-laub/genoray.git", rev = "d66ec0e03d097fa8c338567b0938924be67315db", package = "genoray", default-features = false }
 
 [features]
 extension-module = ["pyo3/extension-module"]
