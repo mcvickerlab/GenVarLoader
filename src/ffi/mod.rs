@@ -939,6 +939,7 @@ pub fn reconstruct_haplotypes_from_svar2<'py>(
             lut_bytes_s,
             lut_off_s,
             false,
+            parallel,
         );
 
         // Step 2: compute per-haplotype output lengths and prefix-sum offsets.
@@ -1130,6 +1131,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
             &lut_bytes,
             &lut_off,
             filter_exonic,
+            parallel,
         );
 
         // Step 2: per-haplotype output lengths and prefix-sum offsets.
@@ -1188,6 +1190,181 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     Ok((out_data.into_pyarray(py), out_offsets_vec.into_pyarray(py)))
 }
 
+/// One read-bound SVAR2 gather, materialised so both passes over a batch can share it.
+///
+/// The spliced read walks every batch twice: [`hap_diffs_from_svar2_readbound`] sizes
+/// the output, Python turns those lengths into a splice plan, then
+/// [`reconstruct_haplotypes_from_svar2_readbound_into`] fills it. Both passes opened
+/// with the *identical* `gather_haps_readbound` + [`crate::svar2::split_to_flat`] walk
+/// over the same sparse ranges, plus a fresh `reader.lut_arrays()` allocation — pure
+/// duplicated work. On an 8192-cell (9.4 MiB) spliced batch the gather ran 12.0 ms
+/// against 5.0 ms for the `hap_diffs_svar2` compute it precedes: the walk, not the
+/// arithmetic, is what the sizing pass costs. Dropping the second copy took that batch
+/// from 201 ms to 171 ms single-threaded and 103 ms to 88 ms on 8 threads (~1.18x
+/// either way — the gather is serial, so the win does not wash out as threads go up),
+/// with byte-identical output. Issue #349.
+///
+/// Every field is owned, so the handle borrows nothing from the `Svar2Store` it came
+/// from and stays valid for as long as Python holds it.
+#[pyclass(module = "genvarloader.genvarloader")]
+pub struct Svar2ReadboundGather {
+    flat: crate::svar2::FlatChannels,
+    lut_bytes: Vec<u8>,
+    lut_off: Vec<i64>,
+    n_q: usize,
+    ploidy: usize,
+}
+
+#[pymethods]
+impl Svar2ReadboundGather {
+    /// Number of queries (rows) this gather covers.
+    #[getter]
+    fn n_queries(&self) -> usize {
+        self.n_q
+    }
+
+    /// Ploidy the gather was built at.
+    #[getter]
+    fn ploidy(&self) -> usize {
+        self.ploidy
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Svar2ReadboundGather(n_queries={}, ploidy={})",
+            self.n_q, self.ploidy
+        )
+    }
+}
+
+impl Svar2ReadboundGather {
+    /// The `(n_q, 2)` view of `dense_range` the kernels want.
+    fn dense_range(&self) -> numpy::ndarray::ArrayView2<'_, i32> {
+        numpy::ndarray::ArrayView2::from_shape((self.n_q, 2), &self.flat.dense_range)
+            .expect("split_to_flat produces exactly n_q*2 dense_range entries")
+    }
+
+    /// Reject a handle that was not built for this call's batch shape.
+    ///
+    /// The handle is keyed by nothing the kernels can check themselves — feeding one
+    /// built for a different batch would silently reconstruct the wrong haplotypes,
+    /// so mismatched shapes must be a Python-visible error, not UB.
+    fn check_shape(&self, n_q: usize, ploidy: usize) -> PyResult<()> {
+        if self.n_q != n_q || self.ploidy != ploidy {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "gather was built for n_q={}, ploidy={} but this call has n_q={}, ploidy={}",
+                self.n_q, self.ploidy, n_q, ploidy
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Run the read-bound gather and marshal it into a shareable [`Svar2ReadboundGather`].
+///
+/// Holds the GIL-free section for the whole walk, exactly like the entries that used to
+/// inline it.
+#[allow(clippy::too_many_arguments)]
+fn build_readbound_gather<'py>(
+    py: Python<'py>,
+    store: &crate::svar2::store::Svar2Store,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    ploidy: usize,
+    n_q: usize,
+) -> PyResult<Svar2ReadboundGather> {
+    let reader = store.reader(contig).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
+    })?;
+
+    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
+    let orig_samples_v: Vec<usize> = orig_samples
+        .as_array()
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
+    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
+    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
+    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
+    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
+
+    Ok(py.detach(move || {
+        let rb = genoray_core::query::HapRanges::new(
+            &region_starts_v,
+            &orig_samples_v,
+            &vk_snp_range_v,
+            &vk_indel_range_v,
+            &dense_snp_range_v,
+            &dense_indel_range_v,
+            ploidy,
+        );
+        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
+
+        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
+        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
+
+        Svar2ReadboundGather {
+            flat: crate::svar2::split_to_flat(&br),
+            lut_bytes,
+            lut_off,
+            n_q,
+            ploidy,
+        }
+    }))
+}
+
+/// Materialise the read-bound SVAR2 gather for one contig group so the sizing pass and
+/// the reconstruct pass can share it — see [`Svar2ReadboundGather`] and issue #349.
+///
+/// `ploidy` and the six range arrays are exactly the ones the two `*_readbound` entries
+/// take; `n_queries` is `region_bounds.shape[0]` at those call sites, and is stored so a
+/// handle fed to the wrong batch raises instead of silently mis-reconstructing.
+#[pyfunction(signature = (
+    store,
+    contig,
+    region_starts,
+    orig_samples,
+    vk_snp_range,
+    vk_indel_range,
+    dense_snp_range,
+    dense_indel_range,
+    ploidy,
+    n_queries,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn gather_svar2_readbound<'py>(
+    py: Python<'py>,
+    store: PyRef<'py, crate::svar2::store::Svar2Store>,
+    contig: &str,
+    region_starts: PyReadonlyArray1<u32>,
+    orig_samples: PyReadonlyArray1<i64>,
+    vk_snp_range: PyReadonlyArray2<i64>,
+    vk_indel_range: PyReadonlyArray2<i64>,
+    dense_snp_range: PyReadonlyArray2<i64>,
+    dense_indel_range: PyReadonlyArray2<i64>,
+    ploidy: usize,
+    n_queries: usize,
+) -> PyResult<Svar2ReadboundGather> {
+    build_readbound_gather(
+        py,
+        &store,
+        contig,
+        region_starts,
+        orig_samples,
+        vk_snp_range,
+        vk_indel_range,
+        dense_snp_range,
+        dense_indel_range,
+        ploidy,
+        n_queries,
+    )
+}
+
 /// Scatter-write variant of [`reconstruct_haplotypes_from_svar2_readbound`]: writes
 /// each (query, hap) row into `out` at the caller-supplied `out_bounds[k] = (start, end)`
 /// instead of allocating a contiguous buffer and returning it.
@@ -1222,6 +1399,7 @@ pub fn reconstruct_haplotypes_from_svar2_readbound<'py>(
     to_rc,
     parallel,
     filter_exonic = false,
+    gather = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
@@ -1244,13 +1422,9 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
     to_rc: Option<PyReadonlyArray1<bool>>,
     parallel: bool,
     filter_exonic: bool,
+    gather: Option<PyRef<'py, Svar2ReadboundGather>>,
 ) -> PyResult<()> {
     use crate::reconstruct;
-    use crate::svar2;
-
-    let reader = store.reader(contig).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
-    })?;
 
     let shifts_a = shifts.as_array();
     let ploidy = shifts_a.ncols();
@@ -1297,17 +1471,6 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
         regions[[q, 2]] = region_bounds_a[[q, 1]];
     }
 
-    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
-    let orig_samples_v: Vec<usize> = orig_samples
-        .as_array()
-        .iter()
-        .map(|&x| x as usize)
-        .collect();
-    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
-    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
-    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
-    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
-
     // See the allocating entry: `ref_` is sliced then `.as_slice().unwrap()`'d inside
     // the kernel, so a non-contiguous view would panic there.
     require_contiguous_1d(&ref_, "ref_")?;
@@ -1327,25 +1490,39 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
     let to_rc_a = to_rc.as_ref().map(|a| a.as_array());
     let out_a = out.as_array_mut();
 
+    // Reuse the caller's gather when it supplied one — on the spliced path the sizing
+    // pass already ran this exact walk (issue #349). With `gather` given, `store`,
+    // `contig` and the six range arrays are unused; `check_shape` rejects a handle
+    // built for a different batch.
+    let owned_gather;
+    let g: &Svar2ReadboundGather = match gather.as_ref() {
+        Some(g) => {
+            g.check_shape(n_q, ploidy)?;
+            g
+        }
+        None => {
+            owned_gather = build_readbound_gather(
+                py,
+                &store,
+                contig,
+                region_starts,
+                orig_samples,
+                vk_snp_range,
+                vk_indel_range,
+                dense_snp_range,
+                dense_indel_range,
+                ploidy,
+                n_q,
+            )?;
+            &owned_gather
+        }
+    };
+    let flat = &g.flat;
+    let lut_bytes = &g.lut_bytes;
+    let lut_off = &g.lut_off;
+    let dense_range_a = g.dense_range();
+
     py.detach(move || {
-        let rb = genoray_core::query::HapRanges::new(
-            &region_starts_v,
-            &orig_samples_v,
-            &vk_snp_range_v,
-            &vk_indel_range_v,
-            &dense_snp_range_v,
-            &dense_indel_range_v,
-            ploidy,
-        );
-        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
-
-        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
-        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
-
-        let flat = svar2::split_to_flat(&br);
-        let dense_range_a =
-            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
-
         // No sizing pass: `out_bounds` already carries every row's destination, so
         // `hap_diffs_svar2` (needed only to build out_offsets) is skipped entirely.
         let mut out_a = out_a;
@@ -1397,6 +1574,11 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
 /// argument semantics (the per-query outputs of `SparseVar2.find_ranges`,
 /// flattened region-major, sample-minor); see
 /// `python/genvarloader/_dataset/_svar2_store_py.py::build_readbound_diffs`.
+///
+/// `parallel` enables rayon batch parallelism (caller computes `should_parallelize`).
+/// Unlike the fused entries -- where this pass is a cheap prelude to a parallel
+/// reconstruct -- here it IS the work, so leaving it serial silently capped the
+/// spliced read path at one thread (issue #349).
 #[pyfunction(signature = (
     store,
     contig,
@@ -1409,6 +1591,8 @@ pub fn reconstruct_haplotypes_from_svar2_readbound_into<'py>(
     region_bounds,
     ploidy,
     filter_exonic = false,
+    parallel = false,
+    gather = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn hap_diffs_from_svar2_readbound<'py>(
@@ -1424,12 +1608,10 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
     region_bounds: PyReadonlyArray2<i32>,
     ploidy: usize,
     filter_exonic: bool,
+    parallel: bool,
+    gather: Option<PyRef<'py, Svar2ReadboundGather>>,
 ) -> PyResult<Bound<'py, PyArray2<i32>>> {
     use crate::svar2;
-
-    let reader = store.reader(contig).ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(format!("contig {contig} not in store"))
-    })?;
 
     let region_bounds_a = region_bounds.as_array();
     let n_q = region_bounds_a.nrows();
@@ -1442,36 +1624,39 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
         regions[[q, 2]] = region_bounds_a[[q, 1]];
     }
 
-    let region_starts_v: Vec<u32> = region_starts.as_array().to_vec();
-    let orig_samples_v: Vec<usize> = orig_samples
-        .as_array()
-        .iter()
-        .map(|&x| x as usize)
-        .collect();
-    let vk_snp_range_v = arr2_to_ranges(vk_snp_range.as_array());
-    let vk_indel_range_v = arr2_to_ranges(vk_indel_range.as_array());
-    let dense_snp_range_v = arr2_to_ranges(dense_snp_range.as_array());
-    let dense_indel_range_v = arr2_to_ranges(dense_indel_range.as_array());
+    // Reuse the caller's gather when it supplied one — the spliced path hands the same
+    // handle to this pass and to the reconstruct pass so the walk runs once per batch
+    // instead of twice (issue #349). With `gather` given, `store`, `contig` and the six
+    // range arrays are unused.
+    let owned_gather;
+    let g: &Svar2ReadboundGather = match gather.as_ref() {
+        Some(g) => {
+            g.check_shape(n_q, ploidy)?;
+            g
+        }
+        None => {
+            owned_gather = build_readbound_gather(
+                py,
+                &store,
+                contig,
+                region_starts,
+                orig_samples,
+                vk_snp_range,
+                vk_indel_range,
+                dense_snp_range,
+                dense_indel_range,
+                ploidy,
+                n_q,
+            )?;
+            &owned_gather
+        }
+    };
+    let flat = &g.flat;
+    let lut_bytes = &g.lut_bytes;
+    let lut_off = &g.lut_off;
+    let dense_range_a = g.dense_range();
 
     let diffs = py.detach(move || {
-        let rb = genoray_core::query::HapRanges::new(
-            &region_starts_v,
-            &orig_samples_v,
-            &vk_snp_range_v,
-            &vk_indel_range_v,
-            &dense_snp_range_v,
-            &dense_indel_range_v,
-            ploidy,
-        );
-        let br = genoray_core::query::gather_haps_readbound(reader, &rb);
-
-        let (lut_bytes, lut_off_u64) = reader.lut_arrays();
-        let lut_off: Vec<i64> = lut_off_u64.iter().map(|&x| x as i64).collect();
-
-        let flat = svar2::split_to_flat(&br);
-        let dense_range_a =
-            numpy::ndarray::ArrayView2::from_shape((n_q, 2), &flat.dense_range).unwrap();
-
         svar2::hap_diffs_svar2(
             regions.view(),
             ploidy,
@@ -1486,6 +1671,7 @@ pub fn hap_diffs_from_svar2_readbound<'py>(
             &lut_bytes,
             &lut_off,
             filter_exonic,
+            parallel,
         )
     });
 
@@ -1606,6 +1792,7 @@ pub fn shift_and_realign_tracks_from_svar2_readbound<'py>(
             &lut_bytes,
             &lut_off,
             false,
+            parallel,
         );
 
         // Step 2: per-haplotype output lengths and prefix-sum offsets — tracks
@@ -1904,6 +2091,7 @@ pub fn shift_and_realign_tracks_from_svar2<'py>(
             lut_bytes_s,
             lut_off_s,
             false,
+            parallel,
         );
 
         // Step 2: compute per-haplotype output lengths and prefix-sum offsets.

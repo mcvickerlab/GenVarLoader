@@ -67,8 +67,14 @@ pub fn merge_hap(
 
 /// Per-hap applied-ilen diff for the two-source path, mirroring
 /// `genotypes::get_diffs_sparse`'s q_start/q_end-clipped branch. Used to size the fused
-/// SVAR2 reconstruct/track outputs. Serial (n is tiny; the fused callers already parallelize
-/// the heavy reconstruct pass).
+/// SVAR2 reconstruct/track outputs.
+///
+/// `parallel` spreads the `n_q * ploidy` rows across rayon (caller computes
+/// `should_parallelize`). This used to be unconditionally serial on the theory that
+/// `n` is tiny and the fused callers parallelize the heavy reconstruct pass. That
+/// holds for the fused entries, but NOT for `hap_diffs_from_svar2_readbound`, whose
+/// whole job is this pass: on a cohort-scale spliced batch it is a standalone sizing
+/// call over tens of thousands of rows and was ~20% of read wall time (issue #349).
 #[allow(clippy::too_many_arguments)]
 pub fn hap_diffs_svar2(
     regions: ArrayView2<i32>, // (n_q, 3)
@@ -84,12 +90,13 @@ pub fn hap_diffs_svar2(
     lut_bytes: &[u8],
     lut_off: &[i64],
     filter_exonic: bool,
+    parallel: bool,
 ) -> Array2<i32> {
     let n_q = regions.nrows();
     let mut diffs = Array2::<i32>::zeros((n_q, ploidy));
-    for k in 0..(n_q * ploidy) {
+
+    let diff_at = |k: usize| -> i32 {
         let query = k / ploidy;
-        let hap = k % ploidy;
         let vk_lo = vk_off[k] as usize;
         let vk_hi = vk_off[k + 1] as usize;
         let ds = dense_range[[query, 0]] as usize;
@@ -111,7 +118,7 @@ pub fn hap_diffs_svar2(
             present_bit,
         );
         if merged.is_empty() {
-            continue;
+            return 0;
         }
         let q_start = regions[[query, 1]] as i64;
         let q_end = regions[[query, 2]] as i64;
@@ -140,7 +147,26 @@ pub fn hap_diffs_svar2(
             v_ilen += (v_end - q_end).max(0);
             acc += v_ilen;
         }
-        diffs[[query, hap]] = acc as i32;
+        acc as i32
+    };
+
+    // `diffs` is row-major `(n_q, ploidy)` and this kernel's row index is
+    // `k = query * ploidy + hap`, so flat element `k` IS row `k`'s output: the rows
+    // are independent and need no scatter, which is what makes `par_iter_mut` safe
+    // and byte-identical to the serial walk.
+    {
+        let out = diffs
+            .as_slice_mut()
+            .expect("Array2::zeros is contiguous row-major");
+        if parallel && out.len() > 1 {
+            out.par_iter_mut()
+                .enumerate()
+                .for_each(|(k, slot)| *slot = diff_at(k));
+        } else {
+            out.iter_mut()
+                .enumerate()
+                .for_each(|(k, slot)| *slot = diff_at(k));
+        }
     }
     diffs
 }
@@ -672,23 +698,28 @@ mod tests {
         let lut_bytes: [u8; 0] = [];
         let lut_off: [i64; 0] = [];
 
-        let diffs = hap_diffs_svar2(
-            regions.view(),
-            ploidy,
-            &vk_pos,
-            &vk_key,
-            &vk_off,
-            &dense_pos,
-            &dense_key,
-            dense_range.view(),
-            &dense_present,
-            &dense_present_off,
-            &lut_bytes,
-            &lut_off,
-            false,
-        );
+        let diffs = |parallel: bool| {
+            hap_diffs_svar2(
+                regions.view(),
+                ploidy,
+                &vk_pos,
+                &vk_key,
+                &vk_off,
+                &dense_pos,
+                &dense_key,
+                dense_range.view(),
+                &dense_present,
+                &dense_present_off,
+                &lut_bytes,
+                &lut_off,
+                false,
+                parallel,
+            )
+        };
 
-        assert_eq!(diffs[[0, 0]], -1);
+        assert_eq!(diffs(false)[[0, 0]], -1);
+        // The rayon path must be byte-identical to the serial walk (issue #349).
+        assert_eq!(diffs(true), diffs(false));
     }
 
     #[test]

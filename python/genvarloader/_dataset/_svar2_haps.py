@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import numpy as np
 from genoray._contigs import ContigNormalizer
@@ -44,6 +44,8 @@ from .._variants._records import RaggedAlleles
 from ..genvarloader import (
     Svar2Store,
     decode_variants_from_svar2_readbound,
+    Svar2ReadboundGather,
+    gather_svar2_readbound,
     hap_diffs_from_svar2_readbound,
     reconstruct_haplotypes_from_svar2_readbound,
     reconstruct_haplotypes_from_svar2_readbound_into,
@@ -64,6 +66,32 @@ if TYPE_CHECKING:
     from genoray._svar2_fields import StoredField
 
     from ._splice import SplicePlan
+
+
+_GatherInputs: TypeAlias = tuple[
+    NDArray[np.uint32],  # region_starts
+    NDArray[np.int64],  # orig_samples
+    NDArray[np.int64],  # vk_snp_range
+    NDArray[np.int64],  # vk_indel_range
+    NDArray[np.int64],  # dense_snp_range
+    NDArray[np.int64],  # dense_indel_range
+    NDArray[np.int32],  # region_bounds
+]
+"""The read-bound FFI input arrays produced by ``Svar2Haps._gather_inputs``."""
+
+_GatheredGroup: TypeAlias = tuple[int, NDArray[np.intp], _GatherInputs]
+"""``(dataset contig index, its query positions, that group's gathered inputs)``."""
+
+
+def _range_work_bytes(n_queries: int, P: int, gi: _GatherInputs) -> int:
+    """Rough byte-cost of the read-bound work a gathered group implies.
+
+    Feeds ``should_parallelize`` only -- it is a scheduling heuristic and never
+    affects output bytes. The floor keeps a wide-but-shallow block (many rows,
+    few variants each) from reading as no work at all.
+    """
+    span = sum(int(np.maximum(0, r[:, 1] - r[:, 0]).sum()) for r in gi[2:])
+    return max(n_queries * P * 64, span * 16)
 
 
 _BUILTIN_VAR_FIELDS: frozenset[str] = frozenset(
@@ -201,6 +229,16 @@ class Svar2Haps(Haps[_H]):
     Populated from ``SparseVar2.available_fields``. These keys are additionally
     advertised in ``available_var_fields`` so users can request them via ``var_fields``.
     """
+    _gather_memo: (
+        tuple[int, NDArray[np.intp], NDArray[np.int32], list[_GatheredGroup]] | None
+    ) = field(init=False, repr=False)
+    """One-batch memo behind :meth:`_gathered_groups`. See that method."""
+    _rust_gathers: dict[int, Svar2ReadboundGather] = field(init=False, repr=False)
+    """Per-contig Rust gather handles for the batch in ``_gather_memo``.
+
+    Filled lazily by :meth:`_readbound_gather` and cleared whenever that memo misses,
+    so a handle can never outlive the batch it was built for.
+    """
     _ds_to_store: list[str | None] = field(init=False)
     """``ds_contigs`` mapped to the store's spelling, parallel to ``ds_contigs``.
 
@@ -219,6 +257,8 @@ class Svar2Haps(Haps[_H]):
         self.available_var_fields = ["alt", "ilen", "start"] + [
             k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS
         ]
+        self._gather_memo = None
+        self._rust_gathers = {}
         # Resolve once per contig at open, not once per query.
         self._ds_to_store = ContigNormalizer(self.store_contigs).norm(self.ds_contigs)
 
@@ -446,8 +486,6 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
 
         perm = np.asarray(splice_plan.permutation, np.intp)
         off = np.asarray(splice_plan.permuted_out_offsets, np.int64)
@@ -475,8 +513,7 @@ class Svar2Haps(Haps[_H]):
         shifts_all = np.zeros((b, P), np.int32)
         p_range = np.arange(P, dtype=np.intp)
 
-        for ci, qsel in self._contig_groups(regions[:, 0].astype(np.int64)):
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
             ref_, ref_offsets = self._ref_for_contig(ci)
             rows = (qsel[:, None] * P + p_range).ravel()
             g_bounds = np.ascontiguousarray(bounds_all[rows], np.int64)
@@ -503,6 +540,7 @@ class Svar2Haps(Haps[_H]):
                 g_rc,
                 should_parallelize(g_total),
                 self.filter == "exonic",
+                self._readbound_gather(ci, gi, P),
             )
 
         return _Flat.from_offsets(out, (len(perm), None), off).view("S1")
@@ -527,12 +565,8 @@ class Svar2Haps(Haps[_H]):
         """Return ``(query, ploidy)`` SVAR2 length deltas."""
         regions = np.asarray(regions, np.int32)
         ploidy = int(self.genotypes.shape[-2])
-        r_all, s_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (r_all, s_all))
-        groups = self._contig_groups(regions[:, 0].astype(np.int64))
         diffs = np.empty((len(idx), ploidy), np.int32)
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], ploidy)
+        for ci, qsel, gi in self._gathered_groups(idx, regions, ploidy):
             d = hap_diffs_from_svar2_readbound(
                 self.store,
                 self._store_contig(ci),
@@ -545,6 +579,8 @@ class Svar2Haps(Haps[_H]):
                 gi[6],
                 ploidy,
                 self.filter == "exonic",
+                should_parallelize(_range_work_bytes(len(qsel), ploidy, gi)),
+                self._readbound_gather(ci, gi, ploidy),
             )
             diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), ploidy)
         return diffs
@@ -583,12 +619,7 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
-        contig_ids = regions[:, 0].astype(np.int64)
         lengths = (regions[:, 2] - regions[:, 1]).astype(np.int64)
-
-        groups = self._contig_groups(contig_ids)
 
         # diffs are needed pre-reconstruct ONLY to (a) bound randomized jitter
         # shifts, or (b) return hap_lengths/diffs to a caller that uses them
@@ -630,8 +661,7 @@ class Svar2Haps(Haps[_H]):
         cat_data: list[NDArray[np.uint8]] = []
         cat_hap_lens: list[NDArray[np.int64]] = []
         cat_query_order: list[NDArray[np.intp]] = []
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
             ref_, ref_offsets = self._ref_for_contig(ci)
             g_shifts = np.ascontiguousarray(shifts[qsel], np.int32)
             if isinstance(output_length, int):
@@ -709,10 +739,6 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
-        contig_ids = regions[:, 0].astype(np.int64)
-        groups = self._contig_groups(contig_ids)
 
         params_c = np.ascontiguousarray(params, np.float64)
         o_idx = np.asarray(o_idx)
@@ -721,9 +747,7 @@ class Svar2Haps(Haps[_H]):
         cat_data: list[NDArray[np.float32]] = []
         cat_lens: list[NDArray[np.int64]] = []
         cat_query_order: list[NDArray[np.intp]] = []
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
             # (1) materialize ref-space track windows for this group's queries.
             tl_g = track_lengths[qsel]
             track_ofsts_g = lengths_to_offsets(tl_g, np.int64)
@@ -859,25 +883,13 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
-        contig_ids = regions[:, 0].astype(np.int64)
-        groups = self._contig_groups(contig_ids)
 
         n_vars_total = np.zeros(b, np.int64)
         ref_span_sum = np.zeros(b, np.int64)
         alt_bytes_sum = np.zeros(b, np.int64)
 
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            work_bytes = max(
-                len(qsel) * P * 64,
-                sum(
-                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
-                    for ranges in gi[2:]
-                )
-                * 16,
-            )
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
+            work_bytes = _range_work_bytes(len(qsel), P, gi)
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
@@ -945,10 +957,6 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
-        contig_ids = regions[:, 0].astype(np.int64)
-        groups = self._contig_groups(contig_ids)
         p_eff = 1 if self.unphased_union else P
 
         req_keys, field_specs, field_dtypes = self._requested_store_fields()
@@ -960,16 +968,8 @@ class Svar2Haps(Haps[_H]):
         cat_var_bytelen: list[NDArray[np.int64]] = []
         cat_query_order: list[NDArray[np.intp]] = []
         cat_fields: list[list[NDArray]] = []
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            work_bytes = max(
-                len(qsel) * P * 64,
-                sum(
-                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
-                    for ranges in gi[2:]
-                )
-                * 16,
-            )
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
+            work_bytes = _range_work_bytes(len(qsel), P, gi)
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
@@ -1087,10 +1087,6 @@ class Svar2Haps(Haps[_H]):
         regions = np.asarray(regions, np.int32)
         P = int(self.genotypes.shape[-2])
         b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
-        contig_ids = regions[:, 0].astype(np.int64)
-        groups = self._contig_groups(contig_ids)
 
         p_eff = 1 if self.unphased_union else P
 
@@ -1105,16 +1101,8 @@ class Svar2Haps(Haps[_H]):
         win_data: dict[str, list[NDArray]] = {}
         win_seq_off: dict[str, list[NDArray[np.int64]]] = {}
 
-        for ci, qsel in groups:
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            work_bytes = max(
-                len(qsel) * P * 64,
-                sum(
-                    int(np.maximum(0, ranges[:, 1] - ranges[:, 0]).sum())
-                    for ranges in gi[2:]
-                )
-                * 16,
-            )
+        for ci, qsel, gi in self._gathered_groups(idx, regions, P):
+            work_bytes = _range_work_bytes(len(qsel), P, gi)
             pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
                 decode_variants_from_svar2_readbound(
                     self.store,
@@ -1266,21 +1254,100 @@ class Svar2Haps(Haps[_H]):
             groups.append((int(ci), qsel))
         return groups
 
+    def _gathered_groups(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        P: int,
+    ) -> list[_GatheredGroup]:
+        """Contig groups paired with their gathered FFI inputs, memoized per batch.
+
+        Every SVAR2 read gathers the same inputs **twice** for one batch: once to
+        size the output and once to fill it. On the spliced path that is
+        ``build_recon_splice_plan`` -> :meth:`haplotype_lengths_for_plan` ->
+        :meth:`_haplotype_diffs`, then :meth:`_reconstruct_spliced`; on the
+        unspliced path it is the ``need_diffs`` branch of
+        :meth:`get_haps_and_shifts` followed by that method's own reconstruct
+        loop. The two calls carry identical ``(idx, regions, P)``, so the second
+        gather is pure waste -- ~7% of wall on a production spliced batch
+        (issue #349).
+
+        The memo holds exactly one batch. It is keyed by the **contents** of a
+        private copy of ``idx``/``regions``, not by their identity: comparing
+        ~200 KB costs ~20 us against a gather that costs orders of magnitude
+        more, and an identity key would silently serve stale rows to a caller
+        that refilled a reused buffer.
+        """
+        idx = np.asarray(idx)
+        regions = np.asarray(regions, np.int32)
+        memo = self._gather_memo
+        if (
+            memo is not None
+            and memo[0] == P
+            and np.array_equal(memo[1], idx)
+            and np.array_equal(memo[2], regions)
+        ):
+            return memo[3]
+
+        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        r_q, si_q = np.unravel_index(idx, (R_all, S_all))
+        groups: list[_GatheredGroup] = [
+            (ci, qsel, self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P))
+            for ci, qsel in self._contig_groups(regions[:, 0].astype(np.int64))
+        ]
+        self._gather_memo = (P, idx.copy(), regions.copy(), groups)
+        self._rust_gathers = {}
+        return groups
+
+    def _readbound_gather(
+        self, ci: int, gi: _GatherInputs, P: int
+    ) -> Svar2ReadboundGather:
+        """The Rust-side read-bound gather for one contig group, memoized per batch.
+
+        ``gather_haps_readbound`` + ``split_to_flat`` + the store's decode LUT is the
+        single most expensive thing a read-bound SVAR2 batch does, and the spliced path
+        used to run it **twice** over identical ranges: once inside
+        ``hap_diffs_from_svar2_readbound`` to size the output, then again inside
+        ``reconstruct_haplotypes_from_svar2_readbound_into`` to fill it.
+
+        On an 8192-cell (9.4 MiB) spliced batch that walk cost 12.0 ms per pass against
+        5.0 ms for the ``hap_diffs_svar2`` compute it feeds -- the sizing pass is mostly
+        gather, not arithmetic. Dropping the duplicate took the batch from 201 ms to
+        171 ms single-threaded and 103 ms to 88 ms on 8 threads (~1.18x either way; the
+        gather is serial, so the win does not wash out as threads go up), with
+        byte-identical output (issue #349).
+
+        The cost is holding one batch's flat channels until the next batch displaces
+        them -- memory the old code allocated anyway, just twice and transiently.
+
+        Lifetime is tied to :meth:`_gathered_groups`' memo: that method clears this
+        cache on a miss, so a handle can never be served to a different batch. The
+        Rust side re-checks ``(n_queries, ploidy)`` and raises rather than
+        mis-reconstructing if it ever is.
+        """
+        g = self._rust_gathers.get(ci)
+        if g is None:
+            g = self._rust_gathers[ci] = gather_svar2_readbound(
+                self.store,
+                self._store_contig(ci),
+                gi[0],
+                gi[1],
+                gi[2],
+                gi[3],
+                gi[4],
+                gi[5],
+                P,
+                len(gi[6]),
+            )
+        return g
+
     def _gather_inputs(
         self,
         r_q: NDArray[np.integer],
         si_q: NDArray[np.integer],
         regions_grp: NDArray[np.int32],
         P: int,
-    ) -> tuple[
-        NDArray[np.uint32],
-        NDArray[np.int64],
-        NDArray[np.int64],
-        NDArray[np.int64],
-        NDArray[np.int64],
-        NDArray[np.int64],
-        NDArray[np.int32],
-    ]:
+    ) -> _GatherInputs:
         """Cache-slice a per-contig query block into the read-bound FFI inputs.
 
         Fancy-indexes the memmapped cache (sub-linear; no per-read search). The

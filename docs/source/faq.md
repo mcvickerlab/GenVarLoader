@@ -68,7 +68,7 @@ plink2 --pgen-info $prefix
 GVL's read path (haplotype reconstruction and track re-alignment) is parallelized in Rust with [rayon](https://github.com/rayon-rs/rayon). By default it uses one worker per available CPU, detected from the Linux cgroup cpuset (`sched_getaffinity`) so it respects container limits, and falling back to `os.cpu_count()` elsewhere. Three environment variables tune this:
 
 - **`GVL_NUM_THREADS`** — set the worker count explicitly (e.g. `GVL_NUM_THREADS=4`). Overrides cgroup detection. Resolved once, on first use, so set it before your first GVL call.
-- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs small inputs serially because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking.
+- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs a batch serially when its output is under 1 MiB, because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking. The gate is an **absolute** byte floor — it does not scale with `GVL_NUM_THREADS`, so raising the worker count never pushes a batch back onto the serial path.
 - **`RAYON_NUM_THREADS`** — GVL **overwrites** this with its own resolved count so an inherited value (e.g. baked into a base image) can't defeat the cgroup-aware cap. To size the pool yourself, use `GVL_NUM_THREADS` instead.
 
 ## Should I use `.svar` or `.svar2` as my variant source?
