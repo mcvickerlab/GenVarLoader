@@ -127,6 +127,7 @@ Notable:
 - `annot_tracks`: `dict[str, str | Path | pl.DataFrame | pl.LazyFrame] | None` — sample-independent annotation tracks, written to `<path>/annot_intervals/<name>/`. Each value is either a path to an interval table/bigWig file, or a polars DataFrame/LazyFrame with BED-like columns (`chrom`, `chromStart`, `chromEnd`, `score`). Annotation tracks are sample-independent and can be read without a per-sample variant source.
 - `max_jitter`: max read-time jitter; pads stored data on both sides of every region by this many bases so `Dataset.with_settings(jitter=j)` works for any `j <= max_jitter`.
 - `extend_to_length=True` keeps reading past the BED end until every haplotype is ≥ the region length (matters when deletions would shorten output); set `False` for faster writes if shorter haps are acceptable. **Not supported for a `.svar2` variant source** — `extend_to_length=False` raises `NotImplementedError` there; only BCF/PGEN/`.svar` sources may disable it.
+- `samples`: which samples to include; `None` (default) takes every sample available across `variants` and all `tracks`. Either way the dataset's sample order is the **lexicographic** sort of that selection, which is not the numeric order a phenotype table usually carries (`"1000"` sorts before `"999"`). Align external tables to `Dataset.samples` by name, never by position.
 - Inner-joins samples across `variants` and all `tracks`.
 
 **Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.
@@ -505,6 +506,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
   `genotypes/svar2_ranges/`. That is ~98 GiB for ~4,000 regions over 414,830
   diploid samples. `max_mem` bounds RAM during the write; it does not bound this
   on-disk cache.
+- **`Dataset.samples` is sorted lexicographically, not numerically.** Cohorts with integer-like IDs of mixed digit counts come out in an order that differs from the numeric sort a phenotype table typically has (`"1000" < "999"` as strings). A positional join between the two is silently wrong; join on the sample name.
 - **`gvl.concat` requires one shared variant source and at least two inputs.** Mismatched variant
   sources (checked by fingerprint, not just backend type), `axis="regions"` with differing sample
   sets/order, or `axis="samples"` with differing regions or overlapping samples all raise

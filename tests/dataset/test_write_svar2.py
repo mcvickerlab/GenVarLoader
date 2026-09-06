@@ -455,3 +455,96 @@ def test_svar2_preflight_warns_when_disk_is_short(tmp_path, monkeypatch):
 
     assert n == _write._svar2_ranges_cache_bytes(3964, 414830, 2)
     assert any("free" in m for m in msgs), msgs
+
+
+@pytest.fixture(scope="module")
+def svar2_store_unsorted(vcf_and_ref, tmp_path_factory) -> Path:
+    """A store whose own sample order is NOT the lexicographic order gvl writes.
+
+    `write` sorts the selection, so this is the case where `sample_cols` is a real
+    permutation and the `samples=None` fast path in `_write_from_svar2` must NOT fire.
+    """
+    bcf, ref = vcf_and_ref
+    from genoray import _core
+
+    out = tmp_path_factory.mktemp("svar2_write_unsorted") / "store.svar2"
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S1", "S0"],  # reversed vs. the lexicographic order gvl.write emits
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (out / "meta.json").exists(), "conversion did not finish"
+    return out
+
+
+def test_write_svar2_sample_cols_permutes_unsorted_store(
+    svar2_store_unsorted: Path, tmp_path: Path
+):
+    """sample_cols must map sorted slot -> store column, not slot -> slot.
+
+    Guards the `list.index` -> hirola swap (#351): `HashTable.add` returns the rank
+    in its deduped key array, which equals the store position only because sample
+    names are unique. A store that is already sorted cannot tell the two apart, so
+    use a reversed one.
+    """
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store_unsorted)
+    assert svar2.available_samples == ["S1", "S0"], "fixture lost its store order"
+
+    bed = pl.DataFrame(
+        {"chrom": ["chr1", "chr1"], "chromStart": [0, 5], "chromEnd": [20, 15]}
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
+    rd = out / "genotypes" / "svar2_ranges"
+    sorted_samples = sorted(svar2.available_samples)  # ["S0", "S1"]
+    sample_cols = np.load(rd / "sample_cols.npy")
+    assert (
+        sample_cols.tolist()
+        == [svar2.available_samples.index(s) for s in sorted_samples]
+        == [1, 0]
+    )
+
+    # The cache must be laid out in the SORTED slot order, i.e. match a direct
+    # _find_ranges over the sorted names -- the `samples=None` fast path must not
+    # have fired and silently written the store's own order.
+    meta = json.loads((rd / "svar2_meta.json").read_text())
+    shape = tuple(meta["vk_snp_range"]["shape"])
+    vk_snp = np.array(
+        np.memmap(rd / "vk_snp_range.npy", dtype=np.int64, mode="r", shape=shape)
+    )
+    d = svar2._find_ranges(
+        "chr1",
+        bed["chromStart"].to_numpy(),
+        bed["chromEnd"].to_numpy(),
+        samples=sorted_samples,
+    )
+    np.testing.assert_array_equal(
+        vk_snp.reshape(-1, 2), np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
+    )
+
+
+def test_write_svar2_duplicate_store_samples_raises(
+    svar2_store: Path, tmp_path: Path, monkeypatch
+):
+    """Duplicate sample names in the store must be refused, not silently mapped.
+
+    `list.index` used to point two slots at one column and `HashTable.add` would
+    shift every column after the duplicate; both write a wrong dataset (#351).
+    """
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store)
+    monkeypatch.setattr(svar2, "available_samples", ["S0", "S0", "S1"])
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [20]})
+    with pytest.raises(ValueError, match="duplicate sample names"):
+        gvl.write(tmp_path / "ds.gvl", bed, variants=svar2, overwrite=True)
