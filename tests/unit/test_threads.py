@@ -48,9 +48,26 @@ def test_should_parallelize_threshold(monkeypatch):
     monkeypatch.setattr(th, "_NUM_THREADS", None)
     monkeypatch.delenv("GVL_NUM_THREADS", raising=False)
     _constrain_detected_cpus(monkeypatch, 4)
-    thresh = 4 * th._MIN_BYTES_PER_THREAD
+    thresh = th._MIN_PARALLEL_BYTES
     assert th.should_parallelize(thresh - 1) is False
     assert th.should_parallelize(thresh) is True
+
+
+@pytest.mark.parametrize("n_threads", [1, 4, 24, 32, 96])
+def test_should_parallelize_is_thread_count_independent(monkeypatch, n_threads):
+    """The size gate must not scale with the worker count.
+
+    Regression for issue #349: the floor used to be
+    ``num_threads() * _MIN_PARALLEL_BYTES``, so a 28 MB batch parallelised at
+    24 threads and ran fully serial at 32 -- asking for more threads raised the
+    bar for using any of them.
+    """
+    monkeypatch.setattr(th, "_NUM_THREADS", None)
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    monkeypatch.setenv("GVL_NUM_THREADS", str(n_threads))
+    batch = 28 * (1 << 20)  # the reporter's production batch
+    assert th.num_threads() == n_threads
+    assert th.should_parallelize(batch) is True
 
 
 @pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "On"])
@@ -68,7 +85,7 @@ def test_force_parallel_falsy_falls_back_to_threshold(monkeypatch, val):
     _constrain_detected_cpus(monkeypatch, 4)
     # Not forced → normal size gate applies.
     assert th.should_parallelize(0) is False
-    assert th.should_parallelize(4 * th._MIN_BYTES_PER_THREAD) is True
+    assert th.should_parallelize(th._MIN_PARALLEL_BYTES) is True
 
 
 def test_force_parallel_unset(monkeypatch):

@@ -256,10 +256,6 @@ python -c "import re,genvarloader as g; api=open('docs/source/api.md').read(); p
 
 The auto-generated `docs/source/changelog.md` (built from commit messages via `changelog.md.j2`) does **not** count as documentation — never treat a changelog entry as a substitute for prose docs. This gate complements the skill-maintenance rule above: public-API changes must update the skill, and any user-facing change must also keep the prose docs true.
 
-## Rust migration roadmap
-
-Any task that mentions "rust" (adding or porting Rust code, touching `src/`, or migrating numba/Python hot paths) **must** read `docs/roadmaps/rust-migration.md` before starting and update it as part of the work — tick completed tasks, record measurement results under the relevant checkpoint, and set the phase status marker (⬜/🚧/✅) + PR link. The roadmap is the source of truth for migration sequencing and the byte-identical parity contract.
-
 ## Streaming dataset work
 
 All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the StreamingDataset double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:

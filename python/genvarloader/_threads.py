@@ -11,6 +11,8 @@ Environment variables:
   os.cpu_count). Overrides cgroup detection.
 - GVL_FORCE_PARALLEL: Force parallelization even for small inputs
   (default: use size threshold). Set to a truthy value (1, true, yes, on).
+  The threshold is an absolute byte floor and does not scale with the worker
+  count (issue #349).
 - RAYON_NUM_THREADS: Overwritten by cap_threads with GVL's resolved count.
   An inherited value (e.g. from a base image) does not win.
 """
@@ -21,7 +23,7 @@ import math
 import os
 from pathlib import Path
 
-_MIN_BYTES_PER_THREAD = 1 << 20  # 1 MiB
+_MIN_PARALLEL_BYTES = 1 << 20  # 1 MiB
 _NUM_THREADS: int | None = None
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -120,8 +122,19 @@ def num_threads() -> int:
 
 
 def should_parallelize(total_bytes: int) -> bool:
-    # GVL_FORCE_PARALLEL bypasses the size gate so the multithreaded paths run
-    # on small inputs (tests, repro harnesses). See issue #263.
+    """True iff a batch of ``total_bytes`` output is worth handing to rayon.
+
+    The floor is **absolute**, not per-thread. It used to be
+    ``num_threads() * _MIN_PARALLEL_BYTES``, which made asking for more threads
+    raise the bar for using any of them: a 28 MB batch parallelised at 24
+    threads and ran fully serial at 32, so a thread bump silently produced a
+    large slowdown (issue #349). Rayon already sizes its own chunks from
+    ``current_num_threads()`` and work-steals, so the gate only has to answer
+    "is there enough work to bother", which does not depend on the pool size.
+
+    GVL_FORCE_PARALLEL bypasses the gate so the multithreaded paths run on
+    small inputs (tests, repro harnesses). See issue #263.
+    """
     if _force_parallel():
         return True
-    return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD
+    return total_bytes >= _MIN_PARALLEL_BYTES
