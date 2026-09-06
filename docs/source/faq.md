@@ -68,8 +68,28 @@ plink2 --pgen-info $prefix
 GVL's read path (haplotype reconstruction and track re-alignment) is parallelized in Rust with [rayon](https://github.com/rayon-rs/rayon). By default it uses one worker per available CPU, detected from the Linux cgroup cpuset (`sched_getaffinity`) so it respects container limits, and falling back to `os.cpu_count()` elsewhere. Three environment variables tune this:
 
 - **`GVL_NUM_THREADS`** — set the worker count explicitly (e.g. `GVL_NUM_THREADS=4`). Overrides cgroup detection. Resolved once, on first use, so set it before your first GVL call.
-- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs a batch serially when its output is under 1 MiB, because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking. The gate is an **absolute** byte floor — it does not scale with `GVL_NUM_THREADS`, so raising the worker count never pushes a batch back onto the serial path.
+- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs a batch serially when its output is under 1 MiB, because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking. The gate is an **absolute** byte floor — it does not scale with `GVL_NUM_THREADS`, so raising the worker count never pushes a batch back onto the serial path. This variable sets the *default*; a dataset that states its own policy overrides it (see below).
 - **`RAYON_NUM_THREADS`** — GVL **overwrites** this with its own resolved count so an inherited value (e.g. baked into a base image) can't defeat the cgroup-aware cap. To size the pool yourself, use `GVL_NUM_THREADS` instead.
+
+### Setting parallelism in code instead of the environment
+
+Environment variables configure a whole process, which means a script's parallelism can't be determined by reading the script — a value in a shell profile, a Dockerfile, or a SLURM template changes how it runs. To state the policy where a reader can see it, set it on the dataset:
+
+```python
+ds = ds.with_settings(parallel=False)   # True | False | "auto"
+```
+
+- `True` — always hand batches to rayon, whatever their size.
+- `False` — always run serial.
+- `"auto"` (default) — decide per batch from the output size, deferring to `GVL_FORCE_PARALLEL`.
+
+**An explicit `True`/`False` beats `GVL_FORCE_PARALLEL`.** Precedence is *explicit setting > environment > size gate*, so a script that says `parallel=False` runs serial no matter what the environment says. Datasets that never set it stay on `"auto"` and behave exactly as before.
+
+The setting is per-dataset and travels with it, including into dataloader worker processes.
+
+```{note}
+This governs *whether* to parallelize, not how many threads to use. The worker count is fixed at import from `GVL_NUM_THREADS`, because rayon reads it when its global thread pool initializes — so it cannot be varied per dataset.
+```
 
 ## Should I use `.svar` or `.svar2` as my variant source?
 

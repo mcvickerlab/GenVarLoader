@@ -259,6 +259,8 @@ Scalar fields (`start`/`ilen`/`dosage`/`info[...]`) are still filled from `Dummy
 
 Track **re-alignment** to haplotype coordinates is controlled by `with_settings(realign_tracks=True)` (default). Set `realign_tracks=False` for reference-coordinate ("as-is") tracks. `realign_tracks=False` is **required** for `kind="intervals"` with any variant-aware seq mode, and for `variant-windows` + tracks. `with_insertion_fill` requires `realign_tracks=True`.
 
+**`with_settings(parallel=...)`** — parallelism policy for this dataset's reads. `True` forces the Rust kernels multithreaded, `False` forces them serial, `"auto"` (default) decides per batch from the output size. An explicit `True`/`False` **overrides** the `GVL_FORCE_PARALLEL` environment variable — precedence is *explicit setting > environment > size gate* — so a script's parallelism can be read off the script rather than depending on ambient state. `"auto"` defers to the environment, so datasets that never set it behave as before. The setting is per-dataset and travels with it into dataloader worker processes. It governs *whether* to parallelize, not thread count: the worker count is fixed at import from `GVL_NUM_THREADS` because rayon reads it at global-pool init, so it cannot vary per dataset. See issue #352.
+
 `with_len(L)` controls output shape:
 - `"ragged"` (default): returns `gvl.Ragged` (variable length per item).
 - `"variable"`: NumPy array right-padded to the batch's longest item (`N` for seqs, `0` for tracks).
