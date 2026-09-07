@@ -26,6 +26,7 @@ from genoray._svar2_batch import MAX_END_SHIFT
 from genoray._types import V_IDX_TYPE
 from genoray._contigs import ContigNormalizer
 from genoray._utils import format_memory, parse_memory
+from hirola import HashTable
 from joblib import Parallel, delayed
 from loguru import logger
 from natsort import natsorted
@@ -41,6 +42,7 @@ from .._fasta_cache import Fingerprint
 from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
+from ._indexing import s2i
 from ._svar2_link import Svar2Link
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
@@ -138,7 +140,12 @@ def write(
             DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
             ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
             the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
-        samples: Samples to include in the dataset
+        samples: Samples to include in the dataset. Defaults to every sample available
+            across all variant file(s) and tracks. Either way the dataset's sample order
+            is the **lexicographic** sort of the selection, which is not the numeric sort
+            a phenotype table usually carries (``"1000"`` sorts before ``"999"``). Align
+            downstream tables to :attr:`Dataset.samples <genvarloader.Dataset.samples>`
+            by name, never by position.
         max_jitter: Maximum jitter to add to the regions
         overwrite: Whether to overwrite an existing dataset
         max_mem: Approximate maximum total memory to use, including the genoray variant
@@ -152,7 +159,11 @@ def write(
             a small amount.
             For a ``.svar2`` variant source this also bounds the genotype
             range-cache write: ranges are produced in per-sample chunks sized to
-            fit the budget rather than a whole contig at once.
+            fit the budget rather than a whole contig at once. The cache itself is
+            **outside** this budget: it is two ``(n_regions, n_samples, ploidy, 2)``
+            int64 memmaps on disk, which reaches tens of GiB at cohort scale (60.7 GiB
+            for 1,901 regions x 535,662 diploid samples). :func:`write` logs the
+            projected size and warns when the filesystem reports too little free space.
         extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
             Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
             haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
@@ -1159,10 +1170,31 @@ def _write_from_svar2(
         out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
     )
     # sample_cols: selected slot -> original sample index (same for every contig).
-    sample_cols = np.asarray(
-        [svar2.available_samples.index(s) for s in samples], np.int64
+    # Hash lookup, not `list.index` per sample: the latter is O(S^2) and cost ~1 h
+    # at S = 535k before a single genotype was read (#351).
+    avail = np.array(svar2.available_samples)
+    avail_s2i = HashTable(
+        max=len(avail) * 2,  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
+        dtype=avail.dtype,
     )
+    avail_s2i.add(avail)
+    if len(avail_s2i.keys) != len(avail):
+        # `add` compacts to unique keys, so a duplicate name shifts every column
+        # after it. `list.index` instead pointed two slots at one column. Both are
+        # silently wrong datasets; refuse rather than pick one.
+        raise ValueError(
+            "The .svar2 store has duplicate sample names, so genotype columns"
+            " cannot be assigned unambiguously."
+        )
+    sample_cols = np.asarray(s2i(np.asarray(samples), avail_s2i), np.int64)
     np.save(out_dir / "sample_cols.npy", sample_cols)
+
+    # genoray resolves `samples` by name with its own O(S^2) scan, once per contig
+    # (d-laub/genoray#168). `None` means "every sample in store order", which is
+    # exactly this selection when the two lists already agree, so skip the scan.
+    # `samples` is sorted lexicographically by `write`, so this only fires for a
+    # store whose own order is sorted.
+    sel: list[str] | None = None if samples == avail.tolist() else samples
 
     with open(out_dir / "svar2_meta.json", "w") as f:
         json.dump(
@@ -1192,7 +1224,7 @@ def _write_from_svar2(
         # extend_to_length is validated at function entry (False raises); the
         # read-bound kernel sizes haplotype output at read time.
         stream = svar2._find_ranges_chunked(
-            c, starts, ends, samples=samples, max_mem=max_mem
+            c, starts, ends, samples=sel, max_mem=max_mem
         )
         dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
         dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(

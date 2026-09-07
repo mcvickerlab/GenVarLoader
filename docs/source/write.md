@@ -109,6 +109,19 @@ Both formats store a back-reference in the dataset's `metadata.json` instead of 
 
 `.svar2` additionally produces a write-time cache under `<path>/genotypes/svar2_ranges/` and reads back through an all-Rust, read-bound path with no interval-search-tree build and no dense-union rebuild per read — see [the FAQ](faq.md) for the read-path and on-disk-size tradeoffs, and [the format reference](format.md) for the on-disk layout, including the size formula. This cache is **not small at cohort scale**. `gvl.write` honours `max_mem` when writing `.svar2` genotype ranges, bounding the RAM used while producing the cache; the permanent range cache itself is governed by disk space, not `max_mem` (see the format reference). `.svar2` currently has a Phase-1 scope: a handful of output combinations (`annotated` haplotypes, `min_af`/`max_af`, spliced variant-window/track outputs, etc.) aren't wired yet and raise `NotImplementedError` — see the `genvarloader` skill or the format reference for the full list. Haplotype and `variants` output support splicing and `var_filter="exonic"`.
 
+## Sample order
+
+Whether you pass `samples=` or leave it `None`, `gvl.write` stores the selection in
+**lexicographic** order, and [`Dataset.samples`](api.md#genvarloader.Dataset.samples) reports
+that same order.
+
+```{warning}
+Lexicographic order is not numeric order. A cohort with integer-like IDs of mixed digit
+counts sorts as `"1000" < "999"`, whereas the phenotype table you want to join against is
+usually in numeric order. Align external tables to `Dataset.samples` **by name**, never by
+position.
+```
+
 ## Reusing a variant index across cohorts
 
 If several cohorts are sample subsets of one parent PGEN, do **not** pre-split the

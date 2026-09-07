@@ -1009,7 +1009,12 @@ class Dataset:
 
     @property
     def samples(self) -> list[str]:
-        """The samples in the dataset."""
+        """The samples in the dataset, sorted lexicographically.
+
+        Lexicographic order is not the numeric order a phenotype table usually
+        carries (``"1000"`` sorts before ``"999"``), so align external tables to
+        this list by name rather than by position.
+        """
         return self._idxer.samples
 
     @property
