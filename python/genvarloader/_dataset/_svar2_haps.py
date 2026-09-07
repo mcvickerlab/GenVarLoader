@@ -107,6 +107,41 @@ def _field_spec(sf: "StoredField") -> tuple[str, str, str]:
     return (sf.category, sf.name, _META_DTYPE[sf.dtype])
 
 
+@dataclass(frozen=True, slots=True)
+class _ShapeOnlyGenotypes:
+    """Zero-byte stand-in for the SVAR1 per-region genotype store.
+
+    SVAR2 reconstructs read-bound straight from the on-disk store, so ``Svar2Haps``
+    has no per-(region, sample) genotype index. The base ``Haps`` machinery and
+    ``Dataset`` only ever read ``genotypes.shape`` (ploidy, ``R``, ``S``) and
+    ``genotypes.lengths`` (which becomes ``n_variants``) from it; every path that
+    reads ``.data``/``.offsets`` is either overridden by ``Svar2Haps`` or guarded
+    by ``isinstance(..., Svar2Haps)``.
+
+    Previously this was a real ``Ragged`` built from ``np.zeros(R*S*P + 1, int64)``,
+    and its ``lengths`` materialised a second ``(R, S, P)`` int64 array: 32 B per
+    (region, sample, haplotype) of zeros that were never read. At cohort scale
+    that is the dominant anonymous memory of a dataset open -- 64 GB resident for
+    3,734 regions x 535,662 samples, ~200 GB for chr19's 11,834 regions -- and
+    forced dense chromosomes to be sharded to fit a 503 GB host.
+    """
+
+    shape: tuple[int, int, int, None]
+    """``(R, S, P, None)``: regions, samples, ploidy, ragged variants axis."""
+
+    @property
+    def lengths(self) -> NDArray[np.int32]:
+        """All-zero ``(R, S, P)`` counts as a read-only, zero-stride view.
+
+        Indexes and reduces like a materialised array (``Dataset.n_variants``
+        fancy-indexes and sums it) without allocating one.
+        """
+        return np.broadcast_to(np.zeros((), np.int32), self.shape[:-1])
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+
 @dataclass(slots=True)
 class _Svar2Cache:
     """The six memmapped ``svar2_ranges/`` arrays (all int64), sliced per query.
@@ -342,12 +377,13 @@ class Svar2Haps(Haps[_H]):
             raise ValueError(f"Missing variant fields: {missing}")
 
         # Minimal base-Haps fields. genotypes carries only the (R, S, P, None)
-        # shape (so ploidy = shape[-2] and n_variants.shape are available); its
-        # data is empty (svar2 has no per-region sparse genotype store).
-        empty_geno = Ragged.from_offsets(
-            np.empty(0, V_IDX_TYPE),
-            (R, S, P, None),
-            np.zeros(R * S * P + 1, np.int64),
+        # shape (so ploidy = shape[-2] and n_variants.shape are available); svar2
+        # has no per-region sparse genotype store, so it must not cost R*S*P
+        # bytes either -- see _ShapeOnlyGenotypes.
+        # Deliberately not a Ragged (a real one costs R*S*P offsets); cast via
+        # object because only .shape/.lengths are ever read from it.
+        empty_geno = cast(
+            "Ragged[V_IDX_TYPE]", cast(object, _ShapeOnlyGenotypes((R, S, P, None)))
         )
         empty_alt = RaggedAlleles.from_offsets(
             np.empty(0, np.uint8).view("S1"), (0, None), np.zeros(1, np.int64)

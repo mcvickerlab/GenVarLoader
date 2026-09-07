@@ -1112,3 +1112,69 @@ def test_svar2_variant_windows_jitter_guard(tmp_path, svar2_fixture, _src):
     ds = gvl.Dataset.open(d, reference=ref).with_output_format("flat")
     with pytest.raises(NotImplementedError, match="right-clip"):
         ds.with_seqs("variant-windows", _WIN_OPT)[:, :]
+
+
+def test_svar2_open_does_not_allocate_per_cell_placeholders(
+    tmp_path, bed, svar2_fixture, _src
+):
+    """Opening an SVAR2-backed dataset must not materialise (R, S, P)-sized arrays.
+
+    ``Svar2Haps`` carries an SVAR1-shaped ``genotypes`` placeholder purely for its
+    shape (ploidy) and for ``n_variants``. When that placeholder was a real
+    ``Ragged`` it allocated ``R*S*P+1`` int64 offsets plus a same-sized
+    ``lengths`` array: 32 B per (region, sample, haplotype), i.e. 64 GB resident
+    for 3,734 regions x 535,662 samples and ~200 GB for chr19's 11,834 regions,
+    all zeros that are never read. Both must be zero-stride views.
+    """
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._svar2_haps import Svar2Haps
+
+    _bcf, ref = _src
+    out = tmp_path / "placeholder.gvl"
+    gvl.write(
+        out, bed, variants=SparseVar2(svar2_fixture), samples=None, overwrite=True
+    )
+    ds = gvl.Dataset.open(out, reference=ref).with_seqs("haplotypes")
+    seqs = ds._seqs
+    assert isinstance(seqs, Svar2Haps)
+
+    R, S, P = ds.n_regions, ds.n_samples, ds.ploidy
+    assert seqs.genotypes.shape == (R, S, P, None)
+    assert seqs.n_variants.shape == (R, S, P)
+    assert seqs.n_variants.dtype == np.int32
+    assert not seqs.n_variants.any()
+    assert seqs.n_variants.strides == (0, 0, 0), (
+        f"n_variants is a materialised array (strides {seqs.n_variants.strides}), "
+        "not a zero-stride view"
+    )
+    # The documented SVAR2 limitation (issue #315) is unchanged: counts read 0.
+    counts = ds.n_variants()
+    assert counts.shape == (R, S, P)
+    assert not counts.any()
+    assert ds.n_variants(regions=0, samples=0).shape == (P,)
+
+
+def test_svar2_placeholder_genotypes_are_free_at_cohort_scale():
+    """The stand-in stays O(1) in memory at All of Us scale (12.7e9 cells)."""
+    import tracemalloc
+
+    from genvarloader._dataset._svar2_haps import _ShapeOnlyGenotypes
+
+    R, S, P = 11_834, 535_662, 2
+    tracemalloc.start()
+    geno = _ShapeOnlyGenotypes((R, S, P, None))
+    lengths = geno.lengths
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert geno.shape == (R, S, P, None)
+    assert int(geno.shape[-2]) == P
+    assert lengths.shape == (R, S, P)
+    assert lengths.strides == (0, 0, 0)
+    assert not lengths.flags.writeable
+    assert lengths[np.array([0, R - 1]), np.array([S - 1, 0])].tolist() == [
+        [0, 0],
+        [0, 0],
+    ]
+    assert peak < 1 << 20, f"placeholder allocated {peak} bytes"
