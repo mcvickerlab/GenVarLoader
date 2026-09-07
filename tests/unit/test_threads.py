@@ -160,3 +160,97 @@ def test_cap_threads_sets_when_unset(monkeypatch):
     monkeypatch.setenv("GVL_NUM_THREADS", "3")
     th.cap_threads()
     assert os.environ["RAYON_NUM_THREADS"] == "3"
+
+
+# --- parallelism policy override (issue #352) -------------------------------
+#
+# Precedence is explicit > environment > size gate. The environment sets the
+# *default*; an in-code setting overrides it. See #352 for why: a script that
+# reads `parallel=False` must not run parallel because of a variable baked into
+# a base image that the reader of the script cannot see. This is the same call
+# #263 already made when `cap_threads` chose to overwrite an inherited
+# RAYON_NUM_THREADS.
+
+
+def test_parallel_default_is_auto(monkeypatch):
+    """An untouched process behaves exactly as it did before #352."""
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    assert th._PARALLEL.get() == "auto"
+    assert th.should_parallelize(0) is False
+    assert th.should_parallelize(th._MIN_PARALLEL_BYTES) is True
+
+
+@pytest.mark.parametrize(
+    ("override", "env", "total_bytes", "expected"),
+    [
+        # explicit True wins over every environment and every size
+        (True, None, 0, True),
+        (True, "0", 0, True),
+        (True, "1", 0, True),
+        # explicit False wins over GVL_FORCE_PARALLEL -- the point of #352
+        (False, None, 1 << 30, False),
+        (False, "1", 1 << 30, False),
+        (False, "1", 0, False),
+        # "auto" defers to the environment...
+        ("auto", "1", 0, True),
+        # ...and then to the size gate
+        ("auto", None, 0, False),
+        ("auto", None, 1 << 30, True),
+        ("auto", "0", 1 << 30, True),
+        ("auto", "0", 0, False),
+    ],
+)
+def test_parallel_precedence(monkeypatch, override, env, total_bytes, expected):
+    if env is None:
+        monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    else:
+        monkeypatch.setenv("GVL_FORCE_PARALLEL", env)
+    with th.parallel_policy(override):
+        assert th.should_parallelize(total_bytes) is expected
+
+
+def test_parallel_policy_restores_on_exit(monkeypatch):
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    with th.parallel_policy(False):
+        assert th.should_parallelize(1 << 30) is False
+    # must not leak into the next read
+    assert th.should_parallelize(1 << 30) is True
+
+
+def test_parallel_policy_restores_on_exception(monkeypatch):
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    with pytest.raises(RuntimeError):
+        with th.parallel_policy(False):
+            raise RuntimeError("boom")
+    assert th.should_parallelize(1 << 30) is True
+
+
+def test_parallel_policy_nests(monkeypatch):
+    monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
+    with th.parallel_policy(False):
+        with th.parallel_policy(True):
+            assert th.should_parallelize(0) is True
+        assert th.should_parallelize(1 << 30) is False
+
+
+def test_parallel_policy_rejects_garbage():
+    """Invalid states unrepresentable at the boundary: fail fast, not silently."""
+    with pytest.raises(ValueError, match="parallel"):
+        with th.parallel_policy("sometimes"):  # pyrefly: ignore
+            pass
+
+
+def test_explicit_setting_skips_the_env_read(monkeypatch):
+    """An explicit policy must not consult the environment at all.
+
+    Not just an optimisation -- it is what makes the precedence real. If the
+    env were still read, a truthy GVL_FORCE_PARALLEL would leak into a
+    `parallel=False` read.
+    """
+    calls = []
+    monkeypatch.setattr(th, "_force_parallel", lambda: calls.append(1) or True)
+    with th.parallel_policy(False):
+        assert th.should_parallelize(0) is False
+    with th.parallel_policy(True):
+        assert th.should_parallelize(0) is True
+    assert calls == [], "explicit policy consulted the environment"

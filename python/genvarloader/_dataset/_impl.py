@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 from typing_extensions import Self, assert_never
 
+from .._threads import Parallel, _check_parallel, parallel_policy
 from .._ragged import (
     RaggedAnnotatedHaps,
     RaggedIntervals,
@@ -242,6 +243,7 @@ class Dataset:
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
         unphased_union: bool | None = None,
         realign_tracks: bool | None = None,
+        parallel: "Parallel | None" = None,
     ) -> Self:
         """Modify settings of the dataset, returning a new dataset without modifying the old one.
 
@@ -292,8 +294,22 @@ class Dataset:
                 for reference-coordinate (as-is) tracks; required ``False`` for
                 ``variant-windows`` + tracks and for ``kind="intervals"`` with any
                 variant-aware seq mode.
+            parallel: Parallelism policy for this dataset's reads. :code:`True` forces the
+                Rust kernels multithreaded, :code:`False` forces them serial, and
+                :code:`"auto"` (default) decides per batch from the output size. An
+                explicit :code:`True`/:code:`False` overrides the ``GVL_FORCE_PARALLEL``
+                environment variable; :code:`"auto"` defers to it. Note this governs
+                *whether* to parallelize, not how many threads to use -- the worker
+                count is fixed at import from ``GVL_NUM_THREADS``, because rayon reads
+                it when its global pool initializes.
+
+        Raises:
+            ValueError: If ``parallel`` is not :code:`True`, :code:`False`, or :code:`"auto"`.
         """
         to_evolve = {}
+
+        if parallel is not None:
+            to_evolve["parallel"] = _check_parallel(parallel)
 
         if jitter is not None:
             if jitter != self.jitter:
@@ -949,6 +965,15 @@ class Dataset:
     (as-is) tracks. Only affects ``Haps`` + float tracks; a no-op otherwise.
     Required ``False`` for ``variant-windows`` + tracks and for ``kind="intervals"``
     with any variant-aware seq mode."""
+    parallel: "Parallel" = "auto"
+    """Parallelism policy for this dataset's reads: :code:`True` forces the Rust
+    kernels to run multithreaded, :code:`False` forces them serial, and
+    :code:`"auto"` (default) decides per batch from the output size.
+
+    An explicit :code:`True`/:code:`False` beats the ``GVL_FORCE_PARALLEL``
+    environment variable, so a script's parallelism can be determined by reading
+    the script (issue #352). :code:`"auto"` defers to the environment, so a
+    dataset that never sets this behaves exactly as it did before."""
 
     @property
     def is_subset(self) -> bool:
@@ -2118,7 +2143,16 @@ class Dataset:
             rc_neg=self.rc_neg,
             flat_output=self.output_format == "flat",
         )
-        return getitem(view, idx)
+        if self.parallel == "auto":
+            # Default policy: nothing to establish, so skip the scope entirely
+            # and leave the hot path exactly as cheap as it was before #352.
+            return getitem(view, idx)
+        # Set at read time, not when the setting was chosen: this is what carries
+        # the policy into dataloader worker processes, which receive a pickled
+        # copy of this dataset and re-enter here. A ContextVar set in the parent
+        # would not survive a spawn.
+        with parallel_policy(self.parallel):
+            return getitem(view, idx)
 
 
 def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
