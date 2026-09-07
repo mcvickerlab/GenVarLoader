@@ -394,6 +394,7 @@ In `to_padded`, replace the kernel call (currently `_to_padded_copy(data_u1, off
 
 ```python
 from seqpro.seqpro import _ragged_to_padded  # type: ignore[missing-import]  # rust
+
 _ragged_to_padded(data_u1, offsets, out_u1, itemsize, out_len)
 ```
 
@@ -545,6 +546,7 @@ In `reverse_complement`, replace `_reverse_complement_ragged(u1, offsets, comp_l
 
 ```python
 from seqpro.seqpro import _ragged_reverse_complement  # type: ignore[missing-import]  # rust
+
 _ragged_reverse_complement(u1, offsets, comp_lut, mask_flat)
 ```
 
@@ -691,8 +693,11 @@ from genvarloader._ragged import to_padded as gvl_to_padded
 def test_gvl_to_padded_matches_seqpro(dtype, pad, rows):
     offsets = np.concatenate([[0], np.cumsum(rows)]).astype(np.int64)
     n = int(offsets[-1])
-    data = (np.arange(n, dtype=np.int64) % 4).astype(dtype) if dtype != "S1" \
+    data = (
+        (np.arange(n, dtype=np.int64) % 4).astype(dtype)
+        if dtype != "S1"
         else np.frombuffer(b"ACGT" * (n // 4 + 1), dtype="S1")[:n]
+    )
     rag = Ragged.from_offsets(np.ascontiguousarray(data), (len(rows),), offsets)
     np.testing.assert_array_equal(gvl_to_padded(rag, pad), sp_to_padded(rag, pad))
 ```
@@ -716,7 +721,9 @@ def to_padded(rag: Ragged[RDTYPE], pad_value: Any) -> NDArray[RDTYPE]:
     the shared seqpro-core kernel (Rust->Rust, no Python-seqpro round-trip).
     """
     if rag._is_record:
-        raise NotImplementedError("to_padded is not defined on record-layout Ragged arrays.")
+        raise NotImplementedError(
+            "to_padded is not defined on record-layout Ragged arrays."
+        )
     rag_dim = rag.rag_dim
     if any(d is not None for d in rag.shape[rag_dim + 1 :]):
         raise ValueError(

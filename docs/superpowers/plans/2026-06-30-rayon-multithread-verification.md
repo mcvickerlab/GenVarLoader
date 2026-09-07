@@ -251,7 +251,9 @@ Replace `_detect_cpus`:
 ```python
 def _detect_cpus() -> int:
     try:
-        affinity = max(1, len(os.sched_getaffinity(0)))  # respects cgroup cpuset (Linux)
+        affinity = max(
+            1, len(os.sched_getaffinity(0))
+        )  # respects cgroup cpuset (Linux)
     except AttributeError:
         affinity = max(1, os.cpu_count() or 1)
     quota = _cgroup_cpu_quota()
@@ -599,8 +601,12 @@ def _materialize(ds):
 
 
 @pytest.mark.parametrize("seq_kind", ["haplotypes", "variants"])
-def test_forced_parallel_matches_serial(variant_track_dataset, reference, monkeypatch, seq_kind):
-    open_ds = lambda: gvl.Dataset.open(variant_track_dataset, reference=reference).with_seqs(seq_kind)
+def test_forced_parallel_matches_serial(
+    variant_track_dataset, reference, monkeypatch, seq_kind
+):
+    open_ds = lambda: gvl.Dataset.open(
+        variant_track_dataset, reference=reference
+    ).with_seqs(seq_kind)
 
     monkeypatch.delenv("GVL_FORCE_PARALLEL", raising=False)
     serial = _materialize(open_ds())
@@ -680,7 +686,9 @@ def _iterate_dataset(ds_path: str, reference_path: str, iters: int) -> int:
     # Force the parallel path and oversubscribe: many rayon threads per worker.
     os.environ["GVL_FORCE_PARALLEL"] = "1"
     os.environ["RAYON_NUM_THREADS"] = "8"
-    ds = gvl.Dataset.open(Path(ds_path), reference=Path(reference_path)).with_seqs("haplotypes")
+    ds = gvl.Dataset.open(Path(ds_path), reference=Path(reference_path)).with_seqs(
+        "haplotypes"
+    )
     total = 0
     n = len(ds)
     for _ in range(iters):
@@ -699,13 +707,20 @@ def stress_dataset(source_bed, vcf_dir, reference, tmp_path: Path) -> tuple[Path
         with pyBigWig.open(str(bw_path), "w") as bw:
             bw.addHeader(contig_sizes, maxZooms=0)
             v = float(i + 1)
-            bw.addEntries(["chr1", "chr2"], [499_990, 17_320],
-                          ends=[500_030, 17_340], values=[v, v])
+            bw.addEntries(
+                ["chr1", "chr2"],
+                [499_990, 17_320],
+                ends=[500_030, 17_340],
+                values=[v, v],
+            )
         bw_paths[sample] = str(bw_path)
     out = tmp_path / "stress.gvl"
     gvl.write(
-        path=out, bed=source_bed, variants=VCF(vcf_dir / "filtered_source.vcf.gz"),
-        tracks=gvl.BigWigs("5ss", bw_paths), max_jitter=2,
+        path=out,
+        bed=source_bed,
+        variants=VCF(vcf_dir / "filtered_source.vcf.gz"),
+        tracks=gvl.BigWigs("5ss", bw_paths),
+        max_jitter=2,
     )
     return out, Path(reference)
 
@@ -716,7 +731,9 @@ def test_concurrent_spawn_workers_do_not_deadlock(stress_dataset):
     for launch in range(LAUNCHES):
         with ProcessPoolExecutor(max_workers=N_WORKERS, mp_context=ctx) as ex:
             futs = [
-                ex.submit(_iterate_dataset, str(ds_path), str(ref_path), ITERS_PER_WORKER)
+                ex.submit(
+                    _iterate_dataset, str(ds_path), str(ref_path), ITERS_PER_WORKER
+                )
                 for _ in range(N_WORKERS)
             ]
             try:

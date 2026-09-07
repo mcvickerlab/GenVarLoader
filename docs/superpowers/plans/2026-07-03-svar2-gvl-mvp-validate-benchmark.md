@@ -129,8 +129,15 @@ def svar2_del_store(tmp_path_factory) -> Path:
 
     out = d / "store"
     _core.run_conversion_pipeline(
-        str(bcf), str(ref), ["chr1"], str(out), ["S0", "S1"],
-        25_000, 2, 1, 8 * 1024 * 1024,
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
@@ -155,7 +162,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     rng = np.random.default_rng(0)
     track = rng.random(region_len).astype(np.float32)
 
-    strategy_id = 0            # irrelevant for DEL-only (insertion-fill unused)
+    strategy_id = 0  # irrelevant for DEL-only (insertion-fill unused)
     params = np.zeros(1, np.float64)
     base_seed = 0
 
@@ -164,12 +171,12 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     out_rag = src.realign_tracks(
         contig,
         regions,
-        track,                                  # flat per-region track buffer
-        np.array([0, region_len], np.int64),    # (R+1) offsets
+        track,  # flat per-region track buffer
+        np.array([0, region_len], np.int64),  # (R+1) offsets
         params,
         strategy_id,
         base_seed,
-        shifts=None,                            # no jitter
+        shifts=None,  # no jitter
         parallel=False,
     )
 
@@ -177,7 +184,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
     raw = sv._readers[contig].decode_batch([(q_start, q_end)])
     R, So, Po = int(raw["n_regions"]), int(raw["n_samples"]), int(raw["ploidy"])
     assert (R, So, Po) == (1, S, P)
-    off = np.asarray(raw["off"])        # (H+1,) per-hap variant offsets
+    off = np.asarray(raw["off"])  # (H+1,) per-hap variant offsets
     d_pos = np.asarray(raw["pos"])
     d_ilen = np.asarray(raw["ilen"])
 
@@ -187,7 +194,7 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
 
     for s in range(S):
         for p in range(P):
-            h = (0 * S + s) * P + p                # region-major h=(r*S+s)*P+p
+            h = (0 * S + s) * P + p  # region-major h=(r*S+s)*P+p
             gi0, gi1 = int(off[h]), int(off[h + 1])
             pos_h = np.ascontiguousarray(d_pos[gi0:gi1], np.int32)
             ilen_h = np.ascontiguousarray(d_ilen[gi0:gi1], np.int32)
@@ -223,9 +230,12 @@ def test_svar2_realign_tracks_matches_svar1_oracle(svar2_del_store):
                 hap=h,
             )
             np.testing.assert_allclose(
-                got, expected, rtol=0, atol=0,
+                got,
+                expected,
+                rtol=0,
+                atol=0,
                 err_msg=f"(s={s},p={p}) SVAR2 track != SVAR1 oracle "
-                        f"(pos={pos_h.tolist()}, ilen={ilen_h.tolist()})",
+                f"(pos={pos_h.tolist()}, ilen={ilen_h.tolist()})",
             )
 ```
 
@@ -298,10 +308,12 @@ Create `tmp/svar2_mvp/build_stores.py`:
 
 ```python
 """Build .svar (SVAR1) and .svar2 (SVAR2) stores from a normalized biallelic BCF."""
+
 import sys
 from pathlib import Path
 
 from genoray import VCF, SparseVar, _core
+
 
 def build(bcf: str, chrom: str, samples: list[str], out_prefix: str, ploidy: int):
     bcf = str(bcf)
@@ -309,16 +321,24 @@ def build(bcf: str, chrom: str, samples: list[str], out_prefix: str, ploidy: int
     SparseVar.from_vcf(f"{out_prefix}.svar", VCF(bcf), "8g", overwrite=True)
     # SVAR 2.0
     _core.run_conversion_pipeline(
-        bcf, "/carter/shared/data/gdc/resources/GRCh38.d1.vd1.fa",
-        [chrom], f"{out_prefix}.svar2", samples,
-        25_000, ploidy, 8, 8 * 1024 * 1024,
+        bcf,
+        "/carter/shared/data/gdc/resources/GRCh38.d1.vd1.fa",
+        [chrom],
+        f"{out_prefix}.svar2",
+        samples,
+        25_000,
+        ploidy,
+        8,
+        8 * 1024 * 1024,
     )
     print(f"built {out_prefix}.svar and {out_prefix}.svar2")
+
 
 if __name__ == "__main__":
     # argv: <norm.bcf> <chrom> <out_prefix>
     bcf, chrom, out_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
     import subprocess
+
     samples = subprocess.run(
         ["bcftools", "query", "-l", bcf], capture_output=True, text=True, check=True
     ).stdout.split()
@@ -347,6 +367,7 @@ Create `tmp/svar2_mvp/validate.py`:
 both the SVAR1 (gvl Dataset over .svar) and SVAR2 (SparseVar2Source over .svar2)
 backends, on a handful of regions x a few samples. Correctness is already proven
 by the test suite; this proves the REAL-DATA plumbing works."""
+
 import sys
 from pathlib import Path
 
@@ -356,6 +377,7 @@ from genoray import SparseVar2
 from genvarloader._dataset._svar2_source import SparseVar2Source
 
 REF = "/carter/shared/data/gdc/resources/GRCh38.d1.vd1.fa"
+
 
 def main(prefix: str, chrom: str):
     # A few small regions (0-based, half-open) in a variant-dense chr21 window.
@@ -367,36 +389,47 @@ def main(prefix: str, chrom: str):
     ref_bytes = _contig_ref(REF, chrom)
     src = SparseVar2Source(sv2)
     hap = src.reconstruct(
-        chrom, regions,
+        chrom,
+        regions,
         np.frombuffer(ref_bytes, np.uint8),
         np.array([0, len(ref_bytes)], np.int64),
-        pad_char=ord("N"), shifts=None, output_length=-1,
+        pad_char=ord("N"),
+        shifts=None,
+        output_length=-1,
     )
     lens = np.asarray(hap.offsets)
-    print(f"[svar2] hap ragged rows={len(lens) - 1} "
-          f"min_len={int(np.diff(lens).min())} max_len={int(np.diff(lens).max())}")
+    print(
+        f"[svar2] hap ragged rows={len(lens) - 1} "
+        f"min_len={int(np.diff(lens).min())} max_len={int(np.diff(lens).max())}"
+    )
     var = sv2.decode(chrom, regions)
     print(f"[svar2] decode variants: {var}")
 
     # --- SVAR1 backend (gvl Dataset over .svar) ---
     import polars as pl
-    bed = pl.DataFrame({
-        "chrom": [chrom] * len(regions),
-        "chromStart": [s for s, _ in regions],
-        "chromEnd": [e for _, e in regions],
-    })
+
+    bed = pl.DataFrame(
+        {
+            "chrom": [chrom] * len(regions),
+            "chromStart": [s for s, _ in regions],
+            "chromEnd": [e for _, e in regions],
+        }
+    )
     ds_path = f"{prefix}.gvl"
     gvl.write(ds_path, bed, variants=f"{prefix}.svar", overwrite=True)
     ds = gvl.Dataset.open(ds_path, reference=REF).with_seqs("haplotypes")
-    seqs = ds[:len(regions), :3]   # a few regions x first 3 samples
+    seqs = ds[: len(regions), :3]  # a few regions x first 3 samples
     print(f"[svar1] gvl haplotypes sample shape/type: {type(seqs)}")
+
 
 def _contig_ref(fasta: str, chrom: str) -> bytes:
     import pysam
+
     return pysam.FastaFile(fasta).fetch(chrom).encode()
 
+
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])   # argv: <prefix> <chrom>
+    main(sys.argv[1], sys.argv[2])  # argv: <prefix> <chrom>
 ```
 
 ```bash
@@ -452,6 +485,7 @@ Create `tmp/svar2_mvp/benchmark.py`:
 """Benchmark SVAR1 (gvl Dataset over .svar) vs SVAR2 (SparseVar2Source over
 .svar2): hap latency, variant latency, store size, for one source prefix.
 Fair workload: ALL samples for a fixed region set. Warm caches, median of N."""
+
 import sys
 import time
 import subprocess
@@ -465,9 +499,12 @@ from genvarloader._dataset._svar2_source import SparseVar2Source
 REF = "/carter/shared/data/gdc/resources/GRCh38.d1.vd1.fa"
 N = 5  # repeats
 
+
 def _contig_ref(fasta, chrom):
     import pysam
+
     return pysam.FastaFile(fasta).fetch(chrom).encode()
+
 
 def _timed(fn, warmup=1):
     for _ in range(warmup):
@@ -479,9 +516,13 @@ def _timed(fn, warmup=1):
         ts.append(time.perf_counter() - t0)
     return median(ts)
 
+
 def main(prefix, chrom):
-    regions = [(20_000_000, 20_001_000), (30_000_000, 30_000_500),
-               (40_000_000, 40_001_000)]
+    regions = [
+        (20_000_000, 20_001_000),
+        (30_000_000, 30_000_500),
+        (40_000_000, 40_001_000),
+    ]
     ref_bytes = _contig_ref(REF, chrom)
     ref_u8 = np.frombuffer(ref_bytes, np.uint8)
     ref_off = np.array([0, len(ref_bytes)], np.int64)
@@ -489,37 +530,55 @@ def main(prefix, chrom):
     # SVAR2 backend
     sv2 = SparseVar2(f"{prefix}.svar2")
     src = SparseVar2Source(sv2)
-    svar2_hap = _timed(lambda: src.reconstruct(
-        chrom, regions, ref_u8, ref_off, pad_char=ord("N"),
-        shifts=None, output_length=-1))
+    svar2_hap = _timed(
+        lambda: src.reconstruct(
+            chrom,
+            regions,
+            ref_u8,
+            ref_off,
+            pad_char=ord("N"),
+            shifts=None,
+            output_length=-1,
+        )
+    )
     svar2_var = _timed(lambda: sv2.decode(chrom, regions))
 
     # SVAR1 backend (all samples, same regions)
     import polars as pl
-    bed = pl.DataFrame({"chrom": [chrom] * len(regions),
-                        "chromStart": [s for s, _ in regions],
-                        "chromEnd": [e for _, e in regions]})
+
+    bed = pl.DataFrame(
+        {
+            "chrom": [chrom] * len(regions),
+            "chromStart": [s for s, _ in regions],
+            "chromEnd": [e for _, e in regions],
+        }
+    )
     ds_path = f"{prefix}.gvl"
     ds = gvl.Dataset.open(ds_path, reference=REF)
     ds_hap = ds.with_seqs("haplotypes")
     ds_var = ds.with_seqs("variants")
     n_s = sv2.n_samples
-    svar1_hap = _timed(lambda: ds_hap[:len(regions), :n_s])
-    svar1_var = _timed(lambda: ds_var[:len(regions), :n_s])
+    svar1_hap = _timed(lambda: ds_hap[: len(regions), :n_s])
+    svar1_var = _timed(lambda: ds_var[: len(regions), :n_s])
 
     def du(path):
-        return subprocess.run(["du", "-sb", path], capture_output=True,
-                              text=True).stdout.split()[0]
+        return subprocess.run(
+            ["du", "-sb", path], capture_output=True, text=True
+        ).stdout.split()[0]
 
-    print(f"source={prefix.split('/')[-1]} chrom={chrom} n_samples={n_s} "
-          f"regions={len(regions)} N={N}")
+    print(
+        f"source={prefix.split('/')[-1]} chrom={chrom} n_samples={n_s} "
+        f"regions={len(regions)} N={N}"
+    )
     print(f"  hap_latency_s   svar1={svar1_hap:.4f}  svar2={svar2_hap:.4f}")
     print(f"  var_latency_s   svar1={svar1_var:.4f}  svar2={svar2_var:.4f}")
-    print(f"  store_bytes     svar1={du(prefix + '.svar')}  "
-          f"svar2={du(prefix + '.svar2')}")
+    print(
+        f"  store_bytes     svar1={du(prefix + '.svar')}  svar2={du(prefix + '.svar2')}"
+    )
+
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])   # argv: <prefix> <chrom>
+    main(sys.argv[1], sys.argv[2])  # argv: <prefix> <chrom>
 ```
 
 - [ ] **Step 2: Run the benchmark for both sources**

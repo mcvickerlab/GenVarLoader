@@ -224,15 +224,17 @@ def normalize_bcf(source_bcf: Path) -> Path:
     filtered = ONE_KG_DIR / "filtered.bcf"
 
     # Step A: left-align
-    result = run_shell([
-        "bcftools",
-        "norm",
-        "-f",
-        str(REF),
-        "-O",
-        "u",
-        str(source_bcf),
-    ])
+    result = run_shell(
+        [
+            "bcftools",
+            "norm",
+            "-f",
+            str(REF),
+            "-O",
+            "u",
+            str(source_bcf),
+        ]
+    )
     logger.info("bcftools norm (left-align) done")
 
     # Step B: atomize + split multiallelics; emit as bgzipped BCF
@@ -303,16 +305,18 @@ Insert below `normalize_bcf`:
 ```python
 def make_pgen(filtered_bcf: Path) -> Path:
     out_prefix = ONE_KG_DIR / "filtered"
-    _ = run_shell([
-        "plink2",
-        "--bcf",
-        str(filtered_bcf),
-        "--make-pgen",
-        "--vcf-half-call",
-        "r",
-        "--out",
-        str(out_prefix),
-    ])
+    _ = run_shell(
+        [
+            "plink2",
+            "--bcf",
+            str(filtered_bcf),
+            "--make-pgen",
+            "--vcf-half-call",
+            "r",
+            "--out",
+            str(out_prefix),
+        ]
+    )
     return out_prefix.with_suffix(".pgen")
 ```
 
@@ -402,28 +406,32 @@ def pick_regions(filtered_bcf: Path) -> Path:
     bed_path = ONE_KG_DIR / "regions.bed"
 
     # Pull (chrom, pos) for chr21/chr22 only via bcftools query.
-    proc = run_shell([
-        "bcftools",
-        "query",
-        "-f",
-        "%CHROM\t%POS\n",
-        "-r",
-        "chr21,chr22",
-        str(filtered_bcf),
-    ])
-    raw = proc.stdout.decode().strip()
-    if not raw:
-        # The Zenodo dataset uses GRCh38 contig names without the "chr" prefix
-        # on some 1KG releases. Fall back to bare contig names.
-        proc = run_shell([
+    proc = run_shell(
+        [
             "bcftools",
             "query",
             "-f",
             "%CHROM\t%POS\n",
             "-r",
-            "21,22",
+            "chr21,chr22",
             str(filtered_bcf),
-        ])
+        ]
+    )
+    raw = proc.stdout.decode().strip()
+    if not raw:
+        # The Zenodo dataset uses GRCh38 contig names without the "chr" prefix
+        # on some 1KG releases. Fall back to bare contig names.
+        proc = run_shell(
+            [
+                "bcftools",
+                "query",
+                "-f",
+                "%CHROM\t%POS\n",
+                "-r",
+                "21,22",
+                str(filtered_bcf),
+            ]
+        )
         raw = proc.stdout.decode().strip()
 
     if not raw:
@@ -453,14 +461,16 @@ def pick_regions(filtered_bcf: Path) -> Path:
     ends = starts + REGION_LEN
     strand = rng.choice(["+", "-"], size=N_REGIONS, replace=True)
 
-    out = pl.DataFrame({
-        "chrom": chosen["chrom"].to_numpy(),
-        "start": starts,
-        "end": ends,
-        "name": ["."] * N_REGIONS,
-        "score": ["."] * N_REGIONS,
-        "strand": strand,
-    })
+    out = pl.DataFrame(
+        {
+            "chrom": chosen["chrom"].to_numpy(),
+            "start": starts,
+            "end": ends,
+            "name": ["."] * N_REGIONS,
+            "score": ["."] * N_REGIONS,
+            "strand": strand,
+        }
+    )
     out.write_csv(bed_path, include_header=False, separator="\t")
     logger.info(f"Wrote {N_REGIONS} regions to {bed_path}")
     return bed_path
@@ -592,12 +602,14 @@ def generate_consensus_fastas(filtered_bcf: Path, bed_path: Path) -> None:
     for row_nr, chrom, start, end in bed.select(
         "index", "chrom", "start", "end"
     ).iter_rows():
-        subseq = run_shell([
-            "samtools",
-            "faidx",
-            str(REF),
-            f"{chrom}:{start + 1}-{end}",
-        ])
+        subseq = run_shell(
+            [
+                "samtools",
+                "faidx",
+                str(REF),
+                f"{chrom}:{start + 1}-{end}",
+            ]
+        )
         for sample in samples:
             for hap in (0, 1):
                 out_fa = CONS_DIR / f"1kg_{sample}_nr{row_nr}_h{hap}.fa"
@@ -679,8 +691,7 @@ pytestmark = pytest.mark.slow
 
 def dataset_bcf():
     return (
-        gvl.Dataset
-        .open(data_dir / "1kg" / "phased_1kg.bcf.gvl", ref, rc_neg=False)
+        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.bcf.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)
@@ -689,8 +700,7 @@ def dataset_bcf():
 
 def dataset_pgen():
     return (
-        gvl.Dataset
-        .open(data_dir / "1kg" / "phased_1kg.pgen.gvl", ref, rc_neg=False)
+        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.pgen.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)
@@ -699,8 +709,7 @@ def dataset_pgen():
 
 def dataset_svar():
     return (
-        gvl.Dataset
-        .open(data_dir / "1kg" / "phased_1kg.svar.gvl", ref, rc_neg=False)
+        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.svar.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)

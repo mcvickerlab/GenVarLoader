@@ -26,8 +26,7 @@ gvl.write(
 
 # 3. Open and configure (chainable fluent API)
 ds = (
-    gvl.Dataset
-    .open("ds.gvl", reference="ref.fa")
+    gvl.Dataset.open("ds.gvl", reference="ref.fa")
     .with_seqs("haplotypes")
     .with_tracks(["signal"])
     .with_insertion_fill(gvl.Repeat5pNormalized())
@@ -74,7 +73,9 @@ Create an SVAR from a normalized VCF/PGEN with `genoray`:
 ```python
 from genoray import VCF, SparseVar
 
-SparseVar.from_vcf("normed.svar", VCF("normed.bcf"), max_mem="4g")  # writes a .svar/ directory
+SparseVar.from_vcf(
+    "normed.svar", VCF("normed.bcf"), max_mem="4g"
+)  # writes a .svar/ directory
 ```
 
 SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=` arg → recorded relative path → recorded absolute path → sibling `*.svar`. See `docs/source/format.md` ("SVAR resolution at open time") and `_dataset/_svar_link.py`. Legacy symlink-based SVAR layouts: run `gvl.migrate_svar_link(path)` once to upgrade.
@@ -277,9 +278,10 @@ In `"flat"` mode the hot path is zero-awkward; the returned containers carry `.d
 
 ```python
 ds_flat = ds.with_output_format("flat")
-result = ds_flat[0:8, :]   # FlatRagged or FlatAnnotatedHaps or FlatVariants
+result = ds_flat[0:8, :]  # FlatRagged or FlatAnnotatedHaps or FlatVariants
 # direct tensorization — no awkward round-trip
 import torch
+
 t = torch.from_numpy(result.data)
 # or convert back
 ragged = result.to_ragged()
@@ -299,19 +301,34 @@ import genvarloader as gvl
 # produced when tracks are active (see gotchas).
 
 # (a) ride-along flank tokens on the "variants" output
-fv = (ds.with_tracks(False).with_seqs("variants").with_output_format("flat")
-        .with_settings(flank_length=128, token_alphabet=sp.DNA.alphabet,
-                       unknown_token=len(sp.DNA)))[0:8]
-fv.flank_tokens          # FlatRagged, shape (b, p, ~v, 2*128), or None if not configured
+fv = (
+    ds.with_tracks(False)
+    .with_seqs("variants")
+    .with_output_format("flat")
+    .with_settings(
+        flank_length=128, token_alphabet=sp.DNA.alphabet, unknown_token=len(sp.DNA)
+    )
+)[0:8]
+fv.flank_tokens  # FlatRagged, shape (b, p, ~v, 2*128), or None if not configured
 
 # (b) per-allele windows: ref as a flanked window, alt as a bare tokenized allele
-fw = (ds.with_tracks(False).with_output_format("flat")
-        .with_seqs("variant-windows",
-                   gvl.VarWindowOpt(flank_length=128, token_alphabet=sp.DNA.alphabet,
-                                    unknown_token=len(sp.DNA), ref="window", alt="allele")))[0:8]
-fw.ref_window            # flanked ref window tokens (two-level token buffer)
-fw.alt                   # bare alt allele tokens (no flanks); fw.alt_window is None
-fw.ref_window.shape      # the window buffer's own shape: (b, p, ~v, ~len)
+fw = (
+    ds.with_tracks(False)
+    .with_output_format("flat")
+    .with_seqs(
+        "variant-windows",
+        gvl.VarWindowOpt(
+            flank_length=128,
+            token_alphabet=sp.DNA.alphabet,
+            unknown_token=len(sp.DNA),
+            ref="window",
+            alt="allele",
+        ),
+    )
+)[0:8]
+fw.ref_window  # flanked ref window tokens (two-level token buffer)
+fw.alt  # bare alt allele tokens (no flanks); fw.alt_window is None
+fw.ref_window.shape  # the window buffer's own shape: (b, p, ~v, ~len)
 ```
 
 **Ride-along `FlatVariants.flank_tokens`** (`with_seqs("variants")` + `with_settings(flank_length=L, token_alphabet=..., unknown_token=...)`): appends a `FlatRagged` of shape `(b, p, ~v, 2L)` to the returned `FlatVariants`. Per variant the buffer holds `[flank5 | flank3]` reference-context tokens (each `L` long). Coordinate rule: `flank5 = [start-L, start)`, `flank3 = [end, end+L)` where `end = start - min(ilen, 0) + 1`. `token_alphabet` (`str`, `bytes`, or `seqpro.NucleotideAlphabet` — e.g. `sp.alphabets.DNA` / `sp.DNA.alphabet`; normalized to `bytes` at the `with_settings`/`build_token_lut` boundary) and `unknown_token` (int) together build a 256-entry byte→token LUT (seqpro-style): each alphabet byte → its 0-based index; every other byte (including `N` and out-of-bounds padding) → `unknown_token`. `flank_length=0`/`None` disables; both `token_alphabet` and `unknown_token` must be set together. Token dtype is `uint8` when max token id ≤ 255, else `int32`; offsets are `int64`. When `with_settings(dummy_variant=...)` is set, each empty `(region, sample, ploid)` group's `flank_tokens` row is a `2L`-long run of `unknown_token`.
@@ -380,10 +397,10 @@ Use `gvl.sites_vcf_to_table(vcf)` → `pl.DataFrame` (bi-allelic SNPs only), the
 ```python
 loader = ds.to_dataloader(
     batch_size=32,
-    mode="double_buffered",   # or "buffered", or None
-    buffer_bytes=2 * 1024**3, # total RAM budget; split across slots in double mode
-    copy=True,                # zero-copy opt-out (default True = safe)
-    heartbeat_seconds=60.0,   # double_buffered: max wait per chunk before liveness check
+    mode="double_buffered",  # or "buffered", or None
+    buffer_bytes=2 * 1024**3,  # total RAM budget; split across slots in double mode
+    copy=True,  # zero-copy opt-out (default True = safe)
+    heartbeat_seconds=60.0,  # double_buffered: max wait per chunk before liveness check
 )
 ```
 

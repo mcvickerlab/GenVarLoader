@@ -182,9 +182,7 @@ class _FlatVariants:
         return _FlatVariants({k: v.reshape(shape) for k, v in self.fields.items()})
 
     def squeeze(self, axis: int | None = None) -> "_FlatVariants":
-        return _FlatVariants(
-            {k: v.squeeze(axis) for k, v in self.fields.items()}
-        )
+        return _FlatVariants({k: v.squeeze(axis) for k, v in self.fields.items()})
 
     def reverse_masked(self, mask: NDArray[np.bool_]) -> "_FlatVariants":
         # Only alt/ref alleles are reverse-complemented; scalar fields unchanged
@@ -257,10 +255,10 @@ from ._dataset._flat_variants import _FlatAlleles as FlatAlleles
 And add the four names to `__all__` (keep alphabetical ordering used in the file):
 
 ```python
-    "FlatAlleles",
-    "FlatAnnotatedHaps",
-    "FlatRagged",
-    "FlatVariants",
+("FlatAlleles",)
+("FlatAnnotatedHaps",)
+("FlatRagged",)
+("FlatVariants",)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -395,6 +393,7 @@ rtk git commit -m "feat(flat): output_format field + with_output_format + QueryV
 ```python
 # tests/dataset/test_flat_mode_equivalence.py
 """flat-mode output, re-wrapped via .to_ragged(), must be byte-identical to ragged mode."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -410,8 +409,10 @@ def _to_plain(obj):
     """Normalize a ragged/annot/flat object into dict of ndarrays for comparison."""
     if isinstance(obj, RaggedAnnotatedHaps):
         return {
-            "haps": np.asarray(obj.haps.data), "haps_off": np.asarray(obj.haps.offsets),
-            "vidx": np.asarray(obj.var_idxs.data), "pos": np.asarray(obj.ref_coords.data),
+            "haps": np.asarray(obj.haps.data),
+            "haps_off": np.asarray(obj.haps.offsets),
+            "vidx": np.asarray(obj.var_idxs.data),
+            "pos": np.asarray(obj.ref_coords.data),
         }
     if isinstance(obj, Ragged):
         return {"data": np.asarray(obj.data), "off": np.asarray(obj.offsets)}
@@ -518,8 +519,8 @@ def _rv_to_lists(rv: RaggedVariants) -> dict:
 @pytest.mark.parametrize("idx", IDX)
 def test_a_flat_variants_to_ragged_matches_ragged(snap_dataset, idx):
     ds = snap_dataset.with_seqs("variants").with_tracks(False)
-    ragged = ds[idx]                                  # RaggedVariants (current path)
-    flat = ds.with_output_format("flat")[idx]         # _FlatVariants
+    ragged = ds[idx]  # RaggedVariants (current path)
+    flat = ds.with_output_format("flat")[idx]  # _FlatVariants
     rewrapped = flat.to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
@@ -546,6 +547,7 @@ Expected: FAIL — flat mode still returns a `RaggedVariants` from the reconstru
 ```python
 # add to python/genvarloader/_dataset/_flat_variants.py
 
+
 @nb.njit(nogil=True, cache=True)
 def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):
     """Concatenate the per-(b*p)-row sparse variant-index slices into one flat
@@ -555,7 +557,9 @@ def _gather_v_idxs(geno_offset_idx, geno_offsets, geno_v_idxs):
     out_offsets[0] = 0
     for i in range(n_rows):
         goi = geno_offset_idx[i]
-        out_offsets[i + 1] = out_offsets[i] + (geno_offsets[goi + 1] - geno_offsets[goi])
+        out_offsets[i + 1] = out_offsets[i] + (
+            geno_offsets[goi + 1] - geno_offsets[goi]
+        )
     total = out_offsets[n_rows]
     v_idxs = np.empty(total, geno_v_idxs.dtype)
     dst = 0
@@ -578,7 +582,9 @@ def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
     seq_offsets[0] = 0
     for i in range(n):
         v = v_idxs[i]
-        seq_offsets[i + 1] = seq_offsets[i] + (allele_offsets[v + 1] - allele_offsets[v])
+        seq_offsets[i + 1] = seq_offsets[i] + (
+            allele_offsets[v + 1] - allele_offsets[v]
+        )
     data = np.empty(seq_offsets[n], np.uint8)
     dst = 0
     for i in range(n):
@@ -649,7 +655,7 @@ def get_variants_flat(haps, idx) -> "_FlatVariants":
     # get_haps_and_shifts (not the bare __call__). Replicate: if keep is supplied,
     # compact with it here. See Step 3b for how keep is threaded.
 
-    n_rows = row_offsets.shape[0]                       # b*p + 1
+    n_rows = row_offsets.shape[0]  # b*p + 1
     b = goi_flat.shape[0] // ploidy
     shape = (b, ploidy, None)
 
@@ -685,7 +691,9 @@ def get_variants_flat(haps, idx) -> "_FlatVariants":
         # if AF/exonic filtered, dosage must be compacted with the same keep mask
         # — keep dosage gather BEFORE compaction OR carry keep; simplest: gather
         # dosage parallel to the UNfiltered v_idxs then apply the same _compact_keep.
-        fields["dosage"] = _Flat.from_offsets(np.ascontiguousarray(dos), shape, row_offsets)
+        fields["dosage"] = _Flat.from_offsets(
+            np.ascontiguousarray(dos), shape, row_offsets
+        )
 
     # remaining info fields
     for k in haps.var_fields:
@@ -707,21 +715,39 @@ def get_variants_flat(haps, idx) -> "_FlatVariants":
 In `_haps.py` `Haps.__call__` (line 502), add `flat: bool = False`:
 
 ```python
-    def __call__(self, idx, r_idx, regions, output_length, jitter, rng, deterministic,
-                 splice_plan=None, flat: bool = False):
-        if issubclass(self.kind, RaggedVariants):
-            if splice_plan is not None:
-                raise NotImplementedError("Spliced output is not supported for RaggedVariants.")
-            if flat:
-                from ._flat_variants import get_variants_flat
-                return cast(_H, get_variants_flat(self, idx))
-            ragv = self._get_variants(idx=idx, regions=None, shifts=None)
-            return cast(_H, ragv)
-        else:
-            haps, *_ = self.get_haps_and_shifts(idx=idx, regions=regions,
-                output_length=output_length, rng=rng, deterministic=deterministic,
-                splice_plan=splice_plan)
-            return haps
+def __call__(
+    self,
+    idx,
+    r_idx,
+    regions,
+    output_length,
+    jitter,
+    rng,
+    deterministic,
+    splice_plan=None,
+    flat: bool = False,
+):
+    if issubclass(self.kind, RaggedVariants):
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Spliced output is not supported for RaggedVariants."
+            )
+        if flat:
+            from ._flat_variants import get_variants_flat
+
+            return cast(_H, get_variants_flat(self, idx))
+        ragv = self._get_variants(idx=idx, regions=None, shifts=None)
+        return cast(_H, ragv)
+    else:
+        haps, *_ = self.get_haps_and_shifts(
+            idx=idx,
+            regions=regions,
+            output_length=output_length,
+            rng=rng,
+            deterministic=deterministic,
+            splice_plan=splice_plan,
+        )
+        return haps
 ```
 
 (For exonic filter parity, also branch in `get_haps_and_shifts` where `_get_variants` is called with `keep`/`keep_offsets`: when `flat`, call `get_variants_flat(self, idx, keep=req.keep, keep_offsets=req.keep_offsets)` and add those optional params to `get_variants_flat` applying `_compact_keep`. Only needed if the variants-kind path flows through `get_haps_and_shifts` — verify which call site the variants output uses; the bare `__call__` path is the primary one.)
@@ -731,11 +757,16 @@ Add `flat: bool = False` to the `Reconstructor` protocol `__call__` and to each 
 In `_query.py` `_getitem_unspliced` (line 145) and `_getitem_spliced`, pass `flat=view.flat_output`:
 
 ```python
-    recon = view.recon(
-        idx=ds_idx, r_idx=r_idx, regions=regions, output_length=view.output_length,
-        jitter=view.jitter, rng=view.rng, deterministic=view.deterministic,
-        flat=view.flat_output,
-    )
+recon = view.recon(
+    idx=ds_idx,
+    r_idx=r_idx,
+    regions=regions,
+    output_length=view.output_length,
+    jitter=view.jitter,
+    rng=view.rng,
+    deterministic=view.deterministic,
+    flat=view.flat_output,
+)
 ```
 
 - [ ] **Step 3c: Teach `_query.py` to carry `_FlatVariants` through rc / boundary**
@@ -743,9 +774,10 @@ In `_query.py` `_getitem_unspliced` (line 145) and `_getitem_spliced`, pass `fla
 In `reverse_complement_ragged` (line 335), add a branch before `RaggedVariants`:
 
 ```python
-    from ._flat_variants import _FlatVariants
-    if isinstance(rag, _FlatVariants):
-        return rag.reverse_masked(to_rc)
+from ._flat_variants import _FlatVariants
+
+if isinstance(rag, _FlatVariants):
+    return rag.reverse_masked(to_rc)
 ```
 
 Add the overload signature too. In `getitem`, the flat branch (Task 4) already leaves non-`(_Flat, _FlatAnnotatedHaps)` objects alone — but `_FlatVariants` must also bypass `to_ragged()` in ragged mode? No: in **ragged** mode the variant recon returns `RaggedVariants` (flat=False), so nothing changes. In **flat** mode the recon returns `_FlatVariants` and the `if not view.flat_output:` guard skips conversion — so `_FlatVariants` flows straight out. `reshape`/`squeeze` apply via `_FlatVariants` methods. Confirm `squeeze` matches `RaggedVariants.squeeze` (→ `self[0]`): `_FlatVariants.squeeze(0)` delegates to `_Flat.squeeze(0)` / `_FlatAlleles` (add a `squeeze` to `_FlatAlleles` that drops the leading fixed axis). The equivalence test on a scalar `idx` (which triggers squeeze) is the gate.
@@ -753,14 +785,15 @@ Add the overload signature too. In `getitem`, the flat branch (Task 4) already l
 - [ ] **Step 3d: Add `squeeze` to `_FlatAlleles`**
 
 ```python
-    def squeeze(self, axis: int | None = None) -> "_FlatAlleles":
-        fixed = [d for d in self.shape if d is not None]
-        if axis is None:
-            fixed = [d for d in fixed if d != 1]
-        else:
-            del fixed[axis]
-        return _FlatAlleles(self.byte_data, self.seq_offsets, self.var_offsets,
-                            (*fixed, None))
+def squeeze(self, axis: int | None = None) -> "_FlatAlleles":
+    fixed = [d for d in self.shape if d is not None]
+    if axis is None:
+        fixed = [d for d in fixed if d != 1]
+    else:
+        del fixed[axis]
+    return _FlatAlleles(
+        self.byte_data, self.seq_offsets, self.var_offsets, (*fixed, None)
+    )
 ```
 
 - [ ] **Step 4: Run the variant equivalence tests**
@@ -797,10 +830,14 @@ Add a test that runs `ds.with_seqs("variants").with_tracks(False).with_output_fo
 
 ```python
 def test_flat_variants_decode_has_no_awkward(snap_dataset, awkward_getitem_counter):
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_output_format("flat")
+    ds = (
+        snap_dataset.with_seqs("variants").with_tracks(False).with_output_format("flat")
+    )
     with awkward_getitem_counter() as count:
         _ = ds[(np.arange(4),)]
-    assert count.value == 0, f"awkward.__getitem__ called {count.value}x in flat variant decode"
+    assert count.value == 0, (
+        f"awkward.__getitem__ called {count.value}x in flat variant decode"
+    )
 ```
 
 - [ ] **Step 3: Run to verify it fails (or passes)**

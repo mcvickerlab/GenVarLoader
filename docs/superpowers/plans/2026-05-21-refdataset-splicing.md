@@ -228,8 +228,7 @@ class SpliceMap:
         """
         if isinstance(splice_info, str):
             sp_bed = (
-                full_bed
-                .rename({splice_info: "splice_id"})
+                full_bed.rename({splice_info: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all())
@@ -241,8 +240,7 @@ class SpliceMap:
                     "names for splice IDs and element ordering."
                 )
             sp_bed = (
-                full_bed
-                .rename({splice_info[0]: "splice_id"})
+                full_bed.rename({splice_info[0]: "splice_id"})
                 .with_row_index()
                 .group_by("splice_id", maintain_order=True)
                 .agg(pl.all().sort_by(splice_info[1]))
@@ -390,13 +388,15 @@ Add a temporary script `/tmp/smoke_splicemap.py`:
 import polars as pl
 from genvarloader._dataset._splice import SpliceMap
 
-bed = pl.DataFrame({
-    "chrom": ["chr1"] * 4,
-    "chromStart": [0, 100, 200, 300],
-    "chromEnd": [10, 110, 210, 310],
-    "transcript_id": ["T1", "T1", "T2", "T2"],
-    "exon_number": [1, 2, 1, 2],
-})
+bed = pl.DataFrame(
+    {
+        "chrom": ["chr1"] * 4,
+        "chromStart": [0, 100, 200, 300],
+        "chromEnd": [10, 110, 210, 310],
+        "transcript_id": ["T1", "T1", "T2", "T2"],
+        "exon_number": [1, 2, 1, 2],
+    }
+)
 sm, sp_bed = SpliceMap.from_bed("transcript_id", bed)
 assert sm.n_rows == 2
 print("ok", sm.n_rows, sp_bed.height)
@@ -700,11 +700,13 @@ Append to `tests/test_ref_ds.py`:
 
 ```python
 def test_refdataset_unspliced_defaults(reference: gvl.Reference):
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 100],
-        "chromEnd": [100, 150],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [100, 150],
+        }
+    )
     ds = gvl.RefDataset(reference, bed)
     assert ds.is_spliced is False
     assert ds.splice_info is None
@@ -852,14 +854,16 @@ def reference() -> gvl.Reference:
 @pytest.fixture
 def two_transcript_bed() -> pl.DataFrame:
     # Two transcripts, both on '+' strand. T1 has 2 exons; T2 has 1 exon.
-    return pl.DataFrame({
-        "chrom": ["chr1", "chr1", "chr1"],
-        "chromStart": [1000, 2000, 5000],
-        "chromEnd": [1010, 2010, 5010],
-        "strand": [1, 1, 1],
-        "transcript_id": ["T1", "T1", "T2"],
-        "exon_number": [1, 2, 1],
-    })
+    return pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [1000, 2000, 5000],
+            "chromEnd": [1010, 2010, 5010],
+            "strand": [1, 1, 1],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
 
 
 def test_spliced_single_col(reference: gvl.Reference, two_transcript_bed: pl.DataFrame):
@@ -940,14 +944,16 @@ Append to `tests/test_ref_ds_splicing.py`:
 ```python
 def test_spliced_two_col_reorders_exons(reference: gvl.Reference):
     # Exons stored out-of-order; exon_number column dictates splice order.
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [2000, 1000],
-        "chromEnd": [2010, 1010],
-        "strand": [1, 1],
-        "transcript_id": ["T1", "T1"],
-        "exon_number": [2, 1],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [2000, 1000],
+            "chromEnd": [2010, 1010],
+            "strand": [1, 1],
+            "transcript_id": ["T1", "T1"],
+            "exon_number": [2, 1],
+        }
+    )
 
     ds = gvl.RefDataset(reference, bed, splice_info=("transcript_id", "exon_number"))
     spliced = ds[0]
@@ -960,14 +966,16 @@ def test_spliced_two_col_reorders_exons(reference: gvl.Reference):
 
 def test_spliced_mixed_strand(reference: gvl.Reference):
     # T1 has both exons on '-' strand; rc_neg=True means per-exon RC, then concat.
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [1000, 2000],
-        "chromEnd": [1010, 2010],
-        "strand": [-1, -1],
-        "transcript_id": ["T1", "T1"],
-        "exon_number": [1, 2],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [1000, 2000],
+            "chromEnd": [1010, 2010],
+            "strand": [-1, -1],
+            "transcript_id": ["T1", "T1"],
+            "exon_number": [1, 2],
+        }
+    )
 
     ds = gvl.RefDataset(reference, bed, splice_info="transcript_id")
     spliced = ds[0]

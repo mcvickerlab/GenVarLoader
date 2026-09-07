@@ -244,7 +244,7 @@ pub fn reconstruct_haplotypes_fused<'py>(
 out_data, out_offsets = gvl_rust.reconstruct_haplotypes_fused(
     regions=req.regions,
     geno_offset_idx=req.geno_offset_idx,
-    geno_offsets=self.genotypes.offsets,   # already (2,n) or 1-D; Rust normalizes
+    geno_offsets=self.genotypes.offsets,  # already (2,n) or 1-D; Rust normalizes
     geno_v_idxs=self.genotypes.data,
     v_starts=self.variants.start,
     ilens=self.variants.ilen,

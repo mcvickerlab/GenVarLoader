@@ -199,9 +199,11 @@ pytestmark = pytest.mark.parity
 
 
 def test_reference_fetch_parity(reference, monkeypatch):
-    ref = _ref_mod.Reference.from_path_and_contigs(reference, None) \
-        if hasattr(_ref_mod.Reference, "from_path_and_contigs") \
+    ref = (
+        _ref_mod.Reference.from_path_and_contigs(reference, None)
+        if hasattr(_ref_mod.Reference, "from_path_and_contigs")
         else _ref_mod.Reference.from_path(reference)
+    )
     contigs = ref.contigs[:1]
     starts = np.array([0], dtype=np.int64)
     ends = np.array([50], dtype=np.int64)
@@ -226,9 +228,7 @@ def test_reference_fetch_parity(reference, monkeypatch):
         _dispatch._REGISTRY["get_reference"] = orig
 
     assert rust_calls > 0, "rust get_reference never invoked via fetch — vacuous"
-    np.testing.assert_array_equal(
-        np.asarray(out_numba.data), np.asarray(out_rust.data)
-    )
+    np.testing.assert_array_equal(np.asarray(out_numba.data), np.asarray(out_rust.data))
     np.testing.assert_array_equal(
         np.asarray(out_numba.offsets, np.int64),
         np.asarray(out_rust.offsets, np.int64),
@@ -249,21 +249,19 @@ Expected: FAIL — `rust get_reference never invoked via fetch` (fetch currently
 In `_reference.py`, replace the kernel-selection block inside `fetch` (currently lines 135-148) with a call to the dispatched `get_reference`, assembling a `(n,3)` regions array:
 
 ```python
-        lengths = ends - starts
-        offsets = lengths_to_offsets(lengths)
-        regions = np.stack(
-            [
-                np.asarray(c_idxs, np.int32),
-                np.asarray(starts, np.int32),
-                np.asarray(ends, np.int32),
-            ],
-            axis=1,
-        )
-        seqs = get_reference(
-            regions, offsets, self.reference, self.offsets, int(self.pad_char)
-        )
-        seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
-        return seqs
+lengths = ends - starts
+offsets = lengths_to_offsets(lengths)
+regions = np.stack(
+    [
+        np.asarray(c_idxs, np.int32),
+        np.asarray(starts, np.int32),
+        np.asarray(ends, np.int32),
+    ],
+    axis=1,
+)
+seqs = get_reference(regions, offsets, self.reference, self.offsets, int(self.pad_char))
+seqs = Ragged.from_offsets(seqs.view("S1"), (len(contigs), None), offsets)
+return seqs
 ```
 
 (`get_reference` is defined later in the same module; it is module-level, so the forward reference resolves at call time.)
@@ -333,24 +331,25 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 In `tests/parity/test_haplotypes_dataset_parity.py::test_annotated_haplotypes_mode_dataset_parity`, change the spy from the dispatched `reconstruct_haplotypes_from_sparse` to the new module-level fused entry, mirroring `test_haplotypes_mode_dataset_parity` (which spies `_haps_mod.reconstruct_haplotypes_fused`):
 
 ```python
-    import genvarloader._dataset._haps as _haps_mod
-    orig_fused = _haps_mod.reconstruct_annotated_haplotypes_fused
-    calls = {"n": 0}
+import genvarloader._dataset._haps as _haps_mod
 
-    def _spy_fused(*a, **k):
-        calls["n"] += 1
-        return orig_fused(*a, **k)
+orig_fused = _haps_mod.reconstruct_annotated_haplotypes_fused
+calls = {"n": 0}
 
-    monkeypatch.setattr(
-        _haps_mod, "reconstruct_annotated_haplotypes_fused", _spy_fused
-    )
-    monkeypatch.setenv("GVL_BACKEND", "rust")
-    out_rust = ds[:, :]
-    rust_call_count = calls["n"]
-    monkeypatch.setenv("GVL_BACKEND", "numba")
-    out_numba = ds[:, :]
-    assert calls["n"] == rust_call_count, "fused spy fired during numba read"
-    assert calls["n"] > 0, "rust annotated fused entry never invoked — vacuous"
+
+def _spy_fused(*a, **k):
+    calls["n"] += 1
+    return orig_fused(*a, **k)
+
+
+monkeypatch.setattr(_haps_mod, "reconstruct_annotated_haplotypes_fused", _spy_fused)
+monkeypatch.setenv("GVL_BACKEND", "rust")
+out_rust = ds[:, :]
+rust_call_count = calls["n"]
+monkeypatch.setenv("GVL_BACKEND", "numba")
+out_numba = ds[:, :]
+assert calls["n"] == rust_call_count, "fused spy fired during numba read"
+assert calls["n"] > 0, "rust annotated fused entry never invoked — vacuous"
 ```
 Keep the existing three-array byte-identical comparison (`_compare_ragged_bytes` + two `_compare_ragged_int`).
 
@@ -444,6 +443,7 @@ Create `tests/parity/test_spliced_haplotypes_parity.py`. It needs a spliced data
 
 ```python
 """Spliced-haplotypes dataset parity backstop (fused rust splice entry)."""
+
 from __future__ import annotations
 import numpy as np
 import pytest
@@ -470,9 +470,7 @@ def test_spliced_haplotypes_parity(spliced_gvl, reference, monkeypatch):
     out_numba = ds[:, :]
     assert calls["n"] == rc, "fused splice spy fired during numba read"
     assert calls["n"] > 0, "rust spliced fused entry never invoked — vacuous"
-    np.testing.assert_array_equal(
-        np.asarray(out_numba.data), np.asarray(out_rust.data)
-    )
+    np.testing.assert_array_equal(np.asarray(out_numba.data), np.asarray(out_rust.data))
     np.testing.assert_array_equal(
         np.asarray(out_numba.offsets, np.int64),
         np.asarray(out_rust.offsets, np.int64),

@@ -86,30 +86,28 @@ Expected: FAIL — `ValueError: len(r_idx)=7 is not a multiple of batch_size=3. 
 In `python/genvarloader/_chunked.py`, replace the body of `__init__` from the `n = len(r_idx)` line through the `batch_totals = per_inst.reshape(-1, batch_size).sum(-1)` line (currently lines 37-50):
 
 ```python
-        if len(r_idx) != len(s_idx):
-            raise ValueError("r_idx and s_idx must have the same length")
-        n = len(r_idx)
-        self.r_idx = np.asarray(r_idx)
-        self.s_idx = np.asarray(s_idx)
-        self.batch_size = batch_size
-        self.bytes_per_instance = bytes_per_instance
-        self.slot_bytes = int(slot_bytes)
-        self._n = n
+if len(r_idx) != len(s_idx):
+    raise ValueError("r_idx and s_idx must have the same length")
+n = len(r_idx)
+self.r_idx = np.asarray(r_idx)
+self.s_idx = np.asarray(s_idx)
+self.batch_size = batch_size
+self.bytes_per_instance = bytes_per_instance
+self.slot_bytes = int(slot_bytes)
+self._n = n
 
-        # Per-instance byte cost in epoch order, grouped into mini-batches. The
-        # final batch may be partial (drop_last=False); its bytes are summed into
-        # a trailing batch_totals entry so chunk packing and peak-byte sizing
-        # account for it like any other batch.
-        per_inst = bytes_per_instance[self.r_idx, self.s_idx].astype(np.int64)
-        n_full = n // batch_size
-        full_totals = (
-            per_inst[: n_full * batch_size].reshape(n_full, batch_size).sum(-1)
-        )
-        remainder = per_inst[n_full * batch_size :]
-        if remainder.size:
-            batch_totals = np.concatenate([full_totals, remainder.sum(keepdims=True)])
-        else:
-            batch_totals = full_totals
+# Per-instance byte cost in epoch order, grouped into mini-batches. The
+# final batch may be partial (drop_last=False); its bytes are summed into
+# a trailing batch_totals entry so chunk packing and peak-byte sizing
+# account for it like any other batch.
+per_inst = bytes_per_instance[self.r_idx, self.s_idx].astype(np.int64)
+n_full = n // batch_size
+full_totals = per_inst[: n_full * batch_size].reshape(n_full, batch_size).sum(-1)
+remainder = per_inst[n_full * batch_size :]
+if remainder.size:
+    batch_totals = np.concatenate([full_totals, remainder.sum(keepdims=True)])
+else:
+    batch_totals = full_totals
 ```
 
 Note: the `too_big` check and `_compute_peak_chunk_bytes()` that follow already read `batch_totals`, so they work unchanged with the partial entry included.
@@ -254,9 +252,7 @@ def test_buffered_modes_respect_drop_last(small_gvl_ds, mode, drop_last):
     bs = next((c for c in range(2, N) if N % c), 1)
     assert N % bs != 0, "need an indivisible batch_size to exercise drop_last"
 
-    dl = ds.to_dataloader(
-        batch_size=bs, shuffle=False, drop_last=drop_last, mode=mode
-    )
+    dl = ds.to_dataloader(batch_size=bs, shuffle=False, drop_last=drop_last, mode=mode)
     batches = list(dl)
     expected = N // bs if drop_last else math.ceil(N / bs)
     assert len(batches) == expected
