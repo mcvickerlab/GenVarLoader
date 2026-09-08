@@ -831,9 +831,27 @@ class Haps(Reconstructor[_H]):
         Returns shape (len(idx) * ploidy,) of int64. O(|selected variants|);
         does not touch allele payload bytes — only the RaggedAlleles offsets.
         """
+        v_idxs, group_offsets = self._selected_groups(idx)
+        offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
+        v_lens = (offsets[v_idxs + 1] - offsets[v_idxs]).astype(np.int64)
+        return self._segment_sum(v_lens, group_offsets)
+
+    def _selected_groups(
+        self, idx: NDArray[np.integer]
+    ) -> tuple[NDArray[np.integer], NDArray[np.int64]]:
+        """The AF-filtered variant indices and per-group offsets for ``idx``.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+
+        Returns:
+            ``(v_idxs, group_offsets)``: the selected variant indices, packed
+            group-major, and their ``b * ploidy + 1`` group offsets.
+        """
         r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
         genos = cast(Ragged[V_IDX_TYPE], self.genotypes[r, s]).to_packed()
         v_idxs = genos.data
+        group_offsets = np.asarray(genos.offsets, np.int64)
 
         if self.min_af is not None or self.max_af is not None:
             geno_afs = self.variants.info["AF"][v_idxs]
@@ -842,27 +860,159 @@ class Haps(Reconstructor[_H]):
                 keep &= geno_afs >= self.min_af
             if self.max_af is not None:
                 keep &= geno_afs <= self.max_af
-            # Filter variants per group using the flat boolean mask.
-            # Build new offsets via cumsum-indexing (handles empty groups correctly).
-            filtered_data = genos.data[keep]
-            keep_int = keep.astype(np.int64)
-            csum = np.concatenate([[np.int64(0)], np.cumsum(keep_int, dtype=np.int64)])
-            new_offsets = csum[np.asarray(genos.offsets, np.int64)]
-            genos = Ragged.from_offsets(
-                filtered_data, genos.shape, new_offsets
-            ).to_packed()
-            v_idxs = genos.data
+            keep_csum = np.concatenate(
+                [[np.int64(0)], np.cumsum(keep.astype(np.int64), dtype=np.int64)]
+            )
+            group_offsets = keep_csum[group_offsets]
+            v_idxs = v_idxs[keep]
 
-        offsets = getattr(self.variants, kind).offsets  # int-typed, length n_variants+1
-        v_lens = (offsets[v_idxs + 1] - offsets[v_idxs]).astype(np.int64)
-        # genos.offsets has length b*p + 1 (one offset per (instance, ploid)
-        # group). Segment-sum v_lens per group via a cumulative sum: this
-        # handles empty groups correctly (np.add.reduceat would index
-        # out-of-bounds / mishandle zero-length groups when a group's start
-        # offset equals len(v_lens)).
-        group_offsets = np.asarray(genos.offsets, dtype=np.int64)
-        csum = np.concatenate([[0], np.cumsum(v_lens, dtype=np.int64)])
+        return v_idxs, group_offsets
+
+    @staticmethod
+    def _segment_sum(
+        per_variant: NDArray[np.int64], group_offsets: NDArray[np.int64]
+    ) -> NDArray[np.int64]:
+        """Sum ``per_variant`` within each group delimited by ``group_offsets``.
+
+        Uses cumsum-indexing rather than :func:`np.add.reduceat`, which
+        mishandles zero-length groups and indexes out of bounds when a group
+        starts at ``len(per_variant)``.
+
+        Args:
+            per_variant: One value per selected variant.
+            group_offsets: Group boundaries, length ``n_groups + 1``.
+
+        Returns:
+            One sum per group, shape ``(n_groups,)`` int64.
+        """
+        csum = np.concatenate([[np.int64(0)], np.cumsum(per_variant, dtype=np.int64)])
         return csum[group_offsets[1:]] - csum[group_offsets[:-1]]
+
+    def measure_variant_payload(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]:
+        """Per-instance variant count, ref-window span, and ALT-allele byte sum.
+
+        The single counting entry point behind
+        ``Dataset._output_bytes_per_instance``'s ``"variants"`` and
+        ``"variant-windows"`` branches, so those branches never have to know
+        which backend they are sizing. See :class:`Svar2Haps` for the read-bound
+        sibling implementation.
+
+        ``ref_span_sum`` and ``alt_bytes_sum`` are taken *after* the
+        ``min_af``/``max_af`` filter; ``n_vars_total`` is the *raw* on-disk
+        count, matching :meth:`Dataset.n_variants`. That asymmetry is
+        deliberate -- it reproduces the accounting
+        ``_output_bytes_per_instance`` has always used. Under AF filtering the
+        raw count over-charges the scalar fields, and that over-charge is
+        currently the only thing covering a constant per-offsets-array deficit
+        elsewhere in the estimate (see #362); tightening it here turns
+        ``tests/unit/dataset/test_output_bytes_dummy_variant.py`` red.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(len(idx), 3)`` array of ``(contig_id, start, end)``.
+                Unused here -- SVAR1 genotypes are already stored per region --
+                and accepted only to match the role's signature.
+
+        Returns:
+            ``(n_vars_total, ref_span_sum, alt_bytes_sum)``, each shape
+            ``(len(idx),)`` int64:
+
+            - ``n_vars_total``: raw on-disk variant count per instance, summed
+              over ploidy. Under ``unphased_union`` that naive sum *is* the
+              union count contract (no dedup), so no separate fold is needed.
+            - ``ref_span_sum``: sum of ``1 + max(-ilen, 0)`` (the ``ref="window"``
+              per-variant span) over the instance's variants.
+            - ``alt_bytes_sum``: sum of bare ALT-allele byte lengths over the
+              instance's variants.
+        """
+        del regions  # SVAR1 genotypes are already grouped by region
+        ploidy = self.stored_ploidy
+        b = len(idx)
+        v_idxs, group_offsets = self._selected_groups(idx)
+
+        r, s_ = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
+        n_vars_total = self.n_variants[r, s_].astype(np.int64).sum(-1)
+
+        ilen_sel = np.asarray(self.variants.ilen)[v_idxs].astype(np.int64)
+        ref_span_sum = (
+            self._segment_sum(1 + np.maximum(-ilen_sel, 0), group_offsets)
+            .reshape(b, ploidy)
+            .sum(-1)
+        )
+
+        alt_offsets = self.variants.alt.offsets
+        alt_lens = (alt_offsets[v_idxs + 1] - alt_offsets[v_idxs]).astype(np.int64)
+        alt_bytes_sum = (
+            self._segment_sum(alt_lens, group_offsets).reshape(b, ploidy).sum(-1)
+        )
+
+        return n_vars_total, ref_span_sum, alt_bytes_sum
+
+    def ref_allele_bytes(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> NDArray[np.int64]:
+        """Per-instance sum of bare REF allele byte lengths.
+
+        Distinct from :meth:`measure_variant_payload`'s ``ref_span_sum``, which
+        measures the ``ref="window"`` reference-genome span. Only callable when
+        :attr:`has_ref_alleles` is true; callers must gate on it.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(len(idx), 3)`` array of ``(contig_id, start, end)``.
+                Unused here; accepted to match the role's signature.
+
+        Returns:
+            Shape ``(len(idx),)`` int64, summed over ploidy.
+        """
+        del regions  # SVAR1 genotypes are already grouped by region
+        return (
+            self._allele_bytes_sum(idx, "ref").reshape(-1, self.stored_ploidy).sum(-1)
+        )
+
+    def prepare_var_fields(self, var_fields: list[str]) -> "Haps[_H]":
+        """Record ``var_fields``, loading whatever storage they need.
+
+        SVAR1 keeps its INFO columns, dosages and custom FORMAT fields in
+        separate on-disk arrays that are memmapped on demand, so a field
+        requested after open time has to be loaded before it can be read.
+        Callers validate membership in ``available_var_fields`` first.
+
+        Args:
+            var_fields: The variant fields the dataset should emit.
+
+        Returns:
+            A new reconstructor with ``var_fields`` set and its backing
+            storage loaded.
+        """
+        # Discover custom FORMAT fields so we don't try to load them as INFO.
+        custom_fmt = _svar_format_fields(self.variants.path.parent)
+        # Lazily load any newly-requested info columns into the existing
+        # _Variants struct (mutates self.variants.info in place).
+        builtin = {"alt", "ilen", "start", "ref", "dosage"}
+        new_info_fields = [
+            f
+            for f in var_fields
+            if f not in builtin and f not in self.variants.info and f not in custom_fmt
+        ]
+        if new_info_fields:
+            self.variants.load_info(new_info_fields)
+
+        haps = self
+        # Lazily memmap dosages if newly requested.
+        if "dosage" in var_fields and haps.dosages is None:
+            haps = _lazy_load_dosages(haps)
+        # Lazily memmap custom FORMAT fields if newly requested.
+        new_custom_fields = {
+            f: custom_fmt[f]
+            for f in var_fields
+            if f in custom_fmt and f not in haps.var_field_data
+        }
+        if new_custom_fields:
+            haps = _lazy_load_custom_fields(haps, new_custom_fields)
+        return replace(haps, var_fields=var_fields)
 
     def _reconstruct_haplotypes(
         self,
@@ -1166,3 +1316,103 @@ class Haps(Reconstructor[_H]):
             keep_perm,
             keep_offsets_perm,
         )
+
+
+def _lazy_load_dosages(haps: Haps) -> Haps:
+    """Open the dosages memmap for a Haps that didn't request them at open time.
+
+    Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns
+    a new ``Haps`` with ``dosages`` populated (does NOT mutate the input).
+    """
+    import json as _json
+
+    from genoray._types import DOSAGE_TYPE
+
+    from ._svar_link import _resolve_svar
+    from ._write import Metadata
+
+    path = haps.path
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    if not svar_meta_path.exists():
+        raise ValueError(
+            "Dosage requested but this dataset is not SVAR-backed; no dosages.npy possible."
+        )
+
+    with open(svar_meta_path) as f:
+        svar_meta = _json.load(f)
+    shape = tuple(svar_meta["shape"])
+    dtype = np.dtype(svar_meta["dtype"])
+
+    offset_path = path / "genotypes" / "offsets.npy"
+
+    # Resolve the SVAR directory the same way Haps.from_path did. Dataset does
+    # not retain Metadata, so re-read metadata.json from disk.
+    meta = Metadata.model_validate_json((path / "metadata.json").read_text())
+    svar_link = meta.svar_link
+    if svar_link is not None:
+        svar_path = _resolve_svar(path, svar_link, None)
+    else:
+        legacy_link = path / "genotypes" / "link.svar"
+        svar_path = legacy_link.resolve()
+
+    dosage_path = svar_path / "dosages.npy"
+    if not dosage_path.exists():
+        raise ValueError(
+            f"Dosage requested but {dosage_path} does not exist. "
+            f"Check the SVAR was built with dosages."
+        )
+
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
+    rag_shape = (*shape[1:], None)
+    dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
+    return replace(haps, dosages=dosages)
+
+
+def _lazy_load_custom_fields(
+    haps: Haps,
+    new_fields: dict[str, np.dtype],
+) -> Haps:
+    """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into ``haps.var_field_data`` for fields that were not loaded at open time.
+
+    ``new_fields`` maps field name → numpy dtype (already confirmed present in
+    the SVAR metadata). Returns a new ``Haps`` with updated ``var_field_data``.
+    """
+    import json as _json
+
+    path = haps.path
+    svar_meta_path = path / "genotypes" / "svar_meta.json"
+    if not svar_meta_path.exists():
+        raise ValueError(
+            "Custom FORMAT fields requested but this dataset is not SVAR-backed."
+        )
+
+    with open(svar_meta_path) as f:
+        svar_meta = _json.load(f)
+    shape = tuple(svar_meta["shape"])
+    dtype = np.dtype(svar_meta["dtype"])
+
+    offset_path = path / "genotypes" / "offsets.npy"
+
+    # The resolved SVAR directory is already embedded in haps.variants.path
+    # (which was set to <svar_path>/index.arrow by Haps.from_path, respecting any
+    # svar_override). Using .parent avoids re-resolving from metadata and correctly
+    # handles the svar_override case that the legacy link.svar branch would miss.
+    svar_path = haps.variants.path.parent
+
+    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
+    rag_shape = (*shape[1:], None)
+
+    updated_var_field_data = dict(haps.var_field_data)
+    for name, ftype in new_fields.items():
+        field_path = svar_path / f"{name}.npy"
+        if not field_path.exists():
+            raise ValueError(
+                f"Custom FORMAT field '{name}' registered in SVAR metadata but "
+                f"{field_path} does not exist."
+            )
+        field_mm = np.memmap(field_path, dtype=ftype, mode="r")
+        updated_var_field_data[name] = Ragged.from_offsets(
+            field_mm, rag_shape, offsets.reshape(2, -1)
+        )
+    return replace(haps, var_field_data=updated_var_field_data)

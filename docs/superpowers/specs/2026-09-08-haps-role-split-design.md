@@ -147,21 +147,29 @@ correct bug report.
 If #356 has not merged when the final layer is written, that layer deletes the
 `Ragged` placeholder instead; the end state is identical either way.
 
-## Implementation: a 4-PR stack
+## Implementation: a 5-PR stack
 
-Each layer is independently green and independently reviewable.
+Each layer is independently green and independently reviewable. (Planned as
+four; the query surface split cleanly into a cheap "read scalars off the
+reconstructor" layer and a heavier "measure the variant payload" layer, and
+splitting them kept each diff reviewable.)
 
 1. `fix/svar2-haplotype-lengths-indels` — override `_haplotype_ilens` on
    `Svar2Haps` (delegating to `_haplotype_diffs`) plus a regression test
    asserting `haplotype_lengths()` matches reconstructed lengths on an
    indel-bearing SVAR2 fixture. Small, valuable on its own, merges first.
-2. `refactor/haps-query-surface` — add the query surface listed above to `Haps`,
-   implement on both classes, switch every caller off SVAR1 internals. No
-   rename yet, so the diff is readable. The `isinstance(_, Svar2Haps)` forks
-   delete here.
-3. `refactor/haps-role-abc` — rename `Haps` -> `Svar1Haps`, hoist the ABC into
-   `Haps`, reparent `Svar2Haps` to it. Mostly mechanical.
-4. `refactor/haps-drop-placeholders` — delete the fabricated `genotypes` /
+2. `refactor/haps-query-surface` — add the cheap scalar members
+   (`stored_ploidy`, `has_ref_alleles`, `var_field_dtype`) to `Haps`,
+   implement on both classes, switch every caller off SVAR1 internals.
+   `_info_field_dtype` deletes here. No rename yet, so the diff is readable.
+3. `refactor/haps-payload-measure` — add `measure_variant_payload`,
+   `ref_allele_bytes` and `prepare_var_fields`; implement on `Haps`. The two
+   `isinstance(haps_obj, Svar2Haps)` estimate forks and the `with_var_fields`
+   fork all delete here, and `_impl.py` stops importing `Svar2Haps`.
+4. `refactor/haps-role-abc` — rename `Haps` -> `Svar1Haps`, hoist the ABC into
+   `Haps`, reparent `Svar2Haps` to it, and move the `HapsTracks.__call__`
+   dispatch onto a `realign_track_block` override. Mostly mechanical.
+5. `refactor/haps-drop-placeholders` — delete the fabricated `genotypes` /
    `_Variants` from `Svar2Haps.from_path` and `_ShapeOnlyGenotypes`.
 
 ## Testing
@@ -175,15 +183,31 @@ This is a behavior-preserving refactor except for layer 1, which fixes a bug.
 - The existing SVAR1/SVAR2 parity suite in `tests/dataset/` already pins the
   behavior that must not move.
 - New in layer 1: the `haplotype_lengths` regression test described above.
-- New in layer 4: assert `Svar2Haps` has no `genotypes`/`variants` attribute at
+- New in layer 5: assert `Svar2Haps` has no `genotypes`/`variants` attribute at
   all — replacing PR #356's two allocation-size tests, which become moot once
   there is nothing to allocate.
-- New in layer 3: round-trip `replace(haps, min_af=...)` on both subclasses, to
+- New in layer 4: round-trip `replace(haps, min_af=...)` on both subclasses, to
   pin that the settings block stays `dataclasses.replace`-able across the
   hierarchy change.
 - `tests/unit/test_slot_fit_property.py:85` and several docstrings in
   `tests/dataset/test_svar2_*.py` describe the placeholders; they need updating
   in the layer that removes what they describe.
+
+## Found while implementing layer 3
+
+`Haps.measure_variant_payload` returns the *raw* on-disk variant count while
+returning post-AF-filter spans and byte sums beside it. That asymmetry is not a
+design choice — it reproduces the accounting `_output_bytes_per_instance` has
+always used, because the raw count's over-charge under AF filtering is
+currently the only thing covering a constant per-offsets-array deficit
+elsewhere in the estimate.
+
+Every offsets array `write_chunk` serializes has `n_groups + 1` entries; the
+estimate charges `n_groups`, losing `OFF` bytes per array. Filed as **#362**,
+with the arithmetic and a reproduction. Tightening the count before that lands
+turns three `tests/unit/dataset/test_output_bytes_dummy_variant.py` cases red
+(`estimated=7696 < actual=7728`, deficit 32 = 4 x 8). Fixing #362 first, then
+tightening, is the correct order; both are out of scope for this stack.
 
 ## Non-goals
 
