@@ -635,6 +635,9 @@ mod tests {
             SourceSpec::Vcf {
                 vcf_path: bcf.to_str().unwrap().to_string(),
                 htslib_threads: 1,
+                // One shard reader: this fixture is a handful of records on a single
+                // contig, so sharding it would only add threads, never work.
+                reader_workers: 1,
                 regions: Vec::new(),
                 overlap: OverlapMode::Pos,
             },
@@ -650,6 +653,9 @@ mod tests {
             1,     // processing_threads
             false, // signatures
             &[],   // fields
+            // Progress/telemetry sink: a test fixture has no consumer for the events,
+            // and `disabled()` makes every `sink.*` call a no-op.
+            &genoray_core::logging::EventSink::disabled(),
         )
         .expect("process_chromosome should succeed");
     }
