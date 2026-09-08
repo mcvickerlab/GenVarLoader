@@ -58,10 +58,13 @@ _CONTIG = "chr1"
 def _make_vcf(
     path: Path, n_variants: int, n_samples: int, contig_len: int, seed: int
 ) -> None:
-    """A SNP-only, biallelic VCF -- same shape as `test_streaming_scale.py`'s
-    fixture, just parameterized. SNP-only keeps haplotype length independent of
+    """Build a SNP-only, biallelic VCF fixture.
+
+    Same shape as `test_streaming_scale.py`'s fixture, just parameterized.
+    SNP-only keeps haplotype length independent of
     genotype, which isn't needed here (this harness doesn't check parity) but
-    keeps generation simple and fast."""
+    keeps generation simple and fast.
+    """
     if n_variants > contig_len - 4:
         raise ValueError(
             f"n_variants ({n_variants}) must be < contig_len - 4 ({contig_len - 4})"
@@ -97,8 +100,10 @@ def _build_store(
     tmp_dir: Path, n_variants: int, n_samples: int, contig_len: int, seed: int
 ) -> tuple[Path, Path]:
     """Build a FRESH reference FASTA + SparseVar (.svar) store under `tmp_dir`.
+
     `tmp_dir` must be a directory this process has never read from before
-    (a fresh `tempfile.mkdtemp()` per timed run) -- see the module docstring."""
+    (a fresh `tempfile.mkdtemp()` per timed run) -- see the module docstring.
+    """
     from genoray import VCF, SparseVar
 
     ref = tmp_dir / "ref.fa"
@@ -129,9 +134,11 @@ def _build_store(
 
 
 def _make_bed(n_regions: int, region_len: int, contig_len: int) -> pl.DataFrame:
-    """`n_regions` non-overlapping regions spread across the contig, so a full
-    sweep spans many read windows (the window plan chunks both regions and
-    samples -- see `StreamingDataset._plan`)."""
+    """Build `n_regions` non-overlapping regions spread across the contig.
+
+    A full sweep then spans many read windows (the window plan chunks both
+    regions and samples -- see `StreamingDataset._plan`).
+    """
     if n_regions * region_len > contig_len:
         raise ValueError(
             f"n_regions * region_len ({n_regions * region_len}) exceeds "
@@ -157,10 +164,12 @@ def _time_sweep(
     max_mem: str,
     strategy: str,
 ) -> float:
-    """Time one full `list(sds.to_iter(...))` sweep under `strategy`. Construction
-    (which reads the store's static variant table) happens OUTSIDE the timed
-    region -- only the sweep itself (window reads + prefetch + generation) is
-    timed, matching what a training loop actually pays per epoch."""
+    """Time one full `list(sds.to_iter(...))` sweep under `strategy`.
+
+    Construction (which reads the store's static variant table) happens OUTSIDE
+    the timed region -- only the sweep itself (window reads + prefetch +
+    generation) is timed, matching what a training loop actually pays per epoch.
+    """
     sds = gvl.StreamingDataset(
         bed, reference=ref, variants=svar, max_mem=max_mem
     ).with_seqs("haplotypes")
@@ -181,7 +190,9 @@ def _time_sweep(
 def _time_readahead_with_overlap_proxy(
     bed: pl.DataFrame, ref: Path, svar: Path, batch_size: int, max_mem: str
 ) -> tuple[float, float, float]:
-    """Re-drives the SAME Design C loop `_iter_batches` runs (read_window /
+    """Re-drive the Design C loop with separate prefetch and generate timers.
+
+    Runs the SAME sequence `_iter_batches` does (read_window /
     svar1_prefetch_runs / generate_batch), but with timers around the prefetch and
     generate calls separately, to give a CRUDE proxy for how much of the total
     time is prefetch vs. generation. This is NOT a measurement of cross-thread

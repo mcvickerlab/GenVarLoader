@@ -1,5 +1,6 @@
-"""Sweep `_super_batch_rows` on a vcfixture cohort-scale SVAR2 store to size
-`SUPERBATCH_TARGET_ROWS` (`python/genvarloader/_dataset/_streaming.py`).
+"""Sweep `_super_batch_rows` on a vcfixture cohort-scale SVAR2 store.
+
+Sizes `SUPERBATCH_TARGET_ROWS` (`python/genvarloader/_dataset/_streaming.py`).
 
 The super-batch is the rayon dispatch grain of the Phase-2 SVAR2 streaming reconstruct
 (`_Svar2Backend._fill_super_batch` -> `svar2_reconstruct_super_batch`). This harness
@@ -87,8 +88,10 @@ def build_store(cache: Path):
 def _reconstruct_only(
     sds, sb_rows: int, *, parallel: bool | None
 ) -> tuple[float, float]:
-    """Drive every window's super-batch fills (the reconstruct kernel), timing ONLY the
-    `_fill_super_batch` calls -- not `read_window`, gather, or drain. This isolates the
+    """Drive every window's super-batch fills, timing ONLY the reconstruct kernel.
+
+    Times the `_fill_super_batch` calls -- not `read_window`, gather, or drain.
+    This isolates the
     reconstruct from the serial/GIL-bound read overhead that swamps an end-to-end
     `to_iter` timing. `parallel`: None = production gating (`should_parallelize`), else
     force serial/parallel to measure the reconstruct's raw scaling.
@@ -116,8 +119,11 @@ def _reconstruct_only(
 
 
 def bench(sds, sb_rows: int) -> dict[str, float]:
-    """Best-of-REPEATS reconstruct-only wall for serial vs parallel fills at this sb
-    size, plus the cpu/wall of the parallel run (core engagement)."""
+    """Measure best-of-REPEATS reconstruct-only wall for serial vs parallel fills.
+
+    Measured at this sb size, plus the cpu/wall of the parallel run (core
+    engagement).
+    """
     sds._backend._super_batch_rows = sb_rows
     best_serial = float("inf")
     best_par_wall, best_par_cpu = float("inf"), 0.0
