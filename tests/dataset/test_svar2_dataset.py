@@ -166,6 +166,44 @@ def test_svar2_haplotypes_match_svar1(tmp_path, bed, svar_fixture, svar2_fixture
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
 
 
+def test_svar2_haplotype_lengths_match_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """``Dataset.haplotype_lengths()`` must account for indels on the SVAR2 path.
+
+    Regression: ``Svar2Haps`` implements ``_haplotype_diffs`` but did not override
+    ``_haplotype_ilens``, which is what ``Dataset.haplotype_lengths`` calls
+    (``_impl.py``). The call therefore fell through to the SVAR1 base
+    implementation, which read the permanently-empty placeholder ``genotypes``,
+    found every ``(region, sample, ploid)`` group empty, and returned all-zero
+    length deltas -- so ``haplotype_lengths()`` reported the unadjusted reference
+    span. ``Dataset._output_bytes_per_instance`` consumes this for the
+    ``"haplotypes"``/``"annotated"`` slot-size estimate, making it the sibling of
+    the ``"variants"``/``"variant-windows"`` defect tracked in #315.
+    """
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    ds1 = ds1.with_settings(deterministic=True).with_seqs("haplotypes")
+    ds2 = ds2.with_settings(deterministic=True).with_seqs("haplotypes")
+
+    hl1 = ds1.haplotype_lengths()
+    hl2 = ds2.haplotype_lengths()
+    assert hl1 is not None and hl2 is not None
+
+    # Guard against a vacuous pass: the fixture's het indels must make the two
+    # haplotypes of some (region, sample) differ in length. If they never do,
+    # an all-zero delta would be indistinguishable from the correct answer.
+    assert (hl1[..., 0] != hl1[..., 1]).any(), (
+        "fixture exercises no length-changing het variant; test would be vacuous"
+    )
+
+    np.testing.assert_array_equal(hl2, hl1)
+
+    # ...and the prediction must match what reconstruction actually produces.
+    actual = np.asarray(ds2[:, :].lengths)
+    np.testing.assert_array_equal(hl2, actual)
+
+
 def test_svar2_spliced_minus_strand_haplotypes_match_svar1(
     tmp_path, svar_fixture, svar2_fixture, _src
 ):
