@@ -46,7 +46,10 @@ intersphinx_mapping = {
     "genoray": ("https://genoray.readthedocs.io/en/latest/", None),
 }
 
-napoleon_google_docstring = False
+# Docstrings follow Google style (see CLAUDE.md). Disable NumPy parsing so a
+# stray NumPy-style docstring is rendered as-is instead of silently accepted.
+napoleon_google_docstring = True
+napoleon_numpy_docstring = False
 napoleon_use_param = True
 napoleon_type_aliases = {
     "Path": ":class:`Path <pathlib.Path>`",

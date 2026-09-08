@@ -30,7 +30,7 @@ values are NOT comparable across sessions. The durable signal is:
 - **Same-session ratios** (thread-count N vs serial baseline, measured back-to-back).
 - **Deterministic correctness**: `serial == parallel == frozen golden` for all kernels
   (`tests/parity/test_rayon_equivalence.py`, W5 gate).
-- **Instruction-count reductions** from round-3 tuning (documented in `rust-migration.md`).
+- **Instruction-count reductions** from round-3 tuning (see `round3-profile-baseline.md`).
 
 All tables in this document were captured in ONE continuous session on 2026-06-27.
 
@@ -76,7 +76,14 @@ run; `RAYON_NUM_THREADS=1 GVL_NUM_THREADS=1` for the serial run.
 
 ## The `should_parallelize` threshold — why all modes stayed serial
 
-The `should_parallelize(total_bytes)` gate in `python/genvarloader/_threads.py` uses:
+> **Superseded 2026-09-04 (issue #349).** The thread-scaled formula below was the
+> behavior as of this measurement, and this section is kept as the record of it. It is
+> no longer how GVL gates parallelism: the floor is now an absolute
+> `_MIN_PARALLEL_BYTES = 1 MiB` with no `num_threads()` multiplier, because scaling the
+> floor with the pool size meant asking for more threads raised the bar for using any
+> of them.
+
+The `should_parallelize(total_bytes)` gate in `python/genvarloader/_threads.py` used:
 
 ```python
 _MIN_BYTES_PER_THREAD = 1 << 20  # 1 MiB

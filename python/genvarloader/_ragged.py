@@ -46,7 +46,9 @@ class RaggedIntervals:
         self, start: int, end: int, value: float
     ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
         """Convert this RaggedIntervals to a tuple of rectilinear arrays by right-padding each entry with appropriate values.
-        The final axis will have the maximum length across all entries."""
+
+        The final axis will have the maximum length across all entries.
+        """
         starts = to_padded(self.starts, start)
         ends = to_padded(self.ends, end)
         values = to_padded(self.values, value)
@@ -55,11 +57,9 @@ class RaggedIntervals:
     def reshape(self, shape: int | tuple[int, ...]) -> RaggedIntervals:
         """Reshape the haplotypes and all annotations.
 
-        Parameters
-        ----------
-        shape
-            New shape for the haplotypes and all annotations. The total number of elements
-            must remain the same.
+        Args:
+            shape: New shape for the haplotypes and all annotations. The total number of elements
+                must remain the same.
         """
         return RaggedIntervals(
             self.starts.reshape(shape),
@@ -70,10 +70,8 @@ class RaggedIntervals:
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedIntervals:
         """Squeeze the haplotypes and all annotations along the specified axis.
 
-        Parameters
-        ----------
-        axis
-            Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
+        Args:
+            axis: Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
         """
         return RaggedIntervals(
             self.starts.squeeze(axis),  # type: ignore[bad-argument-type]  # seqpro Ragged.squeeze stub returns broader union than Ragged[T]
@@ -86,10 +84,8 @@ class RaggedIntervals:
     ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
         """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
 
-        Parameters
-        ----------
-        shape
-            Shape to convert to, including the length axis. The total number of elements must remain the same.
+        Args:
+            shape: Shape to convert to, including the length axis. The total number of elements must remain the same.
         """
         starts = self.starts.data.reshape(shape)
         ends = self.ends.data.reshape(shape)
@@ -135,14 +131,10 @@ class RaggedIntervals:
     ) -> RaggedIntervals:
         """Prepend a pad interval so that every group is guaranteed to have at least 1 interval.
 
-        Parameters
-        ----------
-        start
-            The start position to use for the pad interval
-        end
-            The end position to use for the pad interval
-        value
-            The value to use for the pad interval
+        Args:
+            start: The start position to use for the pad interval
+            end: The end position to use for the pad interval
+            value: The value to use for the pad interval
         """
         b, t, *_ = self.values.shape
         b = cast(int, b)
@@ -241,7 +233,9 @@ class RaggedAnnotatedHaps:
 
     def to_padded(self) -> AnnotatedHaps:
         """Convert this Ragged array to a rectilinear array by right-padding each entry with appropriate values.
-        The final axis will have the maximum length across all entries."""
+
+        The final axis will have the maximum length across all entries.
+        """
         haps = to_padded(self.haps, b"N")
         var_idxs = to_padded(self.var_idxs, -1)
         ref_coords = to_padded(self.ref_coords, np.iinfo(self.ref_coords.dtype).max)
@@ -250,11 +244,9 @@ class RaggedAnnotatedHaps:
     def reshape(self, shape: int | tuple[int, ...]) -> RaggedAnnotatedHaps:
         """Reshape the haplotypes and all annotations.
 
-        Parameters
-        ----------
-        shape
-            New shape for the haplotypes and all annotations. The total number of elements
-            must remain the same.
+        Args:
+            shape: New shape for the haplotypes and all annotations. The total number of elements
+                must remain the same.
         """
         return RaggedAnnotatedHaps(
             self.haps.reshape(shape),
@@ -265,10 +257,8 @@ class RaggedAnnotatedHaps:
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> RaggedAnnotatedHaps:
         """Squeeze the haplotypes and all annotations along the specified axis.
 
-        Parameters
-        ----------
-        axis
-            Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
+        Args:
+            axis: Axis or axes to squeeze. If None, all axes of length 1 are squeezed.
         """
         return RaggedAnnotatedHaps(
             self.haps.squeeze(axis),
@@ -279,10 +269,8 @@ class RaggedAnnotatedHaps:
     def to_numpy(self) -> AnnotatedHaps:
         """If all entries in the ragged array have the same shape, convert to a rectilinear shape.
 
-        Parameters
-        ----------
-        shape
-            Shape to convert to, including the length axis. The total number of elements must remain the same.
+        Args:
+            shape: Shape to convert to, including the length axis. The total number of elements must remain the same.
         """
         haps = self.haps.to_numpy()
         var_idxs = self.var_idxs.to_numpy()

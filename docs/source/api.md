@@ -9,6 +9,8 @@
 
 .. autofunction:: update
 
+.. autofunction:: concat
+
 .. autofunction:: get_splice_bed
 
 .. autofunction:: read_bedlike

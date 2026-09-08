@@ -32,12 +32,9 @@ def normalize_contig_name(
 ) -> str | None | list[str | None]:
     """Normalize the contig name to match the naming scheme of `contigs`.
 
-    Parameters
-    ----------
-    contig : str
-        Contig name to normalize.
-    contigs : Iterable[str]
-        Collection of contig names to normalize against.
+    Args:
+        contig (str): Contig name to normalize.
+        contigs (Iterable[str]): Collection of contig names to normalize against.
     """
     _contigs = (
         {f"{c[3:]}": c for c in contigs if c.startswith("chr")}
@@ -64,8 +61,10 @@ def lengths_to_offsets(
 
 
 def idx_like_to_array(idx: Idx, max_len: int) -> NDArray[np.integer]:
-    """Convert an index-like object to an array of non-negative indices. Shapes of multi-dimensional
-    indices are preserved."""
+    """Convert an index-like object to an array of non-negative indices.
+
+    Shapes of multi-dimensional indices are preserved.
+    """
     if isinstance(idx, (Sequence, pl.Series)):
         idx = cast(NDArray, np.array(idx))
         assert is_dtype(idx, np.integer) or is_dtype(idx, np.bool_)

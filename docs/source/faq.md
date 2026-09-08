@@ -68,24 +68,53 @@ plink2 --pgen-info $prefix
 GVL's read path (haplotype reconstruction and track re-alignment) is parallelized in Rust with [rayon](https://github.com/rayon-rs/rayon). By default it uses one worker per available CPU, detected from the Linux cgroup cpuset (`sched_getaffinity`) so it respects container limits, and falling back to `os.cpu_count()` elsewhere. Three environment variables tune this:
 
 - **`GVL_NUM_THREADS`** — set the worker count explicitly (e.g. `GVL_NUM_THREADS=4`). Overrides cgroup detection. Resolved once, on first use, so set it before your first GVL call.
-- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs small inputs serially because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking.
+- **`GVL_FORCE_PARALLEL`** — set to a truthy value (`1`, `true`, `yes`, `on`) to force the multithreaded paths even on small inputs. By default GVL runs a batch serially when its output is under 1 MiB, because thread overhead would dominate; this bypasses that size gate. Mainly useful for benchmarking. The gate is an **absolute** byte floor — it does not scale with `GVL_NUM_THREADS`, so raising the worker count never pushes a batch back onto the serial path. This variable sets the *default*; a dataset that states its own policy overrides it (see below).
 - **`RAYON_NUM_THREADS`** — GVL **overwrites** this with its own resolved count so an inherited value (e.g. baked into a base image) can't defeat the cgroup-aware cap. To size the pool yourself, use `GVL_NUM_THREADS` instead.
+
+### Setting parallelism in code instead of the environment
+
+Environment variables configure a whole process, which means a script's parallelism can't be determined by reading the script — a value in a shell profile, a Dockerfile, or a SLURM template changes how it runs. To state the policy where a reader can see it, set it on the dataset:
+
+```python
+ds = ds.with_settings(parallel=False)   # True | False | "auto"
+```
+
+- `True` — always hand batches to rayon, whatever their size.
+- `False` — always run serial.
+- `"auto"` (default) — decide per batch from the output size, deferring to `GVL_FORCE_PARALLEL`.
+
+**An explicit `True`/`False` beats `GVL_FORCE_PARALLEL`.** Precedence is *explicit setting > environment > size gate*, so a script that says `parallel=False` runs serial no matter what the environment says. Datasets that never set it stay on `"auto"` and behave exactly as before.
+
+The setting is per-dataset and travels with it, including into dataloader worker processes.
+
+```{note}
+This governs *whether* to parallelize, not how many threads to use. The worker count is fixed at import from `GVL_NUM_THREADS`, because rayon reads it when its global thread pool initializes — so it cannot be varied per dataset.
+```
 
 ## Should I use `.svar` or `.svar2` as my variant source?
 
 Both are sparse columnar variant archives from [`genoray`](https://github.com/mcvickerlab/genoray) that `gvl.write(variants=...)` accepts alongside BCF/PGEN; see [write.md](write.md) for how to build one. The two differ in their read-time behavior:
 
 - **`.svar`** reconstructs by building an interval search tree over the queried window and a per-read dense union of the overlapping variants.
-- **`.svar2`** reconstructs via a **read-bound** path: `gvl.write` caches small per-`(region, sample, ploid)` variant-key ranges at write time, and `Dataset.__getitem__` gathers directly off that cache and calls all-Rust kernels — it builds **no interval search tree and no dense union per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts.
+- **`.svar2`** reconstructs via a **read-bound** path: `gvl.write` caches per-`(region, sample, ploid)` variant-key ranges at write time — **not small at cohort scale**, see the size formula in `format.md` — and `Dataset.__getitem__` gathers directly off that cache and calls all-Rust kernels — it builds **no interval search tree and no dense union per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts.
 
-`.svar2` is Phase-1 scope: a handful of combinations (`annotated` haplotypes, `min_af`/`max_af`, `VarWindowOpt(ref="allele")`, fixed-length haplotype-realigned tracks, splicing or exonic filtering with non-haplotype outputs, and `variants`/`variant-windows` output with jitter) aren't wired yet and raise `NotImplementedError` rather than silently mis-computing. Plain haplotype output supports splicing, `var_filter="exonic"`, and negative-strand reverse-complementation. `"variant-windows"` output, `unphased_union` (for both `"variants"` and `"variant-windows"`), and `var_fields`-selected store INFO/FORMAT fields (also for both, when the `.svar2` was written with them) are also supported. See the `genvarloader` skill's `.svar2` section or `docs/source/format.md` for the full list. Everything else — haplotypes, tracks, and variants/variant-windows at any supported jitter/output-length combination — is byte-identical between the two backends.
+`.svar2` is Phase-1 scope: a handful of combinations (`annotated` haplotypes, `min_af`/`max_af`, `VarWindowOpt(ref="allele")`, fixed-length haplotype-realigned tracks, spliced `variant-windows`, and `variants`/`variant-windows` output with jitter) aren't wired yet and raise `NotImplementedError` rather than silently mis-computing. Haplotype and `variants` output support splicing, `var_filter="exonic"`, and negative-strand reverse-complementation. `"variant-windows"` output, `unphased_union` (for both `"variants"` and `"variant-windows"`), and `var_fields`-selected store INFO/FORMAT fields (also for both, when the `.svar2` was written with them) are also supported. See the `genvarloader` skill's `.svar2` section or `docs/source/format.md` for the full list. Everything else — haplotypes, tracks, and variants/variant-windows at any supported jitter/output-length combination — is byte-identical between the two backends.
 
 One documented difference in raw output: for a pure deletion, `with_seqs("variants")` on a `.svar` dataset reports the VCF anchor base as ALT (e.g. `b"G"` for `GTA>G`), while a `.svar2` dataset reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a bug. Reconstructed haplotypes are unaffected; only `RaggedVariants.alt` differs (and `FlatVariantWindows.alt`/`.alt_window` for `"variant-windows"`), and only for pure-deletion records. `ref_window` is byte-identical between the two backends.
+
+## Can I build a dataset in parallel shards and merge them?
+
+Yes. Split your BED across jobs, `gvl.write` one dataset per shard, then merge with
+[`gvl.concat(out, shards, axis="regions")`](api.md#genvarloader.concat). All shards must be
+written from the same variant source (same PGEN/VCF table, or the same `.svar`/`.svar2` store)
+and have identical samples in identical order. See "Merging datasets" in the
+[write guide](write.md) for the cost model and the `axis="samples"` alternative (merging disjoint
+cohorts over shared regions).
 
 ## How can I get personalized protein/spliced RNA sequences?
 
 Write a dataset from an exon-level BED containing transcript and exon-order columns,
-then open it with `splice_info` and haplotype output. Use `var_filter="exonic"` to
+then open it with `splice_info`. Use `var_filter="exonic"` to
 drop variants whose reference span crosses an exon boundary:
 
 ```python
@@ -100,6 +129,11 @@ ds = gvl.Dataset.open(
 This works with `.svar` and `.svar2` variant sources. Negative-strand transcripts
 are reverse-complemented automatically when the BED includes `strand="-"`. See
 the [splicing guide](splicing.html) for BED construction and output shapes.
+
+Use `.with_seqs("variants")` on the same dataset to receive one complete
+`RaggedVariants` cell per `(transcript, sample, phase)`. GVL performs the exon
+queries, exonic filtering, decode, and transcript regrouping internally; callers
+do not need to iterate over or concatenate exons.
 
 <!-- Example of variable length regions
 

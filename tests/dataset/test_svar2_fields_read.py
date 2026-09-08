@@ -674,3 +674,52 @@ def test_svar2_output_bytes_per_instance_with_store_field(
     out = ds._output_bytes_per_instance()
     assert out.shape == ds.shape
     assert (out >= 0).all()
+
+
+def test_svar2_output_bytes_per_instance_variant_windows_with_store_field(
+    tmp_path, svar2_fields_store, _src
+):
+    """Same regression as ``test_svar2_output_bytes_per_instance_with_store_field``,
+    for the "variant-windows" output kind.
+
+    The "variants" branch's ``else`` clause (INFO/store field dtype lookup)
+    was already guarded for ``Svar2Haps`` (whose ``.variants.info`` is an
+    empty placeholder -- store field dtypes live on ``.store_fields``
+    instead). The final-review pass found that the newer "variant-windows"
+    branch's scalar-field loop and its ``dummy_variant`` sub-branch did the
+    SAME unguarded ``haps_obj.variants.info[f].dtype`` lookup with no such
+    guard, so requesting a store field (e.g. "AF"/"NS"/"DP", all legal via
+    ``available_var_fields``) in variant-windows mode on an SVAR2 dataset
+    raised ``KeyError`` instead of returning finite bytes -- a crash in the
+    ``mode="buffered"``/``mode="double_buffered"`` sizing path
+    (``_output_bytes_per_instance``), not merely an under-estimate.
+    """
+    import genoray
+    import genvarloader as gvl
+
+    _bcf, ref = _src
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    d = tmp_path / "d9.gvl"
+    gvl.write(
+        d,
+        bed,
+        variants=genoray.SparseVar2(svar2_fields_store),
+        samples=None,
+        overwrite=True,
+    )
+
+    opt = gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+    ds = (
+        gvl.Dataset.open(d, reference=ref)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+        .with_settings(
+            var_fields=_VAR_FIELDS,
+            deterministic=True,
+            dummy_variant=gvl.DummyVariant(alt=b"N", ref=b"N"),
+        )
+    )
+    out = ds._output_bytes_per_instance()
+    assert out.shape == ds.shape
+    assert np.isfinite(out).all()
+    assert (out >= 0).all()

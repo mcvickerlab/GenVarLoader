@@ -87,18 +87,22 @@ _SUPPORTED_CALL_FIELD_DTYPES = frozenset(
 
 
 def _normalize_var_fields(var_fields: "list[str] | None") -> list[str]:
-    """`var_fields`, or the builtin default when `None`. Shared by every backend's
-    `build_engine` and `StreamingDataset.active_var_fields` so the default list
-    literal exists in exactly one place."""
+    """Resolve `var_fields`, falling back to the builtin default when `None`.
+
+    Shared by every backend's `build_engine` and
+    `StreamingDataset.active_var_fields` so the default list literal exists in
+    exactly one place.
+    """
     return list(var_fields) if var_fields is not None else list(_DEFAULT_VAR_FIELDS)
 
 
 def _win_mode_kwargs(
     var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None",
 ) -> dict[str, object]:
-    """Build the `win_*` keyword arguments every record-style backend's
-    `build_engine` (SVAR1/VCF/PGEN) forwards to its Rust engine constructor for
-    `with_seqs("variant-windows")` (Wave B PR-B4, #304). `var_window` is the
+    """Build the `win_*` keyword arguments for `with_seqs("variant-windows")`.
+
+    Every record-style backend's `build_engine` (SVAR1/VCF/PGEN) forwards these to
+    its Rust engine constructor (Wave B PR-B4, #304). `var_window` is the
     `(lut, lut_dtype, opt)` bundle `StreamingDataset._iter_batches` threads through
     (`None` when variant-windows output was not requested); one shared builder here
     -- rather than duplicating the same dtype dispatch three times -- keeps the
@@ -221,19 +225,18 @@ class StreamingDataset:
     sample names, matching :func:`gvl.write`'s convention) -- NOT a variant store's
     native column order. See :attr:`samples`.
 
-    Parameters
-    ----------
-    max_mem
-        Approximate byte budget for the read-window's offsets buffer, i.e. the
-        ``o_start``/``o_stop`` CSR-index pair read per ``(region, sample, ploid)``
-        cell (``window_regions * window_samples * ploidy * 16`` bytes). Accepts an
-        ``int`` (bytes) or a size string like ``"512MB"``, ``"1g"``, ``"2GiB"``
-        (default ``"512MB"``). This budget only bounds the READ window -- the
-        separate GENERATION granularity is ``batch_size`` (a :meth:`to_iter`
-        argument), which bounds per-batch haplotype OUTPUT independently. Neither
-        term scales with cohort size, so peak memory is bounded by
-        ``max_mem`` (offsets) + ``batch_size`` (output), independent of the number
-        of samples in the dataset.
+    Args:
+        max_mem: Approximate byte budget for the read-window's offsets buffer, i.e.
+            the ``o_start``/``o_stop`` CSR-index pair read per
+            ``(region, sample, ploid)`` cell
+            (``window_regions * window_samples * ploidy * 16`` bytes). Accepts an
+            ``int`` (bytes) or a size string like ``"512MB"``, ``"1g"``, ``"2GiB"``
+            (default ``"512MB"``). This budget only bounds the READ window -- the
+            separate GENERATION granularity is ``batch_size`` (a :meth:`to_iter`
+            argument), which bounds per-batch haplotype OUTPUT independently. Neither
+            term scales with cohort size, so peak memory is bounded by
+            ``max_mem`` (offsets) + ``batch_size`` (output), independent of the number
+            of samples in the dataset.
     """
 
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
@@ -561,11 +564,12 @@ class StreamingDataset:
         return len(self._regions) * self.n_samples
 
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
-        """Yield one WINDOW per step: (region_idxs, sample_chunk), cartesian,
-        single-contig. Both the region axis (`_window_regions`) and the sample axis
-        (`_window_samples`) are chunked so the offsets buffer stays within `max_mem`
-        regardless of cohort size. NOT pairwise: the traversal is a fixed cartesian
-        sweep and the window is the read granularity.
+        """Yield one WINDOW per step: `(region_idxs, sample_chunk)`.
+
+        Cartesian and single-contig. Both the region axis (`_window_regions`) and
+        the sample axis (`_window_samples`) are chunked so the offsets buffer stays
+        within `max_mem` regardless of cohort size. NOT pairwise: the traversal is a
+        fixed cartesian sweep and the window is the read granularity.
         """
         n_regions, n_samples = self.shape
         if n_regions == 0:
@@ -583,17 +587,21 @@ class StreamingDataset:
                     yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
 
     def _rng_gen(self) -> np.random.Generator:
-        """One `Generator` for this `to_iter` call's jitter draws. `_iter_batches`
-        creates exactly one of these per call (never per-window) so the per-region
-        draw sequence is deterministic in sweep order -- see `to_iter`'s docstring
-        for the full rng contract."""
+        """Build the one `Generator` for this `to_iter` call's jitter draws.
+
+        `_iter_batches` creates exactly one of these per call (never per-window) so
+        the per-region draw sequence is deterministic in sweep order -- see
+        `to_iter`'s docstring for the full rng contract.
+        """
         return np.random.default_rng(self._rng)
 
     def _region_jitter_offsets(self, rng: np.random.Generator) -> NDArray[np.int64]:
-        """Draw ONE jitter offset per region (indexed by absolute region index into
-        `self._regions`, which is pre-sorted by `(contig, start)`), ONCE per
-        `to_iter` call -- i.e. before `_plan()`'s per-window/per-sample-chunk loop,
-        not once per plan job. `_plan()` re-yields the same region-window `r_idx`
+        """Draw ONE jitter offset per region, ONCE per `to_iter` call.
+
+        Offsets are indexed by absolute region index into `self._regions`, which is
+        pre-sorted by `(contig, start)`. They are drawn before `_plan()`'s
+        per-window/per-sample-chunk loop, not once per plan job. `_plan()` re-yields
+        the same region-window `r_idx`
         once per sample chunk whenever `n_samples > _window_samples` (cohort
         scale); drawing offsets here and looking them up by region index (see
         `_jitter_region_bounds`) means every sample chunk of the same region gets
@@ -610,8 +618,10 @@ class StreamingDataset:
         region_offsets: NDArray[np.int64],
         r_idx: NDArray[np.intp],
     ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
-        """Translate `r_idx`'s region bounds using the precomputed per-region
-        `region_offsets` (see `_region_jitter_offsets`; indexed by absolute region
+        """Translate `r_idx`'s region bounds by its precomputed jitter offset.
+
+        Uses the per-region `region_offsets` (see `_region_jitter_offsets`; indexed
+        by absolute region
         index, so the same region always gets the same offset regardless of which
         window/sample-chunk it's visited from). The window SIZE is preserved
         (translate, don't resize) -- a fixed `output_length` that fit the base
@@ -1274,27 +1284,30 @@ class StreamingDataset:
     def to_iter(
         self, batch_size: int = 1, return_indices: bool = True
     ) -> Iterator[tuple]:
-        """Iterate haplotype batches. **This is the one iteration entry point** --
-        :meth:`to_torch_dataset` and :meth:`to_dataloader` are thin wrappers over it,
-        and there is no ``__iter__`` (one and only one obvious way).
+        """Iterate haplotype batches.
+
+        **This is the one iteration entry point** -- :meth:`to_torch_dataset` and
+        :meth:`to_dataloader` are thin wrappers over it, and there is no
+        ``__iter__`` (one and only one obvious way).
 
         Iteration is a fixed cartesian sweep of BED regions x samples in a
         data-layout-optimal order (region-major for variants). There is no random
         access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
 
-        Parameters
-        ----------
-        batch_size
-            Number of ``(region, sample)`` cells per yielded batch. Batches are slices
-            of a much larger read *window*; ``batch_size`` does not affect I/O
-            granularity.
-        return_indices
-            If ``True`` (the default), yield ``(data, region_idxs, sample_idxs)``;
-            if ``False``, yield ``data`` alone. Indices are in the caller's **original
-            BED-row order** (not sorted-storage order), matching ``gvl.Dataset[r, s]``.
+        Args:
+            batch_size: Number of ``(region, sample)`` cells per yielded batch.
+                Batches are slices of a much larger read *window*; ``batch_size``
+                does not affect I/O granularity.
+            return_indices: If ``True`` (the default), yield
+                ``(data, region_idxs, sample_idxs)``; if ``False``, yield ``data``
+                alone. Indices are in the caller's **original BED-row order** (not
+                sorted-storage order), matching ``gvl.Dataset[r, s]``.
 
-        Read-time jitter (``jitter>0``, set via ``with_settings``)
-        -------------------------------------------------------------
+        Yields:
+            ``(data, region_idxs, sample_idxs)`` when ``return_indices`` is ``True``,
+            otherwise ``data`` alone.
+
+        **Read-time jitter** (``jitter>0``, set via ``with_settings``):
         When ``jitter>0``, each region's read window is translated by an integer
         offset drawn from ``Uniform[-jitter, jitter]`` (inclusive), clamped only so
         the translated start stays ``>= 0`` -- the window SIZE never changes
@@ -1357,8 +1370,10 @@ class StreamingDataset:
         kind: Literal["haplotypes", "annotated", "variants", "variant-windows"],
         opt: "VarWindowOpt | None" = None,
     ) -> "StreamingDataset":
-        """Select the sequence output kind. ``"haplotypes"`` (default),
-        ``"annotated"`` (:class:`AnnotatedHaps` -- haplotypes plus per-position
+        """Select the sequence output kind.
+
+        ``"haplotypes"`` (default), ``"annotated"``
+        (:class:`AnnotatedHaps` -- haplotypes plus per-position
         variant indices and reference coordinates), ``"variants"`` (no
         sequences, just variants as :class:`RaggedVariants`), or
         ``"variant-windows"`` (no reconstructed sequences; instead, per-variant
@@ -1441,11 +1456,14 @@ class StreamingDataset:
         return out
 
     def with_len(self, length: "int | Literal['ragged']") -> "StreamingDataset":
-        """Set haplotype/annotated output length. ``"ragged"`` (default) yields
-        per-hap actual length; a fixed ``int >= 1`` yields exactly that many bases
+        """Set haplotype/annotated output length.
+
+        ``"ragged"`` (default) yields per-hap actual length; a fixed ``int >= 1``
+        yields exactly that many bases
         per hap. Unlike :meth:`Dataset.with_len`, ``"variable"`` is not accepted:
         :meth:`to_iter` always yields ``Ragged`` (there is no ArrayDataset analog),
-        so pad the ragged output yourself for a dense array."""
+        so pad the ragged output yourself for a dense array.
+        """
         if length == "variable":
             raise NotImplementedError(
                 'StreamingDataset.with_len("variable") is not supported; to_iter '
@@ -1471,58 +1489,55 @@ class StreamingDataset:
         max_af: "float | None" = None,
         var_fields: "list[str] | None" = None,
     ) -> "StreamingDataset":
-        """Modify jitter / rng / determinism, returning a new dataset. Mirrors the
-        relevant subset of :meth:`Dataset.with_settings` (same parameter names).
+        """Modify jitter / rng / determinism, returning a new dataset.
 
-        Parameters
-        ----------
-        jitter
-            Non-negative int; each region's read window is translated by an
-            integer offset drawn from ``Uniform[-jitter, jitter]`` (window SIZE
-            unchanged), clamped so the translated start stays ``>= 0`` (a
-            translated end may safely run past the contig -- see :meth:`to_iter`'s
-            docstring). ``0`` (the default) disables jitter and is the only
-            byte-parity-gated setting.
-        rng
-            Seed (int) or :class:`numpy.random.Generator` for the jitter draws.
-            One ``Generator`` (via ``numpy.random.default_rng(rng)``) is created
-            per :meth:`to_iter` call and drawn from once per region, in sweep
-            order -- so the same ``rng`` reproduces the same translated windows
-            across calls/runs, and a different ``rng`` yields different ones.
-        deterministic
-            Reserved for per-hap within-window sub-shifts on fixed-length output;
-            not yet implemented (documented Wave A deferral -- needs a Rust engine
-            API addition). Currently has no observable effect on ``to_iter``'s
-            output.
-        min_af
-            Inclusive lower allele-frequency bound for ``with_seqs("variants")``.
-            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
-            field); otherwise raises at iterate time. Matches
-            :meth:`Dataset.with_settings`.
-        max_af
-            Inclusive upper allele-frequency bound for ``with_seqs("variants")``.
-            Requires an available AF (SVAR ``cache_afs()``, or a VCF ``INFO/AF``
-            field); otherwise raises at iterate time. Matches
-            :meth:`Dataset.with_settings`.
-        var_fields
-            Variant fields to emit for ``with_seqs("variants")`` output (Wave B
-            PR-B3a/PR-B3b, #304). Must be a subset of :attr:`available_var_fields`;
-            an unknown field raises :class:`ValueError` immediately (not at iterate
-            time). A field that is available but not yet servable by the streaming
-            engine (see :attr:`servable_var_fields`) raises
-            :class:`NotImplementedError` immediately instead -- as of PR-B3b this
-            gap is a SVAR1 numeric INDEX column (e.g. a cached ``AF``), not a
-            per-call FORMAT field (``dosage``/custom FORMAT columns ARE servable
-            since PR-B3b). Defaults to ``["alt", "ilen", "start"]`` (see
-            :attr:`active_var_fields`) when never set -- this default reproduces
-            today's ``with_seqs("variants")`` output byte-for-byte. Only meaningful
-            for ``with_seqs("variants")``; combining it with any other output kind
-            raises :class:`NotImplementedError` at iterate time (matches how
-            ``min_af``/``max_af`` are guarded).
+        Mirrors the relevant subset of :meth:`Dataset.with_settings` (same
+        parameter names).
+
+        Args:
+            jitter: Non-negative int; each region's read window is translated by an
+                integer offset drawn from ``Uniform[-jitter, jitter]`` (window SIZE
+                unchanged), clamped so the translated start stays ``>= 0`` (a
+                translated end may safely run past the contig -- see :meth:`to_iter`'s
+                docstring). ``0`` (the default) disables jitter and is the only
+                byte-parity-gated setting.
+            rng: Seed (int) or :class:`numpy.random.Generator` for the jitter draws.
+                One ``Generator`` (via ``numpy.random.default_rng(rng)``) is created
+                per :meth:`to_iter` call and drawn from once per region, in sweep order
+                -- so the same ``rng`` reproduces the same translated windows across
+                calls/runs, and a different ``rng`` yields different ones.
+            deterministic: Reserved for per-hap within-window sub-shifts on
+                fixed-length output; not yet implemented (documented Wave A deferral --
+                needs a Rust engine API addition). Currently has no observable effect
+                on ``to_iter``'s output.
+            min_af: Inclusive lower allele-frequency bound for
+                ``with_seqs("variants")``. Requires an available AF (SVAR
+                ``cache_afs()``, or a VCF ``INFO/AF`` field); otherwise raises at
+                iterate time. Matches :meth:`Dataset.with_settings`.
+            max_af: Inclusive upper allele-frequency bound for
+                ``with_seqs("variants")``. Requires an available AF (SVAR
+                ``cache_afs()``, or a VCF ``INFO/AF`` field); otherwise raises at
+                iterate time. Matches :meth:`Dataset.with_settings`.
+            var_fields: Variant fields to emit for ``with_seqs("variants")`` output
+                (Wave B PR-B3a/PR-B3b, #304). Must be a subset of
+                :attr:`available_var_fields`; an unknown field raises
+                :class:`ValueError` immediately (not at iterate time). A field that is
+                available but not yet servable by the streaming engine (see
+                :attr:`servable_var_fields`) raises :class:`NotImplementedError`
+                immediately instead -- as of PR-B3b this gap is a SVAR1 numeric INDEX
+                column (e.g. a cached ``AF``), not a per-call FORMAT field
+                (``dosage``/custom FORMAT columns ARE servable since PR-B3b). Defaults
+                to ``["alt", "ilen", "start"]`` (see :attr:`active_var_fields`) when
+                never set -- this default reproduces today's ``with_seqs("variants")``
+                output byte-for-byte. Only meaningful for ``with_seqs("variants")``;
+                combining it with any other output kind raises
+                :class:`NotImplementedError` at iterate time (matches how
+                ``min_af``/``max_af`` are guarded).
 
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
-        rng contract)."""
+        rng contract).
+        """
         out = copy.copy(self)
         if jitter is not None:
             if jitter < 0:
@@ -1572,9 +1587,11 @@ class StreamingDataset:
     def to_torch_dataset(
         self, batch_size: int = 1, return_indices: bool = True
     ) -> "td.IterableDataset":
-        """Wrap :meth:`to_iter` in a torch :class:`IterableDataset`. Thin wrapper --
-        all the work is in ``to_iter``. Named to match
-        :meth:`Dataset.to_torch_dataset` (same concept, same name)."""
+        """Wrap :meth:`to_iter` in a torch :class:`IterableDataset`.
+
+        Thin wrapper -- all the work is in ``to_iter``. Named to match
+        :meth:`Dataset.to_torch_dataset` (same concept, same name).
+        """
         import torch.utils.data as td
 
         sds = self
@@ -1604,15 +1621,35 @@ class StreamingDataset:
         persistent_workers: bool = False,
         pin_memory_device: str = "",
     ) -> "td.DataLoader":
-        """Wrap :meth:`to_torch_dataset` in a torch
-        :class:`DataLoader <torch.utils.data.DataLoader>`. Thin wrapper.
+        """Wrap :meth:`to_torch_dataset` in a torch ``DataLoader``.
 
-        Parameters
-        ----------
-        num_workers
-            Must be 0. ``StreamingDataset``'s own engine IS the concurrency strategy
-            (mirrors :meth:`Dataset.to_dataloader`'s ``buffered``/``double_buffered``
-            restriction); worker-process sharding of the window plan is a later plan.
+        Thin wrapper over :class:`DataLoader <torch.utils.data.DataLoader>`.
+
+        Args:
+            batch_size: Rows per batch, forwarded to :meth:`to_torch_dataset`. The
+                loader itself is constructed with ``batch_size=None`` because the
+                dataset already yields assembled batches.
+            num_workers: Must be 0. ``StreamingDataset``'s own engine IS the
+                concurrency strategy (mirrors :meth:`Dataset.to_dataloader`'s
+                ``buffered``/``double_buffered`` restriction); worker-process sharding
+                of the window plan is a later plan.
+            return_indices: Forwarded to :meth:`to_torch_dataset`; whether each batch
+                carries its ``(region_idx, sample_idx)`` arrays.
+            collate_fn: Passed through to ``DataLoader``.
+            pin_memory: Passed through to ``DataLoader``.
+            timeout: Passed through to ``DataLoader``.
+            worker_init_fn: Passed through to ``DataLoader``.
+            multiprocessing_context: Passed through to ``DataLoader``.
+            prefetch_factor: Passed through to ``DataLoader``.
+            persistent_workers: Passed through to ``DataLoader``.
+            pin_memory_device: Passed through to ``DataLoader``.
+
+        Returns:
+            A :class:`DataLoader <torch.utils.data.DataLoader>` over this dataset's
+            pre-assembled batches (``batch_size=None`` on the loader itself).
+
+        Raises:
+            ValueError: If ``num_workers > 0``.
         """
         if num_workers > 0:
             raise ValueError(
@@ -1641,8 +1678,9 @@ class StreamingDataset:
 
 
 class _Svar1Backend:
-    """Streaming SVAR1 read backend: reconstructs haplotypes for a batch of
-    ``(r_idx, s_idx)`` directly from a live ``.svar`` store, with no on-disk
+    """Streaming SVAR1 read backend, reading a live ``.svar`` store directly.
+
+    Reconstructs haplotypes for a batch of ``(r_idx, s_idx)`` with no on-disk
     gvl dataset. Wraps `Svar1Store`/`svar1_read_window`/`svar1_generate_batch`
     (Rust) -- an instance is assigned to `StreamingDataset._backend`
     internally by the `.svar` construction branch (not a public `__init__`
@@ -1921,9 +1959,11 @@ class _Svar1Backend:
 
     @property
     def has_cached_af(self) -> bool:
-        """Whether this store has cached per-variant AF (Wave B PR-B2, #317) --
-        `SparseVar.cache_afs()` has been run and `min_af`/`max_af` filtering is
-        therefore available on this backend."""
+        """Whether this store has cached per-variant AF (Wave B PR-B2, #317).
+
+        True once `SparseVar.cache_afs()` has been run, which is when
+        `min_af`/`max_af` filtering becomes available on this backend.
+        """
         return self._afs is not None
 
     def build_engine(
@@ -1938,8 +1978,10 @@ class _Svar1Backend:
         var_fields: "list[str] | None" = None,
         var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
-        """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283) that
-        overlaps window I/O with batch generation. `jobs` is one entry per WINDOW,
+        """Construct a `Svar1StreamEngine` (Rust producer/consumer engine, #283).
+
+        The engine overlaps window I/O with batch generation. `jobs` is one entry
+        per WINDOW,
         `(contig_idx, region_starts, region_ends, s_lo, s_hi)`, in the SAME order
         `_iter_batches` will drive `.next_batch()`. `output_length` is `-1` for ragged
         (per-hap actual length, pre-Wave-A behavior) or a fixed length >= 1 (issue #277
@@ -2155,8 +2197,10 @@ class _Svar1Backend:
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
     ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-        """Read one window's CSR offsets: every region in `r_idx` x every sample in
-        `s_idx`, single-contig. Returns (o_starts, o_stops), each
+        """Read one window's CSR offsets, single-contig.
+
+        Covers every region in `r_idx` x every sample in `s_idx`. Returns
+        (o_starts, o_stops), each
         `len(r_idx) * len(s_idx) * ploidy`, C-order (region, sample, ploid) -- absolute
         indices into the store's variant_idxs mmap. No haplotypes are generated here.
         """
@@ -2204,6 +2248,7 @@ class _Svar1Backend:
         output_length: int,
     ) -> Ragged:
         """Generate haplotypes for window rows [lo:hi] (C-order (region, sample)).
+
         Output is (hi-lo)-bounded -- NEVER the whole window (issue #284). `o_starts`/
         `o_stops` are the whole window's offsets (from `read_window`); this slices the
         CSR rows [lo*ploidy : hi*ploidy] and the matching per-row region bounds.
@@ -2258,8 +2303,10 @@ class _Svar1Backend:
 
 
 class _Svar2Backend:
-    """StreamingDataset backend for .svar2 stores. Mirrors _Svar1Backend, but per-
-    window variant ranges are computed LIVE via the GIL-free Rust `svar2_read_window`
+    """StreamingDataset backend for .svar2 stores.
+
+    Mirrors _Svar1Backend, but per-window variant ranges are computed LIVE via the
+    GIL-free Rust `svar2_read_window`
     (genoray_core::query::find_ranges, the same query gvl.write uses at write time,
     `_write.py:_write_from_svar2`) instead of slicing an on-disk `_Svar2Cache`; the
     ranges feed a recycled `Svar2ReconBuf` reconstructed in coarse super-batches
@@ -2345,9 +2392,10 @@ class _Svar2Backend:
         jobs: list[tuple[int, NDArray[np.uint32], NDArray[np.uint32], int, int]],
         batch_size: int,
     ) -> object:
-        """Construct a `Svar2StreamEngine` (Rust producer/consumer engine, PR-3 Task
-        2) that overlaps window read (`find_ranges`) with super-batch reconstruct.
-        `jobs` is one entry per WINDOW, `(contig_idx, region_starts, region_ends,
+        """Construct a `Svar2StreamEngine` (Rust producer/consumer engine, PR-3).
+
+        The engine (Task 2) overlaps window read (`find_ranges`) with super-batch
+        reconstruct. `jobs` is one entry per WINDOW, `(contig_idx, region_starts, region_ends,
         s_lo, s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
         mirrors `_Svar1Backend.build_engine`'s cohort-independent job residency
         contract (issue #284): the full public->physical sample map crosses ONCE,
@@ -2394,10 +2442,12 @@ class _Svar2Backend:
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]
     ) -> dict[str, object]:
-        """Compute the window's live ranges via the GIL-free Rust `svar2_read_window`
-        (genoray_core::query::find_ranges), replacing the Python SparseVar2._find_ranges
-        call + numpy glue. `s_idx` (public sorted-name order) is translated to physical
-        store columns via `_phys_sample_idx` before crossing into Rust.
+        """Compute the window's live ranges via GIL-free Rust `svar2_read_window`.
+
+        Uses genoray_core::query::find_ranges, replacing the Python
+        SparseVar2._find_ranges call + numpy glue. `s_idx` (public sorted-name
+        order) is translated to physical store columns via `_phys_sample_idx`
+        before crossing into Rust.
         """
         from ..genvarloader import svar2_read_window
 
@@ -2441,10 +2491,12 @@ class _Svar2Backend:
         NDArray[np.uint8],
         NDArray[np.int64],
     ]:
-        """Gather the per-row FFI inputs (C-order (region, sample)) for rows [lo, hi)
-        of the window, mirroring `_svar2_haps.py:_gather_inputs`. Shared by the
-        super-batch fill (`_fill_super_batch`, production) and the per-batch parity
-        reference (`tests/dataset/test_streaming_phase2_pr2.py:_per_batch_reference`).
+        """Gather the per-row FFI inputs for window rows [lo, hi).
+
+        Rows are C-order (region, sample), mirroring
+        `_svar2_haps.py:_gather_inputs`. Shared by the super-batch fill
+        (`_fill_super_batch`, production) and the per-batch parity reference
+        (`tests/dataset/test_streaming_phase2_pr2.py:_per_batch_reference`).
         """
         r_idx = np.asarray(r_idx, np.intp)
         n_s = len(np.asarray(s_idx))
@@ -2502,9 +2554,11 @@ class _Svar2Backend:
         buf: object,
         parallel: bool,
     ) -> None:
-        """Reconstruct C-order rows [sb_lo, sb_hi) of the window into the recycled
-        `Svar2ReconBuf` (fills, doesn't return): the multi-core super-batch path,
-        drained afterwards via `_drain`."""
+        """Reconstruct C-order window rows [sb_lo, sb_hi) into the recycled buffer.
+
+        Fills `Svar2ReconBuf` rather than returning it: the multi-core super-batch
+        path, drained afterwards via `_drain`.
+        """
         from ..genvarloader import svar2_reconstruct_super_batch
 
         (
@@ -2550,10 +2604,13 @@ class _Svar2Backend:
         )
 
     def _est_out_bytes(self, r_idx: NDArray[np.intp], n_rows: int) -> int:
-        """Estimate reconstructed super-batch bytes (~ rows*ploidy*mean_region_width)
-        to gate `should_parallelize` *before* the fill -- the fill IS the reconstruct,
-        so the buffer's exact `total_bytes` is only known after. An overestimate is
-        harmless (it only flips the parallel decision, never correctness)."""
+        """Estimate reconstructed super-batch bytes, ~ rows*ploidy*mean_region_width.
+
+        This gates `should_parallelize` *before* the fill -- the fill IS the
+        reconstruct, so the buffer's exact `total_bytes` is only known after. An
+        overestimate is harmless (it only flips the parallel decision, never
+        correctness).
+        """
         r_idx = np.asarray(r_idx, np.intp)
         widths = self._regions[r_idx, 2] - self._regions[r_idx, 1]
         mean_width = int(max(1, widths.mean())) if len(widths) else 1
@@ -2561,9 +2618,10 @@ class _Svar2Backend:
 
 
 class _VcfBackend:
-    """Streaming VCF read backend: drives a `RecordStreamEngine` (issue #276
-    tasks 3b/5) directly over a live VCF/BCF, with no on-disk `.svar` store and
-    no on-disk gvl dataset. Unlike `_Svar1Backend` there is no split
+    """Streaming VCF read backend, driving a `RecordStreamEngine` over a live VCF.
+
+    Reads a VCF/BCF directly (issue #276 tasks 3b/5), with no on-disk `.svar`
+    store and no on-disk gvl dataset. Unlike `_Svar1Backend` there is no split
     read/generate seam (`read_window`/`generate_batch`) -- a VCF/BCF has no
     equivalent of SVAR1's precomputed CSR offsets to read ahead of generation,
     so this backend supports ONLY the "engine" prefetch strategy
@@ -2641,9 +2699,11 @@ class _VcfBackend:
 
     @property
     def has_cached_af(self) -> bool:
-        """Whether the source VCF header declares an INFO/AF field (Wave B PR-B2,
-        #319) -- the SAME condition gvl.write uses to cache AF into the written
-        .gvi, so streaming <-> written agree on AF availability."""
+        """Whether the source VCF header declares an INFO/AF field.
+
+        Wave B PR-B2, #319 -- the SAME condition gvl.write uses to cache AF into
+        the written .gvi, so streaming <-> written agree on AF availability.
+        """
         return self._has_cached_af
 
     def build_engine(
@@ -2658,9 +2718,11 @@ class _VcfBackend:
         var_fields: "list[str] | None" = None,
         var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
-        """Construct a `RecordStreamEngine("vcf", ...)` (Rust producer/consumer
-        engine, issue #276 tasks 3b/5) that decodes each window's variant
-        records straight from the VCF/BCF. `jobs` is one entry per WINDOW,
+        """Construct a `RecordStreamEngine("vcf", ...)` over the live VCF/BCF.
+
+        The Rust producer/consumer engine (issue #276 tasks 3b/5) decodes each
+        window's variant records straight from the VCF/BCF. `jobs` is one entry
+        per WINDOW,
         `(contig_idx, region_starts, region_ends, s_lo, s_hi)`, in the SAME
         order `_iter_batches` will drive `.next_batch()` -- mirrors
         `_Svar1Backend.build_engine`'s job-array unpacking exactly, minus the
@@ -2753,8 +2815,9 @@ class _VcfBackend:
 
 
 class _PgenBackend:
-    """Streaming PGEN read backend: drives a `RecordStreamEngine` (issue #276
-    tasks 3b/11) directly over a live `.pgen`/`.pvar`/`.psam` file-set, with no
+    """Streaming PGEN read backend, driving a `RecordStreamEngine` over a file-set.
+
+    Reads a live `.pgen`/`.pvar`/`.psam` file-set (issue #276 tasks 3b/11), with no
     on-disk gvl dataset. Mirrors `_VcfBackend` exactly (same duck interface,
     same "engine"-only prefetch restriction -- PGEN has no `read_window`/
     `generate_batch` split either); the only differences are (a) header
@@ -2833,7 +2896,9 @@ class _PgenBackend:
     @property
     def has_cached_af(self) -> bool:
         """PGEN record streams carry no INFO -> no AF (Wave B PR-B2, #319).
-        AF filtering on PGEN is guarded upstream; always False."""
+
+        AF filtering on PGEN is guarded upstream; always False.
+        """
         return False
 
     def build_engine(
@@ -2848,9 +2913,11 @@ class _PgenBackend:
         var_fields: "list[str] | None" = None,
         var_window: "tuple[NDArray, np.dtype, VarWindowOpt] | None" = None,
     ) -> object:
-        """Construct a `RecordStreamEngine("pgen", ...)` (Rust producer/consumer
-        engine, issue #276 tasks 3b/11) that decodes each window's variant
-        records straight from the `.pgen`/`.pvar`/`.psam` file-set. `jobs` is
+        """Construct a `RecordStreamEngine("pgen", ...)` over the live file-set.
+
+        The Rust producer/consumer engine (issue #276 tasks 3b/11) decodes each
+        window's variant records straight from the `.pgen`/`.pvar`/`.psam`
+        file-set. `jobs` is
         one entry per WINDOW, `(contig_idx, region_starts, region_ends, s_lo,
         s_hi)`, in the SAME order `_iter_batches` will drive `.next_batch()` --
         mirrors `_VcfBackend.build_engine` exactly, minus the VCF-only

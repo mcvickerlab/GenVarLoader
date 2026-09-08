@@ -99,8 +99,7 @@ def _verify_fingerprint(svar_path: Path, link: SvarLink | None) -> None:
 
 
 def migrate_svar_link(gvl_path: str | Path) -> None:
-    """Upgrade a legacy GVL dataset's ``link.svar`` symlink to an
-    ``svar_link`` entry in ``metadata.json`` and remove the symlink.
+    """Upgrade a legacy GVL dataset's ``link.svar`` symlink to an ``svar_link`` entry in ``metadata.json`` and remove the symlink.
 
     Idempotent. No-op when ``svar_link`` is already populated, or when the
     dataset has no SVAR dependency.

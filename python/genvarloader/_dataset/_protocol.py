@@ -34,11 +34,12 @@ class Reconstructor(Protocol[T]):
         flat: bool = False,
         to_rc: "NDArray[np.bool_] | None" = None,
     ) -> T:
-        """``flat`` only changes behavior for :class:`Haps` producing
-        ``RaggedVariants`` (it returns a flat ``_FlatVariants`` instead); all
-        other reconstructors are already flat-native and accept-and-ignore it.
+        """``flat`` only changes behavior for :class:`Haps` producing ``RaggedVariants`` (it returns a flat ``_FlatVariants`` instead).
+
+        All other reconstructors are already flat-native and accept-and-ignore it.
 
         ``to_rc`` is a per-row boolean mask (True = reverse-complement this row).
         On the Rust backend, flat-seq kinds fold RC in-kernel; on numba the
-        caller's post-pass handles it and this param is ignored by each method."""
+        caller's post-pass handles it and this param is ignored by each method.
+        """
         ...

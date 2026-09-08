@@ -9,19 +9,17 @@ N_RETRIES = 3
 
 
 def fetch(name: Literal["geuvadis_ebi", "1kgp"]) -> dict[str, Path]:
-    """Download and cache data for constructing/opening a GVL dataset. Files are cached in the
-    user's home directory under :code:`~/.cache/genvarloader`.
+    """Download and cache data for constructing/opening a GVL dataset.
 
-    Parameters
-    ----------
-    name
-        The name of the dataset to fetch. Can be one of:
+    Files are cached in the user's home directory under :code:`~/.cache/genvarloader`.
 
-        - "geuvadis_ebi": Geuvadis data for the original analyses by Lappalainen et al. 2013. Phased, normalized, and split into biallelic variants.
-        - "1kgp": 1000 Genomes Project, all 3,202 individuals. Phased, normalized, and split into biallelic variants.
+    Args:
+        name: The name of the dataset to fetch. Can be one of:
 
-    Returns
-    -------
+            - "geuvadis_ebi": Geuvadis data for the original analyses by Lappalainen et al. 2013. Phased, normalized, and split into biallelic variants.
+            - "1kgp": 1000 Genomes Project, all 3,202 individuals. Phased, normalized, and split into biallelic variants.
+
+    Returns:
         A dictionary of paths to the fetched data.
     """
     if name == "geuvadis_ebi":

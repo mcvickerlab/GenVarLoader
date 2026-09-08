@@ -133,6 +133,26 @@ def build_readbound_diffs(
 
     Returns the ``(R*S, P)`` diffs array (query order region-major, sample-minor).
     """
+    return cast(
+        "NDArray[np.int32]",
+        hap_diffs_from_svar2_readbound(*readbound_diff_inputs(svar2, contig, regions)),
+    )
+
+
+def readbound_diff_inputs(
+    svar2: "SparseVar2",
+    contig: str,
+    regions,  # iterable of (start, end), length R
+) -> tuple:
+    """The positional FFI arguments [`build_readbound_diffs`] passes, assembled.
+
+    Split out so callers that need the *same* batch through a different entry --
+    ``gather_svar2_readbound``, or ``hap_diffs_from_svar2_readbound`` with a
+    prebuilt gather -- shape the inputs identically instead of re-deriving them.
+
+    Returns ``(store, contig, region_starts, orig_samples, vk_snp_range,
+    vk_indel_range, dense_snp_range, dense_indel_range, region_bounds, ploidy)``.
+    """
     reg = [(int(s), int(e)) for s, e in regions]
     R = len(reg)
     S = svar2.n_samples
@@ -167,7 +187,7 @@ def build_readbound_diffs(
 
     store = Svar2Store(str(svar2.path), svar2.contigs, svar2.n_samples, svar2.ploidy)
 
-    diffs = hap_diffs_from_svar2_readbound(
+    return (
         store,
         contig,
         region_starts,
@@ -179,8 +199,6 @@ def build_readbound_diffs(
         region_bounds,
         P,
     )
-
-    return cast("NDArray[np.int32]", diffs)
 
 
 def build_readbound_tracks(
@@ -341,6 +359,9 @@ def build_readbound_variants(
             dense_indel_range,
             P,
             [],
+            np.repeat(np.asarray([end for _, end in regions], np.uint32), S),
+            False,
+            False,
         )
     )
 

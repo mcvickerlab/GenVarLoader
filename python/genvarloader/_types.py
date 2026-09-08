@@ -40,11 +40,9 @@ class AnnotatedHaps:
     def reshape(self, shape: int | tuple[int, ...]):
         """Reshape the haplotypes and all annotations.
 
-        Parameters
-        ----------
-        shape
-            New shape for the haplotypes and all annotations. The total number of elements
-            must remain the same.
+        Args:
+            shape: New shape for the haplotypes and all annotations. The total number of elements
+                must remain the same.
         """
         return AnnotatedHaps(
             self.haps.reshape(shape),
@@ -55,10 +53,8 @@ class AnnotatedHaps:
     def squeeze(self, axis: int | tuple[int, ...] | None = None) -> AnnotatedHaps:
         """Squeeze the haplotypes and all annotations along the specified axis.
 
-        Parameters
-        ----------
-        axis
-            Axis or axes to squeeze. If None, all axes of length 1 will be squeezed.
+        Args:
+            axis: Axis or axes to squeeze. If None, all axes of length 1 will be squeezed.
         """
         return AnnotatedHaps(
             self.haps.squeeze(axis),
@@ -91,44 +87,39 @@ class Reader(Protocol):
         **kwargs,
     ) -> NDArray:
         """Read data corresponding to given genomic coordinates, akin to orthogonal indexing.
+
         The output shape will have length as the final dimension/axis i.e. (..., length).
 
-        Parameters
-        ----------
-        contig : str
-            Name of the contig/chromosome.
-        starts : ArrayLike
-            Start coordinates, 0-based.
-        ends : ArrayLike
-            End coordinates, 0-based exclusive.
-        **kwargs
-            Additional keyword arguments. For example, which samples or ploid numbers to
-            return.
+        Args:
+            contig (str): Name of the contig/chromosome.
+            starts (ArrayLike): Start coordinates, 0-based.
+            ends (ArrayLike): End coordinates, 0-based exclusive.
+            **kwargs: Additional keyword arguments. For example, which samples or ploid numbers to
+                return.
 
-        Returns
-        -------
-        NDArray
-            Data corresponding to the given genomic coordinates. The final axis is the
-            length axis i.e. has length == (ends - starts).sum().
+        Returns:
+            NDArray: Data corresponding to the given genomic coordinates. The final axis is the
+                length axis i.e. has length == (ends - starts).sum().
 
-        Notes
-        -----
-        When multiple regions are provided (i.e. multiple starts and ends) they should
-        be concatenated together in the output array along the length dimension.
+        Notes:
+            When multiple regions are provided (i.e. multiple starts and ends) they should
+            be concatenated together in the output array along the length dimension.
         """
         ...
 
     @staticmethod
     def rev_strand_fn(data: NDArray) -> NDArray:
-        """Function to reverse (and potentially complement) data for a genomic region. This
-        is used when the strand is negative."""
+        """Function to reverse (and potentially complement) data for a genomic region.
+
+        This is used when the strand is negative.
+        """
         ...
 
 
 class IntervalTrack(Protocol):
-    """Structural protocol implemented by interval-valued track readers
-    (e.g. :class:`BigWigs`, :class:`Table`). Used by :func:`gvl.write()` to
-    accept either source via the ``tracks=`` parameter.
+    """Structural protocol implemented by interval-valued track readers (e.g. :class:`BigWigs`, :class:`Table`).
+
+    Used by :func:`gvl.write()` to accept either source via the ``tracks=`` parameter.
     """
 
     name: str
@@ -143,8 +134,7 @@ class IntervalTrack(Protocol):
         sample: str | list[str] | None = None,
         **kwargs,
     ) -> NDArray[np.int32]:
-        """Return shape ``(regions, samples)`` count of intervals overlapping each
-        ``(region, sample)`` cell."""
+        """Return shape ``(regions, samples)`` count of intervals overlapping each ``(region, sample)`` cell."""
         ...
 
     def _intervals_from_offsets(

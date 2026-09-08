@@ -20,10 +20,9 @@ __all__ = ["validate_dataset"]
 def validate_dataset(metadata: Metadata, path: Path) -> None:
     """Validate an on-disk dataset before constructing readers.
 
-    Raises
-    ------
-    ValueError
-        On an incompatible format version or a structural/size integrity failure.
+    Raises:
+        ValueError: On an incompatible format version or a structural/size
+            integrity failure.
     """
     _check_format_version(metadata, path)
     _check_integrity(metadata, path)

@@ -76,6 +76,8 @@ fn genvarloader(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(ffi::hap_diffs_from_svar2_readbound, m)?)?;
+    m.add_class::<ffi::Svar2ReadboundGather>()?;
+    m.add_function(wrap_pyfunction!(ffi::gather_svar2_readbound, m)?)?;
     m.add_function(wrap_pyfunction!(
         ffi::reconstruct_annotated_haplotypes_fused,
         m

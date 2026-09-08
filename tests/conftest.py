@@ -11,6 +11,7 @@ predictable. Where a session-scoped opened Dataset is genuinely useful,
 prefer adding it inside the integration test file that needs it.
 """
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,131 @@ def phased_pgen_gvl(synthetic_case) -> Path:
 @pytest.fixture(scope="session")
 def phased_svar_gvl(synthetic_case) -> Path:
     return synthetic_case.gvl_path["svar"]
+
+
+# --- SVAR2 dataset (opens as Svar2Haps) --------------------------------------
+#
+# Deliberately NOT built from `synthetic_case`/`reference` above: those cover
+# the SVAR1/VCF/PGEN `Haps` read path. `Svar2Haps` is a structurally different
+# reconstructor (reads a `.svar2` store read-bound via Rust FFI, see
+# docs/superpowers/specs/2026-07-23-phase0-realcorpus-findings.md), and the
+# tiny fixture below (mirroring tests/dataset/test_svar2_dataset.py::_src /
+# svar2_fixture, already verified in that Phase-0 doc to reproduce #315) is
+# sufficient -- the defect is content-independent. It needs its own matching
+# reference (a different contig/length than the shared `reference` fixture),
+# hence the paired `svar2_slot_reference` fixture below rather than reuse of
+# `reference`.
+
+# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
+# (C>CAT), dense SNP@9 (G>C, carried by 3 haps), DEL@11 (GTA>G, ilen -2).
+_SVAR2_SLOT_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
+_SVAR2_SLOT_VCF = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
+chr1\t10\t.\tG\tC\t.\t.\t.\tGT\t1|1\t1|0
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
+"""
+
+
+@pytest.fixture(scope="session")
+def _svar2_slot_src(tmp_path_factory) -> tuple[Path, Path]:
+    """(bcf, ref) reproducing the #315 pinned record class: ordinary SNP,
+    insertion, dense SNP, and deletion content over 2 samples -- enough for
+    >=1 (region, sample) group with n_variants > 0 (the defect is
+    content-independent, see the Phase-0 findings doc)."""
+    d = tmp_path_factory.mktemp("svar2_slot_src")
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR2_SLOT_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(_SVAR2_SLOT_VCF)
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+    return bcf, ref
+
+
+@pytest.fixture(scope="session")
+def svar2_slot_reference(_svar2_slot_src):
+    """Opened ``gvl.Reference`` matching `phased_svar2_gvl`'s tiny chr1.
+
+    Carve-out vs. the "yield paths, not Datasets" convention (see module
+    docstring): same rationale as `reference` above -- ``in_memory=False`` is
+    metadata-only, and the paired dataset fixture needs an exactly-matching
+    reference to open against.
+    """
+    import genvarloader as gvl
+
+    _bcf, ref = _svar2_slot_src
+    return gvl.Reference.from_path(ref, in_memory=False)
+
+
+@pytest.fixture(scope="session")
+def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
+    """A gvl dataset written from a ``.svar2`` source -> opens as ``Svar2Haps``.
+
+    Reproduces the Phase-0-pinned record class for #315 (see
+    docs/superpowers/specs/2026-07-23-phase0-realcorpus-findings.md): >=1
+    (region, sample) group with n_variants > 0 via ordinary SNP/indel content.
+    Open with `svar2_slot_reference`, not the shared `reference` fixture (this
+    store uses its own tiny reference, see `_svar2_slot_src`). Written with
+    ``max_jitter=0``: variant-windows/variants mode raises NotImplementedError
+    on an SVAR2 dataset written with max_jitter>0 (no right-clip support).
+
+    The bed repeats the same 4-variant window 80x (still only 4 distinct
+    variants / 2 samples -- "tiny" in data terms): the "variants" (non-window)
+    output branch's real payload for this fixture's handful of variants is
+    small enough to sit under slot_overhead_bytes' 4096-byte floor at low
+    instance counts, masking the #315 defect there even though the same
+    zeroed-placeholder bug applies (see _impl.py:1437-1563). Per-instance
+    offset overhead in the (buggy) estimate grows slower than per-instance
+    real payload, so replicating windows (not variant complexity) is enough
+    to cross the floor and expose the sibling defect too -- confirmed
+    empirically before picking 80 (green up to ~40 regions, red by 60+).
+    """
+    import polars as pl
+    from genoray import SparseVar2, _core
+
+    import genvarloader as gvl
+
+    bcf, ref = _svar2_slot_src
+    store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(store),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (store / "meta.json").exists(), "svar2 conversion did not finish"
+
+    n_regions = 80
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1"] * n_regions,
+            "chromStart": [0] * n_regions,
+            "chromEnd": [40] * n_regions,
+        }
+    )
+    out = tmp_path_factory.mktemp("svar2_slot_gvl") / "ds.gvl"
+    gvl.write(
+        out,
+        bed,
+        variants=SparseVar2(store),
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
+    return out
 
 
 # --- 1kg datasets (slow tier) ------------------------------------------------

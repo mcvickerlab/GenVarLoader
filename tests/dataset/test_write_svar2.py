@@ -153,7 +153,10 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
             samples=sorted_samples,
         )
         # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal _find_ranges'
-        # row-major (R*S*P, 2). This pins the reshape done in _write_from_svar2.
+        # row-major (R*S*P, 2). This is the layout oracle: it pins the transposed,
+        # chunked write in _write_from_svar2 (hap-major chunks reordered via
+        # `.transpose(2, 0, 1, 3)` into the region-major memmap) against genoray's
+        # unchunked, row-major `_find_ranges` bundle.
         np.testing.assert_array_equal(
             vk_snp[lo:hi].reshape(rc * S * P, 2),
             np.asarray(d["vk_snp_range"], np.int64),
@@ -328,97 +331,220 @@ def test_svar2_extend_to_length_false_raises(svar2_store: Path, tmp_path: Path):
         )
 
 
-def _reference_region_max_ends(svar2, contig, starts, ends, samples):
-    """Byte-for-byte copy of the ORIGINAL _svar2_region_max_ends triple-loop,
-    kept here as the oracle that pins the vectorized rewrite byte-identical."""
-    import numpy as np
-
-    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = [svar2.available_samples.index(s) for s in samples]
-    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = dec.data["pos"]
-    ilen_arr = dec.data["ilen"]
-    off = np.asarray(dec.offsets)
-    out = np.asarray(ends, np.int64).copy()
-    for r in range(R):
-        best_pos, best_end = -1, -1
-        for s in sel:
-            for p in range(P):
-                h = (r * S_all + s) * P + p
-                a, b = int(off[h]), int(off[h + 1])
-                if a == b:
-                    continue
-                seg_pos = pos_arr[a:b]
-                seg_ilen = ilen_arr[a:b]
-                j = int(np.argmax(seg_pos))
-                p_pos = int(seg_pos[j])
-                p_end = (p_pos + 1) - min(int(seg_ilen[j]), 0)
-                if p_pos > best_pos or (p_pos == best_pos and p_end > best_end):
-                    best_pos, best_end = p_pos, p_end
-        if best_pos >= 0:
-            out[r] = best_end
-    return out.astype(np.int32)
-
-
-def test_svar2_region_max_ends_matches_reference(svar2_store: Path):
-    """Vectorized _svar2_region_max_ends must equal the original per-hap loop,
-    including the pos-then-end tie-break and the empty-region default = chromEnd."""
+def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
+    """A tiny max_mem must force multiple chunks and produce identical output."""
     from genoray import SparseVar2
 
-    from genvarloader._dataset._write import _svar2_region_max_ends
+    bed = pl.DataFrame(
+        {"chrom": ["chr1", "chr1"], "chromStart": [0, 5], "chromEnd": [20, 30]}
+    )
 
-    svar2 = SparseVar2(svar2_store)
-    # Overlaps the DEL at 0-based POS 11 with varying windows + a no-variant
-    # region ([20,30]) so both the extension and keep-chromEnd branches run.
-    starts = np.array([0, 0, 5, 12, 20], dtype=np.int64)
-    ends = np.array([15, 20, 10, 13, 30], dtype=np.int64)
-    samples = list(svar2.available_samples)
+    calls: list[int] = []
+    real = SparseVar2._find_ranges_chunked
 
-    got = _svar2_region_max_ends(svar2, "chr1", starts, ends, samples)
-    ref = _reference_region_max_ends(svar2, "chr1", starts, ends, samples)
-    np.testing.assert_array_equal(got, ref)
+    def spy(self, *args, **kwargs):
+        stream = real(self, *args, **kwargs)
+        calls.append(stream.samples_per_chunk)
+        return stream
 
-    # Anti-vacuity: at least one region must be EXTENDED past its chromEnd (the
-    # DEL at POS 11 extends windows that overlap it), else the test only checks
-    # the trivial default path.
-    assert (got != ends.astype(np.int32)).any(), (
-        f"test is vacuous: no region extended (got={got.tolist()}, ends={ends.tolist()})"
+    big = tmp_path / "big.gvl"
+    gvl.write(
+        big,
+        bed,
+        variants=SparseVar2(svar2_store),
+        samples=None,
+        max_mem="4g",
+        overwrite=True,
+    )
+
+    SparseVar2._find_ranges_chunked = spy
+    try:
+        small = tmp_path / "small.gvl"
+        # 2 regions x ploidy 2 x 2 channels x 2 endpoints x 8 bytes = 128 bytes
+        # per sample; the chunker's own 2x safety margin needs 256 bytes for
+        # even one sample, so 256 is the smallest budget that both succeeds
+        # and forces one-sample-per-chunk (this store has S=2, so that's 2
+        # chunks).
+        gvl.write(
+            small,
+            bed,
+            variants=SparseVar2(svar2_store),
+            samples=None,
+            max_mem=256,
+            overwrite=True,
+        )
+    finally:
+        SparseVar2._find_ranges_chunked = real
+
+    assert calls and all(c == 1 for c in calls), (
+        f"expected one sample per chunk under a 256-byte budget, got {calls}"
+    )
+
+    for name in (
+        "vk_snp_range.npy",
+        "vk_indel_range.npy",
+        "dense_snp_range.npy",
+        "dense_indel_range.npy",
+        "sample_cols.npy",
+    ):
+        a = (big / "genotypes" / "svar2_ranges" / name).read_bytes()
+        b = (small / "genotypes" / "svar2_ranges" / name).read_bytes()
+        assert a == b, name
+
+    # regions.npy (not input_regions.arrow, which holds the pre-extension bed
+    # verbatim) carries the write-time-extended chromEnd; columns are
+    # chrom_idx, chromStart, chromEnd, strand.
+    ra = np.load(big / "regions.npy")
+    rb = np.load(small / "regions.npy")
+    assert ra[:, 2].tolist() == rb[:, 2].tolist()
+
+
+def test_write_svar2_max_ends_extend_chromend(svar2_store: Path, tmp_path):
+    """chromEnd must extend past a deletion that starts inside the region.
+
+    The fixture's DEL is at 0-based POS 11 with ilen -2, so it ends at 14. A
+    region of [0, 12) must be extended to 14.
+    """
+    from genoray import SparseVar2
+
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [12]})
+    out = tmp_path / "ext.gvl"
+    gvl.write(
+        out,
+        bed,
+        variants=SparseVar2(svar2_store),
+        samples=None,
+        max_mem="1g",
+        overwrite=True,
+    )
+    # regions.npy carries the write-time-extended chromEnd (input_regions.arrow
+    # holds the pre-extension bed verbatim); columns are chrom_idx, chromStart,
+    # chromEnd, strand.
+    regions = np.load(out / "regions.npy")
+    assert regions[:, 2].tolist() == [14]
+
+
+def test_svar2_ranges_cache_bytes():
+    """Both var-key channels: 2 * R * S * P * 2 endpoints * 8 bytes."""
+    from genvarloader._dataset._write import _svar2_ranges_cache_bytes
+
+    assert _svar2_ranges_cache_bytes(1, 1, 2) == 2 * 1 * 1 * 2 * 2 * 8
+    # The scale from gvl#333: ~98 GiB for one chromosome/panel.
+    big = _svar2_ranges_cache_bytes(3964, 414830, 2)
+    assert 90 * 1024**3 < big < 110 * 1024**3
+
+
+def test_svar2_preflight_warns_when_disk_is_short(tmp_path, monkeypatch):
+    """A projected cache larger than free space must warn, not silently proceed."""
+    from collections import namedtuple
+
+    from loguru import logger
+
+    from genvarloader._dataset import _write
+
+    Usage = namedtuple("Usage", "total used free")
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        monkeypatch.setattr(
+            _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
+        )
+        n = _write._svar2_preflight(tmp_path, 3964, 414830, 2)
+    finally:
+        logger.remove(sink)
+
+    assert n == _write._svar2_ranges_cache_bytes(3964, 414830, 2)
+    assert any("free" in m for m in msgs), msgs
+
+
+@pytest.fixture(scope="module")
+def svar2_store_unsorted(vcf_and_ref, tmp_path_factory) -> Path:
+    """A store whose own sample order is NOT the lexicographic order gvl writes.
+
+    `write` sorts the selection, so this is the case where `sample_cols` is a real
+    permutation and the `samples=None` fast path in `_write_from_svar2` must NOT fire.
+    """
+    bcf, ref = vcf_and_ref
+    from genoray import _core
+
+    out = tmp_path_factory.mktemp("svar2_write_unsorted") / "store.svar2"
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        ["S1", "S0"],  # reversed vs. the lexicographic order gvl.write emits
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (out / "meta.json").exists(), "conversion did not finish"
+    return out
+
+
+def test_write_svar2_sample_cols_permutes_unsorted_store(
+    svar2_store_unsorted: Path, tmp_path: Path
+):
+    """sample_cols must map sorted slot -> store column, not slot -> slot.
+
+    Guards the `list.index` -> hirola swap (#351): `HashTable.add` returns the rank
+    in its deduped key array, which equals the store position only because sample
+    names are unique. A store that is already sorted cannot tell the two apart, so
+    use a reversed one.
+    """
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store_unsorted)
+    assert svar2.available_samples == ["S1", "S0"], "fixture lost its store order"
+
+    bed = pl.DataFrame(
+        {"chrom": ["chr1", "chr1"], "chromStart": [0, 5], "chromEnd": [20, 15]}
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
+    rd = out / "genotypes" / "svar2_ranges"
+    sorted_samples = sorted(svar2.available_samples)  # ["S0", "S1"]
+    sample_cols = np.load(rd / "sample_cols.npy")
+    assert (
+        sample_cols.tolist()
+        == [svar2.available_samples.index(s) for s in sorted_samples]
+        == [1, 0]
+    )
+
+    # The cache must be laid out in the SORTED slot order, i.e. match a direct
+    # _find_ranges over the sorted names -- the `samples=None` fast path must not
+    # have fired and silently written the store's own order.
+    meta = json.loads((rd / "svar2_meta.json").read_text())
+    shape = tuple(meta["vk_snp_range"]["shape"])
+    vk_snp = np.array(
+        np.memmap(rd / "vk_snp_range.npy", dtype=np.int64, mode="r", shape=shape)
+    )
+    d = svar2._find_ranges(
+        "chr1",
+        bed["chromStart"].to_numpy(),
+        bed["chromEnd"].to_numpy(),
+        samples=sorted_samples,
+    )
+    np.testing.assert_array_equal(
+        vk_snp.reshape(-1, 2), np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
     )
 
 
-def test_svar2_region_max_ends_large_positions():
-    """Regression: the composite key must pack a BOUNDED tie-break, not the
-    absolute end. A variant past ~2 Mb (real chromosomes are hundreds of Mb)
-    must not overflow the packing / assert-fail. Uses a stub whose decode returns
-    large positions so we can exercise realistic coordinates without a huge store.
+def test_write_svar2_duplicate_store_samples_raises(
+    svar2_store: Path, tmp_path: Path, monkeypatch
+):
+    """Duplicate sample names in the store must be refused, not silently mapped.
+
+    `list.index` used to point two slots at one column and `HashTable.add` would
+    shift every column after the duplicate; both write a wrong dataset (#351).
     """
-    from types import SimpleNamespace
+    from genoray import SparseVar2
 
-    import numpy as np
+    svar2 = SparseVar2(svar2_store)
+    monkeypatch.setattr(svar2, "available_samples", ["S0", "S0", "S1"])
 
-    from genvarloader._dataset._write import _svar2_region_max_ends
-
-    # 2 regions x 1 sample x ploidy 1 = 2 haps, 1 variant each:
-    #   region 0: SNP  at pos 3_000_000 (ilen 0)  -> end 3_000_001
-    #   region 1: DEL  at pos 5_000_000 (ilen -2) -> end 5_000_003
-    class _StubSvar2:
-        n_samples = 1
-        ploidy = 1
-        available_samples = ["S0"]
-
-        def decode(self, contig, regions):
-            return SimpleNamespace(
-                data={
-                    "pos": np.array([3_000_000, 5_000_000], np.int64),
-                    "ilen": np.array([0, -2], np.int64),
-                },
-                offsets=np.array([0, 1, 2], np.int64),
-            )
-
-    svar2 = _StubSvar2()
-    starts = np.array([0, 0], np.int64)
-    ends = np.array([10, 10], np.int64)  # small chromEnd so both variants extend
-    got = _svar2_region_max_ends(svar2, "chrBig", starts, ends, ["S0"])
-    ref = _reference_region_max_ends(svar2, "chrBig", starts, ends, ["S0"])
-    np.testing.assert_array_equal(got, ref)
-    np.testing.assert_array_equal(got, np.array([3_000_001, 5_000_003], np.int32))
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [20]})
+    with pytest.raises(ValueError, match="duplicate sample names"):
+        gvl.write(tmp_path / "ds.gvl", bed, variants=svar2, overwrite=True)

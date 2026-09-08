@@ -98,8 +98,8 @@ def _ragged_stack_tracks(tracks: "list[Ragged]") -> "Ragged":
     per-element ``np.concatenate``.  The only loop is a bounded ``n_tracks`` pass to
     scatter each track's segments into the pre-allocated output buffer.
 
-    Algorithm
-    ---------
+    Algorithm:
+
     1. Stack the per-track 1-D offsets into an ``(n_tracks, n_batch+1)`` matrix and derive
        a ``(n_tracks, n_batch)`` lengths matrix.
     2. Transpose to ``(n_batch, n_tracks)`` and flatten → interleaved lengths in C-order,
@@ -241,12 +241,10 @@ class Tracks(Reconstructor[_T]):
     ) -> Tracks:
         """Configure the insertion-fill strategy for each active track.
 
-        Parameters
-        ----------
-        fill
-            Either a single :class:`InsertionFill` strategy applied to every
-            active track, or a mapping from track name to strategy. Track names
-            not present in the mapping fall back to :class:`Repeat5p`.
+        Args:
+            fill: Either a single :class:`InsertionFill` strategy applied to every
+                active track, or a mapping from track name to strategy. Track names
+                not present in the mapping fall back to :class:`Repeat5p`.
         """
         if isinstance(fill, InsertionFill):
             fills = {name: fill for name in self.active_tracks}
@@ -567,8 +565,8 @@ def build_flat_intervals(
     s_idx: NDArray[np.integer],
     n_samples: int,
 ) -> FlatIntervals:
-    """Pure-numpy gather of per-(region, sample, track) intervals into a
-    :class:`FlatIntervals` of shape ``(batch, n_tracks, ~itvs)`` in C-order
+    """Pure-numpy gather of per-(region, sample, track) intervals into a :class:`FlatIntervals` of shape ``(batch, n_tracks, ~itvs)`` in C-order.
+
     (batch outer, track inner) — matching the interleaved segment order of
     :meth:`Tracks._call_intervals`.
     """

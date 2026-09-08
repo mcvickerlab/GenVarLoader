@@ -94,7 +94,9 @@ class ReconstructionRequest:
 
 
 def _canonicalize_variant_table(variants: pl.DataFrame) -> pl.DataFrame:
-    """Materialize ``ILEN`` if missing and collapse list-typed ``ALT``/``ILEN``
+    """Canonicalize a variant table's ``ILEN`` and list-typed allele columns.
+
+    Materializes ``ILEN`` if missing and collapses list-typed ``ALT``/``ILEN``
     columns to scalar-per-row.
 
     Shared prep used by both :meth:`_Variants.from_table` (an Arrow file on
@@ -119,8 +121,11 @@ def _canonicalize_variant_table(variants: pl.DataFrame) -> pl.DataFrame:
 def _variant_arrays_from_table(
     variants: pl.DataFrame, one_based: bool = True
 ) -> tuple[NDArray[POS_TYPE], NDArray[np.int32], RaggedAlleles | None, RaggedAlleles]:
-    """POS/ILEN/REF/ALT -> (start, ilen, ref, alt) from an already-canonicalized
-    table (see :func:`_canonicalize_variant_table`)."""
+    """Split POS/ILEN/REF/ALT into ``(start, ilen, ref, alt)``.
+
+    Expects an already-canonicalized table (see
+    :func:`_canonicalize_variant_table`).
+    """
     ref = (
         RaggedAlleles.from_polars(variants["REF"]) if "REF" in variants.schema else None
     )
@@ -149,18 +154,13 @@ class _Variants:
         one_based: bool = True,
         info_fields: set[str] | None = None,
     ):
-        """
-        Loads variant info from a table. Must always have POS, ILEN, and ALT.
+        """Loads variant info from a table. Must always have POS, ILEN, and ALT.
 
-        Parameters
-        ----------
-        path : str | Path
-            The path to the variants table.
-        one_based : bool, optional
-            Whether the variants are one-based, by default False.
-        info_fields
-            Optional whitelist of numeric column names to load as info.
-            If ``None`` (default), load every numeric column except POS/ILEN.
+        Args:
+            path (str | Path): The path to the variants table.
+            one_based (bool, optional): Whether the variants are one-based, by default False.
+            info_fields: Optional whitelist of numeric column names to load as info.
+                If ``None`` (default), load every numeric column except POS/ILEN.
         """
         path = Path(path).resolve()
         variants = pl.read_ipc(path, memory_map=False)
@@ -183,8 +183,7 @@ class _Variants:
 
     @staticmethod
     def available_info_fields(path: str | Path) -> list[str]:
-        """Return numeric column names that would be loaded as info, without
-        materializing any data.
+        """Return numeric column names that would be loaded as info, without materializing any data.
 
         ``POS`` and ``ILEN`` are excluded — they're positional, not info.
         """
@@ -240,7 +239,7 @@ def _build_allele_layout(
 
 
 def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
-    """genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
+    """Genoray custom per-call FORMAT fields: name -> dtype, from <svar>/metadata.json.
 
     Returns {} when the metadata file is absent (non-SVAR / synthetic datasets).
     """
@@ -253,9 +252,11 @@ def _svar_format_fields(svar_dir: Path) -> dict[str, np.dtype]:
 
 @dataclass(slots=True)
 class _HapsFfiStatic:
-    """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the
-    fused kernels. Grows only with the variant/reference count (sub-linear in
-    samples), so it is cached for the lifetime of the Haps reconstructor."""
+    """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the fused kernels.
+
+    Grows only with the variant/reference count (sub-linear in
+    samples), so it is cached for the lifetime of the Haps reconstructor.
+    """
 
     v_starts: NDArray[np.int32]
     ilens: NDArray[np.int32]
@@ -299,6 +300,12 @@ class Haps(Reconstructor[_H]):
     """Output dtype of tokens produced via ``token_lut``."""
     unknown_token: int | None = None
     """Token id for bytes outside ``token_alphabet`` (set with ``token_lut``)."""
+    token_alphabet: bytes | None = None
+    """The normalized alphabet ``token_lut`` was built from (see
+    ``_normalize_token_alphabet``). Set together with ``token_lut``/``token_dtype``/
+    ``unknown_token`` so the original alphabet survives alongside the derived LUT
+    (needed to serialize a ``with_settings(token_alphabet=...)`` config for
+    ``mode='double_buffered'`` without lossily inverting the LUT)."""
     window_opt: VarWindowOpt | None = None
     """Options for variant-windows output mode. Set via ``with_seqs('variant-windows', opt)``."""
     unphased_union: bool = False
@@ -551,8 +558,9 @@ class Haps(Reconstructor[_H]):
         idx: NDArray[np.integer],
         regions: NDArray[np.int32],
     ) -> NDArray[np.int32]:
-        """Compute ``(B, P)`` per-query haplotype lengths without running the
-        full reconstruction. Used by the spliced path to size buffers and
+        """Compute ``(B, P)`` per-query haplotype lengths without running the full reconstruction.
+
+        Used by the spliced path to size buffers and
         build a ``SplicePlan`` before the kernel is invoked.
 
         The body mirrors the length-calculation prefix of
@@ -782,8 +790,7 @@ class Haps(Reconstructor[_H]):
     def _allele_bytes_sum(
         self, idx: NDArray[np.integer], kind: Literal["alt", "ref"]
     ) -> NDArray[np.int64]:
-        """Exact total bytes of the selected variants' `kind` allele payload, per
-        instance flattened over ploidy.
+        """Exact total bytes of the selected variants' `kind` allele payload, per instance flattened over ploidy.
 
         Returns shape (len(idx) * ploidy,) of int64. O(|selected variants|);
         does not touch allele payload bytes — only the RaggedAlleles offsets.

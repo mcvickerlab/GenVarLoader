@@ -25,15 +25,11 @@ def sites_vcf_to_table(
 ) -> pl.DataFrame:
     """Extract a table of variant site info from a VCF. All sites must be bi-allelic.
 
-    Parameters
-    ----------
-    vcf
-        Path to a VCF or a :class:`genoray.VCF` instance. Note that :class:`genoray.VCF` can accept a filter function.
-    attributes
-        A list of attributes to include in the output table. Note that "CHROM", "POS", "REF", and "ALT" are always included
-        even if not in this list.
-    info_fields
-        A list of INFO fields to include in the output table.
+    Args:
+        vcf: Path to a VCF or a :class:`genoray.VCF` instance. Note that :class:`genoray.VCF` can accept a filter function.
+        attributes: A list of attributes to include in the output table. Note that "CHROM", "POS", "REF", and "ALT" are
+            always included even if not in this list.
+        info_fields: A list of INFO fields to include in the output table.
     """
     if not isinstance(vcf, VCF):
         vcf = VCF(vcf)
@@ -108,6 +104,7 @@ class DatasetWithSites(Generic[MaybeTRK]):
         max_variants_per_region: int = 1,
     ):
         """Dataset with variant sites, used to apply site-only variants e.g. from ClinVar to a Dataset of haplotypes.
+
         Currently only supports bi-allelic SNPs. Takes the intersection of the dataset regions and the sites, and
         applies the site-only variants to the Dataset's haplotypes.
 
@@ -119,17 +116,12 @@ class DatasetWithSites(Generic[MaybeTRK]):
         coordinates updated to reflect the applied variants. Locations where a site-only variant was applied will have a
         variant index of -2.
 
-        Parameters
-        ----------
-        dataset
-            Dataset of haplotypes and potentially tracks.
-        sites
-            Table of variant site information.
-        max_variants_per_region
-            Maximum number of variants per region. Currently only 1 is supported.
+        Args:
+            dataset: Dataset of haplotypes and potentially tracks.
+            sites: Table of variant site information.
+            max_variants_per_region: Maximum number of variants per region. Currently only 1 is supported.
 
-        Examples
-        --------
+        Examples:
         .. code-block:: python
 
             import genvarloader as gvl

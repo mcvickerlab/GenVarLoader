@@ -114,43 +114,6 @@ def test_buffered_flat_matches_ragged(seq_kind):
             np.testing.assert_array_equal(to_padded(got, b"N"), to_padded(rb, b"N"))
 
 
-@pytest.mark.parametrize("mode", ["buffered", "double_buffered"])
-def test_flat_buffered_rejects_variants_flank_tokens(mode):
-    """flat + variants + ride-along flank tokens is unsupported over the buffered
-    transport; to_dataloader must reject it up front (not crash mid-iteration)."""
-    import genvarloader as gvl
-
-    ds = (
-        gvl.get_dummy_dataset()
-        .with_seqs("variants")
-        .with_tracks(False)
-        .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=0)
-        .with_output_format("flat")
-    )
-    with pytest.raises(ValueError, match="flank"):
-        ds.to_dataloader(mode=mode, batch_size=2, buffer_bytes=4 * 1024 * 1024)
-
-
-@pytest.mark.parametrize("mode", ["buffered", "double_buffered"])
-def test_flat_buffered_rejects_variant_windows(mode):
-    """flat + 'variant-windows' output is unsupported over the buffered transport
-    (the producer schema does not carry the VarWindowOpt); to_dataloader must
-    reject it up front rather than crash mid-iteration."""
-    import genvarloader as gvl
-
-    ds = (
-        gvl.get_dummy_dataset()
-        .with_tracks(False)
-        .with_output_format("flat")
-        .with_seqs(
-            "variant-windows",
-            gvl.VarWindowOpt(flank_length=3, token_alphabet=b"ACGT", unknown_token=4),
-        )
-    )
-    with pytest.raises(ValueError, match="variant-windows"):
-        ds.to_dataloader(mode=mode, batch_size=2, buffer_bytes=4 * 1024 * 1024)
-
-
 def test_flat_buffered_plain_variants_still_works():
     """Regression guard: flat + variants WITHOUT flank tokens must NOT be rejected."""
     import genvarloader as gvl
@@ -167,3 +130,117 @@ def test_flat_buffered_plain_variants_still_works():
     )
     batches = list(dl)
     assert batches  # produced something, no rejection
+
+
+def _win_eq(a, b):
+    da, db = a.to_ragged(), b.to_ragged()
+    assert set(da) == set(db), f"keys differ: {set(da)} vs {set(db)}"
+    for k in da:
+        assert da[k].to_ak().to_list() == db[k].to_ak().to_list(), f"{k} mismatch"
+
+
+def _iter_mode_none(ds, batch_size):
+    """Per-item oracle: same sequential batches mode=None would yield."""
+    n = int(np.prod(ds.full_shape))
+    n = (n // batch_size) * batch_size  # drop_last=True
+    r, s = np.unravel_index(np.arange(n), ds.shape)
+    for i in range(0, n, batch_size):
+        yield ds[r[i : i + batch_size], s[i : i + batch_size]]
+
+
+def _with_ref_alleles(ds):
+    """Attach synthetic REF alleles to a dummy dataset's variants.
+
+    ``get_dummy_dataset()`` ships with ``variants.ref=None``; ``VarWindowOpt(ref="allele")``
+    needs REF allele bytes to be present to exercise the bare-tokenized-REF-allele
+    code path. Bare REF-allele mode reads ``variants.ref`` directly and never
+    consults the underlying (all-``"N"``) reference genome, so any valid
+    nucleotide bytes of the right per-variant lengths are sufficient for a parity
+    check; only the lengths need to stay consistent with each variant's ILEN.
+
+    Args:
+        ds: A dataset built from :func:`gvl.get_dummy_dataset`.
+
+    Returns:
+        A new dataset (input is left unmodified) whose ``variants.ref`` is set.
+    """
+    import dataclasses
+
+    import seqpro as sp
+    from einops import repeat
+
+    from genvarloader._utils import lengths_to_offsets
+    from genvarloader._variants._records import RaggedAlleles
+
+    variants = ds._seqs.variants
+    n_regions = 4
+    n_samples = 4
+    # Per genvarloader._dummy.get_dummy_dataset: alt allele lengths per region are
+    # [1, 1, 1, 2] with ilens [-2, -1, 0, 1], so ref_len = alt_len - ilen.
+    ref_lens = np.array([3, 2, 1, 1])
+    ref = RaggedAlleles.from_offsets(
+        data=repeat(sp.cast_seqs("ACGTACG"), "a -> (r a)", r=n_regions),
+        shape=(n_regions * n_samples, None),
+        offsets=lengths_to_offsets(repeat(ref_lens, "s -> (r s)", r=n_regions)),
+    )
+    new_vars = dataclasses.replace(variants, ref=ref)
+    new_seqs = dataclasses.replace(ds._seqs, variants=new_vars)
+    return dataclasses.replace(ds, _seqs=new_seqs)
+
+
+@pytest.mark.parametrize(
+    "ref,alt", [("window", "window"), ("window", "allele"), ("allele", "allele")]
+)
+def test_buffered_variant_windows_matches_per_item(ref, alt):
+    ds = gvl.get_dummy_dataset().with_tracks(False).with_output_format("flat")
+    if ref == "allele":
+        # get_dummy_dataset() has no REF alleles by default; VarWindowOpt(ref="allele")
+        # requires them, so attach synthetic ones for this parametrization only.
+        ds = _with_ref_alleles(ds)
+    ds = ds.with_seqs(
+        "variant-windows",
+        gvl.VarWindowOpt(
+            flank_length=2, token_alphabet=b"ACGT", unknown_token=4, ref=ref, alt=alt
+        ),
+    )
+    bs = 2
+    got = list(
+        ds.to_dataloader(
+            mode="buffered",
+            batch_size=bs,
+            shuffle=False,
+            drop_last=True,
+            buffer_bytes=10 * 1024 * 1024,
+        )
+    )
+    exp = list(_iter_mode_none(ds, bs))
+    assert len(got) == len(exp)
+    for g, e in zip(got, exp):
+        _win_eq(g, e)
+
+
+def test_buffered_variants_flank_tokens_matches_per_item():
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
+        .with_output_format("flat")
+    )
+    bs = 2
+    got = list(
+        ds.to_dataloader(
+            mode="buffered",
+            batch_size=bs,
+            shuffle=False,
+            drop_last=True,
+            buffer_bytes=10 * 1024 * 1024,
+        )
+    )
+    exp = list(_iter_mode_none(ds, bs))
+    assert len(got) == len(exp)
+    for g, e in zip(got, exp):
+        np.testing.assert_array_equal(
+            g.flank_tokens.to_ragged().to_ak().to_list(),
+            e.flank_tokens.to_ragged().to_ak().to_list(),
+        )

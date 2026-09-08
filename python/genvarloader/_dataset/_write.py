@@ -23,9 +23,11 @@ from genoray import exprs as _gexprs
 from genoray._io import atomic_write_path
 from genoray._svar import dense2sparse
 from genoray._svar._convert import _dense2sparse_with_length
+from genoray._svar2_batch import MAX_END_SHIFT
 from genoray._types import V_IDX_TYPE
 from genoray._contigs import ContigNormalizer
 from genoray._utils import format_memory, parse_memory
+from hirola import HashTable
 from joblib import Parallel, delayed
 from loguru import logger
 from natsort import natsorted
@@ -37,9 +39,11 @@ from seqpro.rag import Ragged, concatenate as rag_concatenate
 from tqdm.auto import tqdm
 
 from .._atomic import atomic_dir
+from .._fasta_cache import Fingerprint
 from .._ragged import INTERVAL_DTYPE  # noqa: F401  # kept for the migration reader import
 from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
+from ._indexing import s2i
 from ._svar2_link import Svar2Link
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
@@ -56,9 +60,10 @@ def _vcf_has_info_af(variants: VCF) -> bool:
 
 
 def _attach_af_column(variants: VCF) -> None:
-    """Attach a POS-aligned ``AF`` column onto the just-written ``.gvi`` index
-    (Wave B PR-B2, #317/#319), so a written VCF-sourced ``Dataset`` can
-    AF-filter like the streaming path.
+    """Attach a POS-aligned ``AF`` column onto the just-written ``.gvi`` index.
+
+    Wave B PR-B2, #317/#319 -- lets a written VCF-sourced ``Dataset`` AF-filter
+    like the streaming path.
 
     Deliberately does NOT use ``VCF._write_gvi_index(info=["AF"])`` -- as of
     ``genoray>=3.0.0,<4`` that silently drops the requested INFO column.
@@ -169,6 +174,7 @@ class Metadata(BaseModel, arbitrary_types_allowed=True):
     format_version: SemanticVersion | None = None
     svar_link: SvarLink | None = None
     svar2_link: Svar2Link | None = None
+    variants_fingerprint: "Fingerprint | None" = None
 
     @property
     def n_samples(self) -> int:
@@ -189,64 +195,64 @@ def write(
 ):
     """Write a GVL dataset.
 
-    Parameters
-    ----------
-    path
-        Path to write the dataset to.
-    bed
-        :func:`BED-like <genvarloader.read_bedlike()>` file or DataFrame of regions satisfying the BED3+ specification.
-        Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
-        Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
-    variants
-        A :code:`genoray` VCF or PGEN instance (:code:`genoray` is a GVL dependency so it will be import-able). All variants must be
-        left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
-        them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
-        command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
-        for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
-        :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
-    tracks
-        An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
-        sequence of them. Each track must have a unique ``name``; the on-disk
-        layout writes to ``<path>/intervals/<track.name>/``.
-    annot_tracks
-        Sample-independent annotation tracks, as a mapping of track name to source.
-        Each source is a path to an interval table, a path to a bigWig, or a polars
-        DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
-        ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
-        the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
-    samples
-        Samples to include in the dataset
-    max_jitter
-        Maximum jitter to add to the regions
-    overwrite
-        Whether to overwrite an existing dataset
-    max_mem
-        Approximate maximum total memory to use, including the genoray variant
-        index. The reader's index is loaded eagerly at the start of
-        :func:`write` (for :class:`~genoray.VCF` and :class:`~genoray.PGEN`)
-        so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
-        is subtracted from ``max_mem`` to determine the budget available for
-        genotype chunking. A :class:`ValueError` is raised if the remaining
-        budget is too small to fit even a single variant chunk. Otherwise
-        ``max_mem`` is a soft limit on overall usage and may be exceeded by
-        a small amount.
-    extend_to_length
-        Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
-        Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
-        haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
-        Disabling this also reduces the amount of data read/written and is faster to run.
+    Args:
+        path: Path to write the dataset to.
+        bed: :func:`BED-like <genvarloader.read_bedlike()>` file or DataFrame of regions satisfying the BED3+ specification.
+            Specifically, it must have columns 'chrom', 'chromStart', and 'chromEnd'. If 'strand' is present, its values must be either '+' or '-'.
+            Negative stranded regions will be reverse complemented during sequence and/or track reconstruction.
+        variants: A :code:`genoray` VCF or PGEN instance (:code:`genoray` is a GVL dependency so it will be import-able). All variants must be
+            left-aligned, bi-allelic, and atomized. Multi-allelic variants can be included by splitting
+            them into bi-allelic half-calls. For VCFs, the `bcftools norm <https://samtools.github.io/bcftools/bcftools.html#norm>`_
+            command can do all of this normalization. Likewise, see the `PLINK2 documentation <https://www.cog-genomics.org/plink/2.0>`_
+            for PGEN files. Commands of interest include :code:`--make-bpgen` for splitting variants,
+            :code:`--normalize` for left-aligning and atomizing overlapping variants, and :code:`--ref-from-fa` for REF allele correction.
+        tracks: An :class:`IntervalTrack` (e.g. :class:`BigWigs`, :class:`Table`) or a
+            sequence of them. Each track must have a unique ``name``; the on-disk
+            layout writes to ``<path>/intervals/<track.name>/``.
+        annot_tracks: Sample-independent annotation tracks, as a mapping of track name to source.
+            Each source is a path to an interval table, a path to a bigWig, or a polars
+            DataFrame/LazyFrame interpreted as a BED-like interval table (columns ``chrom``,
+            ``chromStart``, ``chromEnd``, ``score``). Table/DataFrame sources are served by
+            the Rust COITrees overlap backend. Written to ``<path>/annot_intervals/<name>/``.
+        samples: Samples to include in the dataset. Defaults to every sample available
+            across all variant file(s) and tracks. Either way the dataset's sample order
+            is the **lexicographic** sort of the selection, which is not the numeric sort
+            a phenotype table usually carries (``"1000"`` sorts before ``"999"``). Align
+            downstream tables to :attr:`Dataset.samples <genvarloader.Dataset.samples>`
+            by name, never by position.
+        max_jitter: Maximum jitter to add to the regions
+        overwrite: Whether to overwrite an existing dataset
+        max_mem: Approximate maximum total memory to use, including the genoray variant
+            index. The reader's index is loaded eagerly at the start of
+            :func:`write` (for :class:`~genoray.VCF` and :class:`~genoray.PGEN`)
+            so that :attr:`~genoray.VCF.nbytes` reflects its true size; that value
+            is subtracted from ``max_mem`` to determine the budget available for
+            genotype chunking. A :class:`ValueError` is raised if the remaining
+            budget is too small to fit even a single variant chunk. Otherwise
+            ``max_mem`` is a soft limit on overall usage and may be exceeded by
+            a small amount.
+            For a ``.svar2`` variant source this also bounds the genotype
+            range-cache write: ranges are produced in per-sample chunks sized to
+            fit the budget rather than a whole contig at once. The cache itself is
+            **outside** this budget: it is two ``(n_regions, n_samples, ploidy, 2)``
+            int64 memmaps on disk, which reaches tens of GiB at cohort scale (60.7 GiB
+            for 1,901 regions x 535,662 diploid samples). :func:`write` logs the
+            projected size and warns when the filesystem reports too little free space.
+        extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
+            Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
+            haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.
+            Disabling this also reduces the amount of data read/written and is faster to run.
 
-    Notes
-    -----
-    The dataset directory is built atomically: all data is written to a private sibling
-    temp directory and published via :func:`os.replace`. A best-effort ``filelock``
-    prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
-    the lock is advisory only.
+    Notes:
+        The dataset directory is built atomically: all data is written to a private sibling
+        temp directory and published via :func:`os.replace`. A best-effort ``filelock``
+        prevents redundant parallel rebuilds, but correctness relies on the atomic rename —
+        the lock is advisory only.
 
-    Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
-    files are created by those libraries and are not covered by gvl's atomic/locked
-    creation. Concurrent jobs that trigger index creation for those files depend on the
-    upstream libraries' behavior.
+        Out of scope: ``genoray`` ``.gvi`` index files and ``pysam`` ``.fai``/``.gzi`` index
+        files are created by those libraries and are not covered by gvl's atomic/locked
+        creation. Concurrent jobs that trigger index creation for those files depend on the
+        upstream libraries' behavior.
     """
     # ignore polars warning about os.fork which is caused by using joblib's loky backend
     warnings.simplefilter("ignore", RuntimeWarning)
@@ -416,7 +422,12 @@ def write(
                     metadata["svar_link"] = _svar_link
                 elif isinstance(variants, SparseVar2):
                     gvl_bed, _svar2_link = _write_from_svar2(
-                        path, gvl_bed, variants, samples, extend_to_length
+                        path,
+                        gvl_bed,
+                        variants,
+                        samples,
+                        extend_to_length,
+                        effective_max_mem,
                     )
                     metadata["svar2_link"] = _svar2_link
                 metadata["ploidy"] = variants.ploidy
@@ -480,25 +491,19 @@ def update(
 ) -> None:
     """Add tracks to an existing on-disk GVL dataset, analogous to :func:`write`.
 
-    Parameters
-    ----------
-    dataset
-        Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
-        A live dataset can be read while it is being updated; it will not observe the new
-        track until reopened.
-    tracks
-        Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
-        written to ``<path>/intervals/<name>/``. The track's sample set must match the
-        dataset's exactly (no missing, no extra); samples are reordered to the dataset
-        order automatically.
-    annot_tracks
-        Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
-        to ``<path>/annot_intervals/<name>/``.
-    overwrite
-        Replace a track of the same name if present; otherwise adding a duplicate name
-        raises ``FileExistsError``.
-    max_mem
-        Approximate memory budget, divided across concurrently-running categories.
+    Args:
+        dataset: Path to a dataset directory, or an opened :class:`Dataset` (its ``.path`` is used).
+            A live dataset can be read while it is being updated; it will not observe the new
+            track until reopened.
+        tracks: Per-sample :class:`IntervalTrack` source(s) (:class:`BigWigs`, :class:`Table`),
+            written to ``<path>/intervals/<name>/``. The track's sample set must match the
+            dataset's exactly (no missing, no extra); samples are reordered to the dataset
+            order automatically.
+        annot_tracks: Sample-independent sources, identical to :func:`write`'s ``annot_tracks``, written
+            to ``<path>/annot_intervals/<name>/``.
+        overwrite: Replace a track of the same name if present; otherwise adding a duplicate name
+            raises ``FileExistsError``.
+        max_mem: Approximate memory budget, divided across concurrently-running categories.
     """
     warnings.simplefilter("ignore", RuntimeWarning)
     try:
@@ -592,18 +597,13 @@ def get_splice_bed(
     chromosome (natural order) and ``chromStart``. Pass it directly to
     :func:`gvl.write` for splicing datasets.
 
-    Parameters
-    ----------
-    gtf
-        Path to a GTF file (gzipped or plain) accepted by :func:`seqpro.gtf.scan`.
-    contigs
-        If provided, keep only rows whose ``seqname`` is in this list.
-    transcript_support_level
-        If a string, require the GTF ``transcript_support_level`` attribute to
-        equal it. ``None`` disables the filter.
-    require_multiple_of_3
-        If ``True``, keep only transcripts whose summed CDS length is a
-        multiple of 3.
+    Args:
+        gtf: Path to a GTF file (gzipped or plain) accepted by :func:`seqpro.gtf.scan`.
+        contigs: If provided, keep only rows whose ``seqname`` is in this list.
+        transcript_support_level: If a string, require the GTF ``transcript_support_level`` attribute to
+            equal it. ``None`` disables the filter.
+        require_multiple_of_3: If ``True``, keep only transcripts whose summed CDS length is a
+            multiple of 3.
     """
     lf = sp.gtf.scan(gtf)
 
@@ -710,8 +710,7 @@ def _reject_unsupported_variants(index: pl.DataFrame, source: str) -> None:
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
-    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant
-    index, falling back to a copy when the two live on different filesystems.
+    """Hardlink ``src`` → ``dst`` to avoid duplicating the (possibly large) variant index, falling back to a copy when the two live on different filesystems.
 
     ``Path.hardlink_to`` raises ``OSError(EXDEV)`` across filesystem boundaries
     (e.g. writing a dataset under ``/tmp`` from a source on a network mount). The
@@ -777,8 +776,7 @@ def _window_to_sparse(
 
 
 def _region_end(rag: Ragged, v_ends: NDArray, fallback_end: int) -> int:
-    """Per-region chromEnd, floored at the input window so tracks are never
-    stored over a truncated region.
+    """Per-region chromEnd, floored at the input window so tracks are never stored over a truncated region.
 
     ``rag`` is a sparse ``(samples, ploidy, ~variants)`` Ragged of global
     variant indices. Returns ``max(fallback_end, v_ends[max idx])`` across all
@@ -1170,63 +1168,55 @@ def _write_from_svar(
     ), svar_link
 
 
-def _svar2_region_max_ends(
-    svar2: SparseVar2,
-    contig: str,
-    starts: NDArray[np.integer],
-    ends: NDArray[np.integer],
-    samples: list[str],
-) -> NDArray[np.int32]:
-    """SVAR1 parity: per region, the end (``pos - min(ilen, 0)``) of the
-    highest-position variant over the SELECTED samples' haplotypes. Regions with
-    no variants keep their original ``chromEnd``.
+def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Permanent on-disk size of the two ``svar2_ranges`` var-key caches.
 
-    ``SparseVar2.decode`` reports 0-based ``pos`` (unlike ``SparseVar.index``'s
-    1-based VCF ``POS``, which SVAR1's ``v_ends`` formula is written against), so
-    ``pos`` is converted to 1-based here before applying the same formula --
-    otherwise every extension would be off by one (masked in most regions
-    because the un-extended ``chromEnd`` already dominates the max).
+    Each of ``vk_snp_range`` and ``vk_indel_range`` is a
+    ``(regions, samples, ploidy, 2)`` int64 array. These are NOT small: one
+    chromosome of a 414k-sample cohort over ~4k regions is ~98 GiB.
 
-    Vectorized as a per-region scatter-max over a ``(pos << 21) | end`` composite
-    key, which reproduces the pos-then-end tie-break exactly (a single haplotype
-    never carries two variants at the same position, so a global per-region max
-    over the selected samples' variants equals the original per-hap-argmax loop).
+    Args:
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Total bytes both channels will occupy on disk.
     """
-    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
-    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = np.asarray(dec.data["pos"], np.int64)
-    ilen_arr = np.asarray(dec.data["ilen"], np.int64)
-    off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
-    out = np.asarray(ends, np.int64).copy()  # default = chromEnd
-    if pos_arr.size:
-        n_hap = R * S_all * P
-        counts = np.diff(off)  # variants per hap
-        hap_of_var = np.repeat(np.arange(n_hap), counts)  # region-major hap per variant
-        s_of_hap = (np.arange(n_hap) // P) % S_all
-        keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
-        region_of_var = hap_of_var // (S_all * P)
-        # end = pos + ext, where ext = 1 - min(ilen, 0) (1-based bump plus the
-        # deletion extension: SNP/INS -> 1, DEL -> 1 + |ilen|). Pack the BOUNDED
-        # `ext` into the low bits, NOT the absolute `end` (which is ~pos-sized and
-        # would overflow past ~2 Mb into any contig), so the composite key orders
-        # by pos then by end; recover end = pos + ext on unpack.
-        ext_var = 1 - np.minimum(ilen_arr, 0)  # small: 1 + deletion length
-        SHIFT = 21
-        # raise (not assert) so it still fails fast under `python -O`: a pathological
-        # >~2 Mb deletion footprint would otherwise silently corrupt the packed key.
-        if int(ext_var.max(initial=0)) >= (1 << SHIFT):
-            raise ValueError("variant footprint exceeds tie-break packing width")
-        key = (pos_arr << SHIFT) | ext_var
-        key_k = key[keep]
-        region_k = region_of_var[keep]
-        if key_k.size:
-            best = np.full(R, -1, np.int64)
-            np.maximum.at(best, region_k, key_k)  # per-region max composite key
-            has = best >= 0
-            # end = pos + ext = (key >> SHIFT) + (key & mask)
-            out[has] = (best[has] >> SHIFT) + (best[has] & ((1 << SHIFT) - 1))
-    return out.astype(np.int32)
+    return 2 * n_regions * n_samples * ploidy * 2 * 8
+
+
+def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
+    """Log the projected ``svar2_ranges`` cache size and warn if disk is short.
+
+    Warns rather than raising: free-space reporting is unreliable on some
+    network filesystems, and a false refusal would block a valid large build.
+
+    Args:
+        out_dir: Directory the cache will be written to.
+        n_regions: Number of BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Projected total bytes of the two var-key caches.
+    """
+    n_bytes = _svar2_ranges_cache_bytes(n_regions, n_samples, ploidy)
+    logger.info(
+        f"svar2 range cache: {format_memory(n_bytes)} for {n_regions} regions "
+        f"x {n_samples} samples x ploidy {ploidy}."
+    )
+    try:
+        free = shutil.disk_usage(out_dir).free
+    except OSError:
+        return n_bytes
+    if n_bytes > free:
+        logger.warning(
+            f"svar2 range cache needs {format_memory(n_bytes)} but only "
+            f"{format_memory(free)} is free at {out_dir}. The write will likely "
+            f"fail with ENOSPC."
+        )
+    return n_bytes
 
 
 def _write_from_svar2(
@@ -1235,6 +1225,7 @@ def _write_from_svar2(
     svar2: SparseVar2,
     samples: list[str],
     extend_to_length: bool,
+    max_mem: int,
 ) -> tuple[pl.DataFrame, Svar2Link]:
     # symbolic/breakend variants are rejected upstream at .svar2 conversion; the
     # store cannot represent them, and SparseVar2 exposes no index to re-check.
@@ -1251,6 +1242,7 @@ def _write_from_svar2(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     R, S, P = bed.height, len(samples), svar2.ploidy
+    _svar2_preflight(out_dir, R, S, P)
     vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
     vk_indel = np.memmap(
         out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
@@ -1260,10 +1252,31 @@ def _write_from_svar2(
         out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
     )
     # sample_cols: selected slot -> original sample index (same for every contig).
-    sample_cols = np.asarray(
-        [svar2.available_samples.index(s) for s in samples], np.int64
+    # Hash lookup, not `list.index` per sample: the latter is O(S^2) and cost ~1 h
+    # at S = 535k before a single genotype was read (#351).
+    avail = np.array(svar2.available_samples)
+    avail_s2i = HashTable(
+        max=len(avail) * 2,  # type: ignore[bad-argument-type]  # hirola HashTable.max typed as numpy.Number but accepts int
+        dtype=avail.dtype,
     )
+    avail_s2i.add(avail)
+    if len(avail_s2i.keys) != len(avail):
+        # `add` compacts to unique keys, so a duplicate name shifts every column
+        # after it. `list.index` instead pointed two slots at one column. Both are
+        # silently wrong datasets; refuse rather than pick one.
+        raise ValueError(
+            "The .svar2 store has duplicate sample names, so genotype columns"
+            " cannot be assigned unambiguously."
+        )
+    sample_cols = np.asarray(s2i(np.asarray(samples), avail_s2i), np.int64)
     np.save(out_dir / "sample_cols.npy", sample_cols)
+
+    # genoray resolves `samples` by name with its own O(S^2) scan, once per contig
+    # (d-laub/genoray#168). `None` means "every sample in store order", which is
+    # exactly this selection when the two lists already agree, so skip the scan.
+    # `samples` is sorted lexicographically by `write`, so this only fires for a
+    # store whose own order is sorted.
+    sel: list[str] | None = None if samples == avail.tolist() else samples
 
     with open(out_dir / "svar2_meta.json", "w") as f:
         json.dump(
@@ -1292,20 +1305,39 @@ def _write_from_svar2(
         ends = df["chromEnd"].to_numpy()
         # extend_to_length is validated at function entry (False raises); the
         # read-bound kernel sizes haplotype output at read time.
-        d = svar2._find_ranges(c, starts, ends, samples=samples)
+        stream = svar2._find_ranges_chunked(
+            c, starts, ends, samples=sel, max_mem=max_mem
+        )
+        dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
+        dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(
+            rc, 2
+        )
 
-        # _find_ranges returns row-major (R*S*P, 2) for vk ranges; reshape into (R,S,P,2).
-        vk_snp[lo:hi] = np.asarray(d["vk_snp_range"], np.int64).reshape(rc, S, P, 2)
-        vk_indel[lo:hi] = np.asarray(d["vk_indel_range"], np.int64).reshape(rc, S, P, 2)
-        dense_snp[lo:hi] = np.asarray(d["dense_snp_range"], np.int64).reshape(rc, 2)
-        dense_indel[lo:hi] = np.asarray(d["dense_indel_range"], np.int64).reshape(rc, 2)
+        # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity picks
+        # the highest-POSITION variant (ties by end), so a lower-position variant
+        # with a longer deletion must not win the cross-chunk reduction.
+        keys = stream.dense_max_end_keys.copy()
+        for ch in stream.chunks:
+            s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
+            # Chunks are hap-major (samples, ploidy, regions, 2); the cache is
+            # region-major. transpose() is a view -- numpy copies straight into
+            # the memmap with no intermediate array.
+            vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
+            vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
+            np.maximum(keys, ch.max_end_keys, out=keys)
+            # Bound the dirty page cache: at cohort scale these memmaps are tens
+            # of GiB and the kernel would otherwise reclaim at unpredictable times.
+            vk_snp.flush()
+            vk_indel.flush()
+            pbar.update(rc * ch.n_samples / S)
 
-        # max_ends: SVAR1 parity, per region end of the max-position variant
-        # over the selected samples' haplotypes (see _svar2_region_max_ends).
-        max_ends[lo:hi] = _svar2_region_max_ends(svar2, c, starts, ends, samples)
+        mask = (1 << MAX_END_SHIFT) - 1
+        region_ends = np.asarray(ends, np.int64).copy()
+        has = keys > 0  # 0 is the "no variant in this region" sentinel
+        region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
+        max_ends[lo:hi] = region_ends.astype(np.int32)
 
         contig_offset += df.height
-        pbar.update(df.height)
     pbar.close()
     for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
         mm.flush()
@@ -1354,9 +1386,7 @@ def _write_phased_variants_chunk(
 
 
 def _write_ragged_intervals(out_dir: Path, itvs: "RaggedIntervals") -> None:
-    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as
-    struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer
-    used for annotation tracks (format 2.0)."""
+    """Write a RaggedIntervals (values/starts/ends share offsets) to out_dir as struct-of-arrays: starts/ends/values.npy + offsets.npy. Single-chunk writer used for annotation tracks (format 2.0)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, data, dt in (
         ("starts", itvs.starts.data, np.int32),

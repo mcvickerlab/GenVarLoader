@@ -413,3 +413,151 @@ def test_deterministic_haps_read_skips_pre_reconstruct_diffs(
     ds2 = _svar2_haps_dataset(tmp_path, svar2_store)
     ds2[:, :]
     assert calls["diffs"] == 0
+
+
+def _svar2_spliced_dataset(tmp_path: Path, svar2_store: Path):
+    """A spliced (2-exon transcript) view over the ``svar2_store`` fixture.
+
+    Splicing is the path where sizing and reconstruction are separate calls --
+    the plan builder needs per-query haplotype lengths before the kernel can be
+    told where to write.
+    """
+    import polars as pl
+    from genoray import SparseVar2
+
+    import genvarloader as gvl
+
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 20],
+            "chromEnd": [13, 40],
+            "strand": ["+", "+"],
+            "transcript_id": ["T1", "T1"],
+            "exon_number": [1, 2],
+        }
+    )
+    ref = svar2_store.parent / "ref.fa"
+    d = tmp_path / "spliced.gvl"
+    gvl.write(d, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True)
+    return (
+        gvl.Dataset.open(d, reference=ref)
+        .with_settings(splice_info=("transcript_id", "exon_number"))
+        .with_seqs("haplotypes")
+    )
+
+
+def test_spliced_haps_read_gathers_inputs_once_per_contig(
+    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression for #349: the sizing and reconstruct passes share one gather.
+
+    A spliced read runs ``_haplotype_diffs`` (via the splice-plan builder) and
+    then ``_reconstruct_spliced``, both carrying the same ``(idx, regions,
+    ploidy)``. Each used to re-slice the memmapped range caches from scratch,
+    which was ~7% of wall on a production batch. This bed is single-contig, so
+    one gather covers the whole batch.
+    """
+    import genvarloader._dataset._svar2_haps as m
+
+    calls = {"gather": 0}
+    real = m.Svar2Haps._gather_inputs
+
+    def counting(self, *a, **k):
+        calls["gather"] += 1
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(m.Svar2Haps, "_gather_inputs", counting)
+
+    ds = _svar2_spliced_dataset(tmp_path, svar2_store)
+    out = ds[:, :]
+
+    assert calls["gather"] == 1
+    assert out.data.size > 0
+
+
+def test_spliced_haps_read_runs_the_rust_gather_once(
+    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression for #349: the two FFI passes share one ``gather_haps_readbound``.
+
+    Distinct from the test above, which counts the *Python* side (slicing the
+    memmapped range caches). This counts the Rust side -- the
+    ``gather_haps_readbound`` + ``split_to_flat`` + LUT walk that both
+    ``hap_diffs_from_svar2_readbound`` and
+    ``reconstruct_haplotypes_from_svar2_readbound_into`` used to run internally,
+    which is the expensive half (~15% of spliced read wall).
+    """
+    import genvarloader._dataset._svar2_haps as m
+
+    calls = {"gather": 0}
+    real = m.gather_svar2_readbound
+
+    def counting(*a, **k):
+        calls["gather"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(m, "gather_svar2_readbound", counting)
+
+    ds = _svar2_spliced_dataset(tmp_path, svar2_store)
+    out = ds[:, :]
+
+    assert calls["gather"] == 1  # one contig group, one gather for both passes
+    assert out.data.size > 0
+
+
+def test_spliced_haps_read_is_byte_identical_without_the_shared_gather(
+    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Sharing the gather must not change a single output byte.
+
+    Returning ``None`` from ``_readbound_gather`` restores the pre-#349 behaviour
+    (each FFI entry gathers for itself), so this pins the fused path against the
+    path it replaced rather than against a hard-coded expectation.
+    """
+    import genvarloader._dataset._svar2_haps as m
+
+    shared = _svar2_spliced_dataset(tmp_path, svar2_store)[:, :]
+
+    monkeypatch.setattr(m.Svar2Haps, "_readbound_gather", lambda self, ci, gi, P: None)
+    per_pass = _svar2_spliced_dataset(tmp_path / "again", svar2_store)[:, :]
+
+    np.testing.assert_array_equal(shared.data, per_pass.data)
+    np.testing.assert_array_equal(shared.offsets, per_pass.offsets)
+
+
+def test_readbound_gather_matches_the_unfused_call_and_guards_its_shape(
+    svar2_store: Path,
+):
+    """The handle is a pure caching detail, and a mismatched one must raise.
+
+    ``gather`` carries no identity the kernels can check, so ``(n_queries,
+    ploidy)`` is the guard: feeding a handle built for a different batch is the
+    shape a stale-cache bug would take, and it must be a ValueError rather than
+    a silently wrong reconstruction.
+    """
+    from genoray import SparseVar2
+
+    from genvarloader.genvarloader import (
+        gather_svar2_readbound,
+        hap_diffs_from_svar2_readbound,
+    )
+
+    from tests._oracles.svar2_readbound_inputs import readbound_diff_inputs
+
+    svar2 = SparseVar2(svar2_store)
+    contig = svar2.contigs[0]
+    args = readbound_diff_inputs(svar2, contig, [(0, 13), (20, 40)])
+
+    unfused = np.asarray(hap_diffs_from_svar2_readbound(*args))
+
+    n_q = len(args[2])
+    gather = gather_svar2_readbound(*args[:8], args[9], n_q)
+    assert gather.n_queries == n_q
+    assert gather.ploidy == args[9]
+    fused = np.asarray(hap_diffs_from_svar2_readbound(*args, False, False, gather))
+    np.testing.assert_array_equal(fused, unfused)
+
+    stale = gather_svar2_readbound(*args[:8], args[9], n_q + 1)
+    with pytest.raises(ValueError, match="gather was built for"):
+        hap_diffs_from_svar2_readbound(*args, False, False, stale)
