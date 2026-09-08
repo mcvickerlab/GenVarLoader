@@ -66,9 +66,11 @@ __all__ = [
 
 @dataclass(slots=True)
 class SeqsTracks(Reconstructor[tuple[Any, _T]]):
-    """Any seq reconstructor (`Ref` or `Haps` in any kind) paired with
-    un-realigned `Tracks`. Seqs and tracks are computed independently; tracks
-    stay in reference coordinates (no haplotype re-alignment)."""
+    """Any seq reconstructor (`Ref` or `Haps` in any kind) paired with un-realigned `Tracks`.
+
+    Seqs and tracks are computed independently; tracks
+    stay in reference coordinates (no haplotype re-alignment).
+    """
 
     seqs: Ref | Haps
     tracks: Tracks[_T]

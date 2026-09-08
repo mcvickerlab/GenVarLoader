@@ -45,17 +45,12 @@ def oidx_to_raveled_idx(row_idx: ArrayLike, col_idx: ArrayLike, shape: tuple[int
 def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.DataFrame:
     """Convert GVL's internal representation of regions to a BED3 DataFrame.
 
-    Parameters
-    ----------
-    regions : NDArray
-        Shape = (n_regions, 3) Regions.
-    contigs : Sequence[str]
-        Contigs.
+    Args:
+        regions (NDArray): Shape = (n_regions, 3) Regions.
+        contigs (Sequence[str]): Contigs.
 
-    Returns
-    -------
-    pl.DataFrame
-        Bed DataFrame.
+    Returns:
+        pl.DataFrame: Bed DataFrame.
     """
     cols = ["chrom", "chromStart", "chromEnd", "strand"]
     bed = pl.DataFrame(regions, schema=cols)
@@ -71,24 +66,20 @@ def regions_to_bed(regions: NDArray[np.int32], contigs: Sequence[str]) -> pl.Dat
 def bed_to_regions(
     bed: pl.DataFrame, contig_norm: ContigNormalizer
 ) -> NDArray[np.int32]:
-    """Convert a BED3+ DataFrame to GVL's internal representation of regions, a
-    2D array of shape (n_regions, 4) with the following columns:
+    """Convert a BED3+ DataFrame to GVL's internal representation of regions.
+
+    The output is a 2D array of shape (n_regions, 4) with the following columns:
     - chrom: Contig index
     - chromStart: 0-based start position
     - chromEnd: 0-based exclusive end position
     - strand: Strand index (1 for +, -1 for -)
 
-    Parameters
-    ----------
-    bed : pl.DataFrame
-        Bed DataFrame.
-    contigs : Sequence[str]
-        Contigs.
+    Args:
+        bed (pl.DataFrame): Bed DataFrame.
+        contig_norm (ContigNormalizer): Contigs.
 
-    Returns
-    -------
-    NDArray[np.int32]
-        Regions.
+    Returns:
+        NDArray[np.int32]: Regions.
     """
     c2c = contig_norm.contig_map
     c2i = {v: k for k, v in enumerate(contig_norm.contigs)}
@@ -129,21 +120,14 @@ def reduceat_offsets(
 ) -> NDArray[DTYPE]:
     """Reduce an array at offsets.
 
-    Parameters
-    ----------
-    ufunc : np.ufunc
-        Ufunc.
-    arr : NDArray[np.number]
-        Array to reduce.
-    offsets : NDArray[np.int32]
-        Offsets.
-    axis : int, optional
-        Axis, by default 0.
+    Args:
+        ufunc (np.ufunc): Ufunc.
+        arr (NDArray[np.number]): Array to reduce.
+        offsets (NDArray[np.int32]): Offsets.
+        axis (int, optional): Axis, by default 0.
 
-    Returns
-    -------
-    out_array
-        Reduced array.
+    Returns:
+        out_array: Reduced array.
     """
     n_reductions = len(offsets) - 1
 

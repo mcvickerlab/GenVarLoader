@@ -1,6 +1,6 @@
 [project]
 name = "genvarloader"
-version = "0.38.0"
+version = "0.42.1"
 description = "Pipeline for efficient genomic data processing."
 authors = [
     { name = "David Laub", email = "dlaub@ucsd.edu" },
@@ -10,9 +10,13 @@ readme = "README.md"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.14" # >= 3.14 blocked by pyarrow/genoray
 dependencies = [
-    "seqpro>=0.20",
-    # >=3.0.0 is the first release carrying the INFO/FORMAT field-read API gvl relies on.
-    "genoray>=3.0.0,<4",
+    "seqpro>=0.22",
+    # >=3.4.0 carries SparseVar2._find_ranges_chunked, the memory-bounded chunked
+    # range API _write_from_svar2 consumes to avoid materializing a whole
+    # contig's ranges at once (gvl#333). 4.x is supported: its breaking changes
+    # (SparseVar2.from_vcf(tune=) removal, from_vcf_list(max_mem=) semantics)
+    # are on APIs GVL never calls.
+    "genoray>=3.4.0,<5",
     "numpy",
     "loguru",
     "natsort",
@@ -46,7 +50,34 @@ documentation = "https://genvarloader.readthedocs.io/en/stable/"
 issues = "https://github.com/mcvickerlab/GenVarLoader/issues"
 
 [tool.ruff]
-lint.ignore = ["E501"]
+# Enforce Google-style docstrings on the public package. `convention = "google"`
+# activates the Google-compatible pydocstyle rules (and disables the NumPy/reST
+# ones). The D1xx "missing docstring" rules stay off: we enforce the *style* of
+# docstrings that exist, not their presence, on a codebase that predates the rule.
+lint.extend-select = ["D"]
+lint.ignore = [
+    "E501",
+    "D100", # missing docstring in public module
+    "D101", # missing docstring in public class
+    "D102", # missing docstring in public method
+    "D103", # missing docstring in public function
+    "D104", # missing docstring in public package
+    "D105", # missing docstring in magic method
+    "D106", # missing docstring in public nested class
+    "D107", # missing docstring in __init__
+]
+lint.pydocstyle.convention = "google"
+# Docstring style is only enforced on the shipped package; tests, docs, one-off
+# experiments, and dev scripts are exempt.
+lint.per-file-ignores = { "tests/**" = [
+    "D",
+], "docs/**" = [
+    "D",
+], "experiments/**" = [
+    "D",
+], "scripts/**" = [
+    "D",
+] }
 
 [tool.pyrefly]
 project-includes = ["python/genvarloader", "tests"]

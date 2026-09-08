@@ -197,6 +197,82 @@ def test_svar2_spliced_minus_strand_haplotypes_match_svar1(
     assert not np.array_equal(forward.data.view("u1"), reverse.data.view("u1"))
 
 
+def test_svar2_spliced_variants_match_exon_concatenation(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """GVL returns complete transcript/sample/phase variant records per query."""
+    _bcf, ref = _src
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 20, 5],
+            "chromEnd": [13, 40, 13],
+            "strand": ["+", "+", "+"],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
+    _, ds2 = _open_pair(tmp_path, splice_bed, svar_fixture, svar2_fixture, ref)
+    unspliced = ds2.with_settings(var_filter="exonic").with_seqs("variants")[:, :]
+    spliced = ds2.with_settings(
+        splice_info=("transcript_id", "exon_number"), var_filter="exonic"
+    ).with_seqs("variants")[:, :]
+
+    assert spliced.shape == (2, 2, 2, None)
+
+    def _logical_row(field, transcript, sample, phase):
+        return np.asarray(field[transcript, sample, phase].to_packed().data).tolist()
+
+    for sample in range(2):
+        for phase in range(2):
+            for field_name in ("start", "ilen", "alt"):
+                spliced_field = getattr(spliced, field_name)
+                unspliced_field = getattr(unspliced, field_name)
+                assert _logical_row(spliced_field, 0, sample, phase) == (
+                    _logical_row(unspliced_field, 0, sample, phase)
+                    + _logical_row(unspliced_field, 1, sample, phase)
+                )
+                assert _logical_row(spliced_field, 1, sample, phase) == _logical_row(
+                    unspliced_field, 2, sample, phase
+                )
+
+
+def test_svar2_spliced_variants_dataloader_returns_complete_cells(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """The ordinary written-dataset loader never exposes individual exons."""
+    pytest.importorskip("torch")
+    _bcf, ref = _src
+    splice_bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 20, 5],
+            "chromEnd": [13, 40, 13],
+            "strand": ["+", "+", "+"],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
+    _, ds2 = _open_pair(tmp_path, splice_bed, svar_fixture, svar2_fixture, ref)
+    ds2 = ds2.with_settings(
+        splice_info=("transcript_id", "exon_number"), var_filter="exonic"
+    ).with_seqs("variants")
+    batches = list(
+        ds2.to_dataloader(
+            batch_size=2,
+            shuffle=False,
+            num_workers=0,
+            return_indices=True,
+        )
+    )
+
+    assert sum(len(region_idxs) for _, region_idxs, _ in batches) == 4
+    for records, region_idxs, sample_idxs in batches:
+        assert isinstance(records, gvl.RaggedVariants)
+        assert records.shape[0] == len(region_idxs) == len(sample_idxs)
+        assert records.shape[1:] == (2, None)
+
+
 def test_svar2_exonic_filter_haplotypes_match_svar1(
     tmp_path, svar_fixture, svar2_fixture, _src
 ):

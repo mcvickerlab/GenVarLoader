@@ -58,20 +58,15 @@ def build_splice_plan(
 ) -> SplicePlan:
     """Build a splice plan from per-query lengths and splice-row boundaries.
 
-    Parameters
-    ----------
-    lengths
-        Shape ``(B, *inner_fixed)``. Per-query lengths in current ``(splice_row,
-        sample, splice_element)`` C-order, with any inner fixed axes (ploidy,
-        tracks) intact. ``E = prod(inner_fixed)`` is the inner flatten factor.
-    splice_row_offsets
-        Shape ``(n_rows * n_samples + 1,)``. Cumulative count of elements per
-        ``(splice_row, sample)`` pair — i.e. the ``offsets`` returned by
-        ``SpliceIndexer.parse_idx``.
-    n_samples
-        Number of samples in the outer ``(splice_row, sample)`` grid.
-    n_rows
-        Number of splice rows in the outer ``(splice_row, sample)`` grid.
+    Args:
+        lengths: Shape ``(B, *inner_fixed)``. Per-query lengths in current ``(splice_row,
+            sample, splice_element)`` C-order, with any inner fixed axes (ploidy,
+            tracks) intact. ``E = prod(inner_fixed)`` is the inner flatten factor.
+        splice_row_offsets: Shape ``(n_rows * n_samples + 1,)``. Cumulative count of elements per
+            ``(splice_row, sample)`` pair — i.e. the ``offsets`` returned by
+            ``SpliceIndexer.parse_idx``.
+        n_samples: Number of samples in the outer ``(splice_row, sample)`` grid.
+        n_rows: Number of splice rows in the outer ``(splice_row, sample)`` grid.
     """
     if lengths.ndim == 1:
         inner_fixed: tuple[int, ...] = ()
@@ -98,26 +93,31 @@ def build_splice_plan(
         permutation = np.arange(B, dtype=np.intp)
         permuted_lengths_flat = flat_lengths.reshape(-1).astype(np.int32, copy=False)
     else:
-        # Build permutation by iterating (pair, e, element).
-        # For a pair p with element range [s, s+L):
-        #   for e in 0..E:
-        #     k-indices = [(s+0)*E + e, (s+1)*E + e, ..., (s+L-1)*E + e]
-        # Vectorized: outer product of "queries within pair" and a per-e offset.
-        # Build with broadcasting.
+        # Build the permutation into (pair, e, element) C-order. For a pair p with
+        # element range [s, s+L) the block is E sub-blocks (one per e), each the
+        # queries [s, s+L) mapped to k = q*E + e. The old implementation looped over
+        # every (row, sample) pair in Python -- n_rows * n_samples iterations, which
+        # dominated the whole spliced-variant getitem at cohort scale. Vectorize it
+        # with a ragged-arange over the flat output (length E * B):
+        #   for output position j inside pair p's block: e = j // L, elem = j % L,
+        #   so k = (s + elem) * E + e.
         flat_2d = flat_lengths  # (B, E)
-        perm_parts = []
-        for p_idx in range(n_pairs):
-            s = int(splice_row_offsets[p_idx])
-            L = int(pair_lengths[p_idx])
-            if L == 0:
-                continue
-            q_range = np.arange(s, s + L, dtype=np.intp)  # (L,)
-            # (E, L): each row e is q_range*E + e.
-            ke = q_range[None, :] * E + np.arange(E, dtype=np.intp)[:, None]
-            perm_parts.append(ke.reshape(-1))
-        permutation = (
-            np.concatenate(perm_parts) if perm_parts else np.empty(0, dtype=np.intp)
-        )
+        pair_starts = splice_row_offsets[:-1].astype(np.intp, copy=False)
+        pair_L = pair_lengths.astype(np.intp, copy=False)
+        block_len = E * pair_L  # entries contributed by each pair
+        total = int(block_len.sum())  # == E * B
+        if total == 0:
+            permutation = np.empty(0, dtype=np.intp)
+        else:
+            pair_id = np.repeat(np.arange(n_pairs, dtype=np.intp), block_len)
+            # exclusive prefix sum of block_len -> each pair's first output position
+            block_start = np.zeros(n_pairs, dtype=np.intp)
+            np.cumsum(block_len[:-1], out=block_start[1:])
+            pos = np.arange(total, dtype=np.intp) - block_start[pair_id]
+            Lp = pair_L[pair_id]  # nonzero wherever a pair contributed
+            e = pos // Lp
+            elem = pos - e * Lp  # pos % Lp
+            permutation = (pair_starts[pair_id] + elem) * E + e
         permuted_lengths_flat = flat_2d.reshape(-1)[permutation].astype(
             np.int32, copy=False
         )
@@ -253,16 +253,11 @@ class SpliceMap:
     ) -> tuple[NDArray[np.intp], NDArray[np.int64], tuple[int, ...] | None, bool]:
         """Parse a row index into the inputs needed for a per-region fetch.
 
-        Returns
-        -------
-        flat_region_idxs
-            1-D region indices to feed the unspliced reader.
-        offsets
-            For ``np.add.reduceat``-style concat (len == n_selected_rows + 1).
-        out_reshape
-            Target shape for fancy/combo indexing, or ``None``.
-        squeeze
-            Whether to squeeze the row dim out (scalar index).
+        Returns:
+            flat_region_idxs: 1-D region indices to feed the unspliced reader.
+            offsets: For ``np.add.reduceat``-style concat (len == n_selected_rows + 1).
+            out_reshape: Target shape for fancy/combo indexing, or ``None``.
+            squeeze: Whether to squeeze the row dim out (scalar index).
         """
         out_reshape = None
         squeeze = False

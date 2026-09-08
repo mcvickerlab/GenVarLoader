@@ -34,16 +34,11 @@ def _empty_group_pad(
     For allele fields (is_allele=True), `value` is bytes; produces an opaque-string
     Ragged with str_offsets matching the sentinel byte length.
 
-    Parameters
-    ----------
-    field_rag
-        The per-field Ragged to pad against.  Used only for shape/dtype.
-    value
-        Sentinel scalar.  For allele fields: bytes (e.g. b"N").
-    empty_mask
-        Flat bool array, length = number of groups (b*p).
-    is_allele
-        If True, treat value as bytes and produce an opaque-string Ragged.
+    Args:
+        field_rag: The per-field Ragged to pad against. Used only for shape/dtype.
+        value: Sentinel scalar. For allele fields: bytes (e.g. b"N").
+        empty_mask: Flat bool array, length = number of groups (b*p).
+        is_allele: If True, treat value as bytes and produce an opaque-string Ragged.
     """
     n_empty = int(empty_mask.sum())
     # Variant-level offsets: group i gets 1 element if empty_mask[i] else 0.
@@ -179,15 +174,12 @@ def _concat_string_ragged(base: Ragged, pad: Ragged) -> Ragged:
 
 
 def _as_opaque(rag: Ragged) -> Ragged:
-    """Normalize an allele field to opaque-string (b,p,~v). Accepts an S1 char
-    (b,p,~v,~l) Ragged (collapse via to_strings) or an already-opaque Ragged."""
+    """Normalize an allele field to opaque-string (b,p,~v). Accepts an S1 char (b,p,~v,~l) Ragged (collapse via to_strings) or an already-opaque Ragged."""
     return rag.to_strings() if not getattr(rag, "is_string", False) else rag
 
 
 def _share_offsets(rag: Ragged, offsets: NDArray) -> Ragged:
-    """Rebuild `rag` onto the given (identical) variant-level offsets object so all
-    record fields share it (Ragged.from_fields requires value equality; sharing the
-    same object guarantees that and avoids redundant equality checks)."""
+    """Rebuild `rag` onto the given (identical) variant-level offsets object so all record fields share it (Ragged.from_fields requires value equality; sharing the same object guarantees that and avoids redundant equality checks)."""
     if rag.offsets is offsets:
         return rag
     if getattr(rag, "is_string", False):
@@ -199,11 +191,7 @@ def _share_offsets(rag: Ragged, offsets: NDArray) -> Ragged:
 
 
 class RaggedVariants(Ragged):
-    """Variable-length variants as a single record Ragged with shape
-    (batch, ploidy, ~variants). ``alt``/``ref`` are opaque-string fields; ``start``
-    and optional ``ilen``/``dosage``/extra fields are numeric. Guaranteed: ``alt``,
-    ``start``, and one of ``ref``/``ilen``.
-    """
+    """Variable-length variants as a single record Ragged with shape (batch, ploidy, ~variants). ``alt``/``ref`` are opaque-string fields; ``start`` and optional ``ilen``/``dosage``/extra fields are numeric. Guaranteed: ``alt``, ``start``, and one of ``ref``/``ilen``."""
 
     __slots__ = ()
 
@@ -419,27 +407,23 @@ class RaggedVariants(Ragged):
         variant dimensions so their shape is
         ``(batch * ploidy * ~variants, ~alt_len)``.
 
-        Parameters
-        ----------
-        device
-            Device to move tensors to.
-        tokenizer
-            How to encode allele characters.
+        Args:
+            device: Device to move tensors to.
+            tokenizer: How to encode allele characters.
 
-            - ``"seqpro"`` — use ``seqpro.tokenize`` (ACGTN → 0 1 2 3 4).
-            - ``None`` — uint8 ASCII values (ACGTN → 65 67 71 84 78).
-            - Callable — called with the flat ``NDArray[np.bytes_]`` data,
-              returns an integer array of the same length.
+                - ``"seqpro"`` — use ``seqpro.tokenize`` (ACGTN → 0 1 2 3 4).
+                - ``None`` — uint8 ASCII values (ACGTN → 65 67 71 84 78).
+                - Callable — called with the flat ``NDArray[np.bytes_]`` data,
+                  returns an integer array of the same length.
 
-        Returns
-        -------
-        dict
-            - ``"alt"`` — nested tensor ``(batch*ploidy*~vars, ~alt_len)``
-            - ``"ref"`` — nested tensor ``(batch*ploidy*~vars, ~ref_len)`` (if present)
-            - numeric field keys — nested tensor ``(batch*ploidy, ~vars)``
-            - ``"max_n_vars"`` — int
-            - ``"max_alt_len"`` — int
-            - ``"max_ref_len"`` — int (if ``ref`` present)
+        Returns:
+            dict:
+                - ``"alt"`` — nested tensor ``(batch*ploidy*~vars, ~alt_len)``
+                - ``"ref"`` — nested tensor ``(batch*ploidy*~vars, ~ref_len)`` (if present)
+                - numeric field keys — nested tensor ``(batch*ploidy, ~vars)``
+                - ``"max_n_vars"`` — int
+                - ``"max_alt_len"`` — int
+                - ``"max_ref_len"`` — int (if ``ref`` present)
         """
         import seqpro as sp
         from torch.nested import nested_tensor_from_jagged as nt_jag

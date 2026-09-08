@@ -486,6 +486,61 @@ def test_flat_variant_windows_optional_fields():
     fvw.squeeze(0)
 
 
+def test_varwindowopt_alphabet_accepts_str_bytes_and_nucleotidealphabet():
+    import seqpro as sp
+    from genvarloader._dataset._flat_variants import VarWindowOpt
+
+    # bytes: passed through unchanged
+    from_bytes = VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4)
+    assert from_bytes.token_alphabet == b"ACGT"
+
+    # str: normalized to bytes
+    from_str = VarWindowOpt(flank_length=4, token_alphabet="ACGT", unknown_token=4)
+    assert from_str.token_alphabet == b"ACGT"
+
+    # sp.NucleotideAlphabet: normalized to its byte alphabet
+    from_alpha = VarWindowOpt(
+        flank_length=4, token_alphabet=sp.alphabets.DNA, unknown_token=4
+    )
+    assert from_alpha.token_alphabet == b"ACGT"
+
+    # all three build the same token LUT
+    lut_bytes, _ = build_token_lut(from_bytes.token_alphabet, from_bytes.unknown_token)
+    lut_str, _ = build_token_lut(from_str.token_alphabet, from_str.unknown_token)
+    lut_alpha, _ = build_token_lut(from_alpha.token_alphabet, from_alpha.unknown_token)
+    np.testing.assert_array_equal(lut_bytes, lut_str)
+    np.testing.assert_array_equal(lut_bytes, lut_alpha)
+
+
+def test_build_token_lut_accepts_str_bytes_and_nucleotidealphabet():
+    """``build_token_lut`` normalizes str / bytes / NucleotideAlphabet identically.
+
+    Regression for #292: the ``with_settings(token_alphabet=...)`` ride-along path
+    forwards the alphabet straight to ``build_token_lut``, so a ``str`` (e.g. the
+    documented ``sp.DNA.alphabet``) previously crashed with ``IndexError``.
+    """
+    import seqpro as sp
+
+    lut_bytes, dt_bytes = build_token_lut(b"ACGT", 4)
+    lut_str, dt_str = build_token_lut("ACGT", 4)
+    lut_alpha, dt_alpha = build_token_lut(sp.alphabets.DNA, 4)
+
+    np.testing.assert_array_equal(lut_bytes, lut_str)
+    np.testing.assert_array_equal(lut_bytes, lut_alpha)
+    assert dt_bytes == dt_str == dt_alpha
+
+
+def test_normalize_token_alphabet_helper():
+    """The shared normalization helper maps every accepted type to ``bytes``."""
+    import seqpro as sp
+
+    from genvarloader._dataset._flat_variants import _normalize_token_alphabet
+
+    assert _normalize_token_alphabet(b"ACGT") == b"ACGT"
+    assert _normalize_token_alphabet("ACGT") == b"ACGT"
+    assert _normalize_token_alphabet(sp.alphabets.DNA) == b"ACGT"
+
+
 def test_public_exports():
     import genvarloader as gvl
 

@@ -28,23 +28,27 @@ BACKENDS = ["svar1", "vcf", "pgen"]
 
 
 def _assert_variants_cell_matches(streamed, expected, ploidy) -> int:
-    """Assert the streamed cell matches the written cell hap-by-hap; return the total
-    number of variants seen across all haps (so callers can guard against a vacuous
-    all-empty pass -- see the module docstring's byte-identity claim)."""
+    """Assert the streamed cell matches the written cell hap-by-hap.
+
+    Returns the total number of variants seen across all haps, so callers can guard
+    against a vacuous all-empty pass -- see the module docstring's byte-identity claim.
+    """
     n_variants = 0
     for h in range(ploidy):
-        streamed_alt = np.asarray(streamed.alt[h])
-        np.testing.assert_array_equal(streamed_alt, np.asarray(expected.alt[h]))
+        # `.alt[h]` is a ragged run of variable-length allele strings, so it has no
+        # dense array form: as of seqpro 0.22 an integer index keeps the per-variant
+        # structure instead of concatenating/collapsing the group (SeqPro#71, gvl#330).
+        # Compare element-wise as a list of `bytes`, the same way
+        # `tests/unit/dataset/test_ragged_variants_indexing.py` does.
+        streamed_alt = list(streamed.alt[h])
+        assert streamed_alt == list(expected.alt[h])
         np.testing.assert_array_equal(
             np.asarray(streamed.start[h]), np.asarray(expected.start[h])
         )
         np.testing.assert_array_equal(
             np.asarray(streamed.ilen[h]), np.asarray(expected.ilen[h])
         )
-        # A ragged hap with exactly one variant collapses `.alt[h]` to a 0-d scalar
-        # (bytes) rather than a length-1 array -- `atleast_1d` normalizes both cases
-        # before counting.
-        n_variants += np.atleast_1d(streamed_alt).shape[0]
+        n_variants += len(streamed_alt)
     return n_variants
 
 
@@ -139,17 +143,10 @@ def test_streaming_svar1_af_matches_written(streaming_case, tmp_path, min_af, ma
         .with_settings(min_af=min_af, max_af=max_af)
     )
 
-    # Count via `.start[h]` rather than `.alt[h]`: `_assert_variants_cell_matches`'s
-    # own `.alt[h]` count (used for its no-filter vacuous-pass guard, where every
-    # cell has >=1 variant) collapses a hap with exactly 1 variant AND a hap with
-    # 0 variants to the SAME 0-d `b""`-shaped scalar -- `atleast_1d(...).shape[0]`
-    # then reports 1 for both. This fixture's 20bp windows mean nearly every
-    # (region, sample, hap) has 0 or 1 variant, so that ambiguity would make
-    # `total`/`n_unf` constant (= n_regions * n_samples * ploidy) regardless of
-    # the AF filter, silently defeating the `0 < total < n_unf` proof below.
-    # `.start[h]` doesn't have this collapse (confirmed empirically: an empty
-    # hap's `.start[h]` is a proper 0-length array, never a scalar), so counting
-    # variants off it is exact for both 0 and 1-variant groups.
+    # Count via `.start[h]`, a plain integer field whose per-hap index is always a
+    # proper 0-or-more-length array. This fixture's 20bp windows mean nearly every
+    # (region, sample, hap) has 0 or 1 variant, so the `0 < total < n_unf` proof
+    # below depends on counting 0- and 1-variant haps apart exactly.
     seen, total = set(), 0
     for data, r_idx, s_idx in sds.to_iter(batch_size=4):
         for k in range(len(r_idx)):
@@ -417,20 +414,13 @@ def test_streaming_ref_var_field_matches_written(streaming_case, backend):
     [start, start + alt_len - ilen). The written oracle carries REF directly, so this
     is the gate on the reference-slice assumption.
 
-    `ref` is an opaque-string field: indexing a single hap off it (`cell.ref[h]`)
-    collapses ALL of that hap's REF alleles into ONE concatenated `bytes` blob
-    (confirmed empirically: 3 variants of lengths 1/2/3 -> `b'ACCGGG'`, a 0-d
-    scalar under `np.asarray`). That makes the blob-equality assertion below
-    boundary-blind (same total bytes with shifted per-variant boundaries would
-    still pass) and makes counting via `atleast_1d(...).shape[0]` on the blob
-    always exactly 1 -- including for an EMPTY hap, where `b''` is still shape
-    `(1,)` (Wave B PR-B3a review, Important 1). Count via `.start[h]` instead,
-    which does not have this collapse (matching
-    `test_streaming_svar1_af_matches_written`'s pattern), and additionally
-    compare per-variant REF lengths via the public `.to_chars()` accessor (which
-    restores the per-variant ragged structure the opaque-string blob otherwise
-    hides) so a boundary/count divergence is actually caught, not just a total-byte
-    match.
+    `ref` is an opaque-string field, so it is compared element-wise as a list of
+    per-variant `bytes` (seqpro >= 0.22 preserves that structure under an integer
+    hap index). Variants are counted off `.start[h]`, a plain integer field,
+    matching `test_streaming_svar1_af_matches_written`'s pattern. Per-variant REF
+    lengths are additionally compared via the public `.to_chars()` accessor so a
+    boundary/count divergence is caught independently of the element-wise
+    equality (Wave B PR-B3a review, Important 1).
     """
     regions, reference, variants, written = streaming_case(backend)
     fields = ["alt", "ilen", "start", "ref"]
@@ -445,17 +435,13 @@ def test_streaming_ref_var_field_matches_written(streaming_case, backend):
         for k in range(len(r_idx)):
             expected = ds[int(r_idx[k]), int(s_idx[k])]
             for h in range(sds.ploidy):
-                np.testing.assert_array_equal(
-                    np.asarray(data[k].ref[h]), np.asarray(expected.ref[h])
-                )
-                # Boundary check (Minor 2, PR-B3a review): the concatenated-bytes
-                # equality above can't distinguish "same total REF bytes, different
-                # per-variant split" from a genuine match. `.to_chars()` is the
-                # public seqpro.rag accessor that recovers per-variant boundaries
-                # for an opaque-string field (no private `_rl`/`_layout` reach-in
-                # needed); `.lengths` on the resulting per-hap Ragged gives the
-                # exact per-variant REF byte length, including 0 variants for an
-                # empty hap.
+                assert list(data[k].ref[h]) == list(expected.ref[h])
+                # Redundant belt-and-braces boundary check (Minor 2, PR-B3a review).
+                # `.to_chars()` is the public seqpro.rag accessor that recovers
+                # per-variant boundaries for an opaque-string field (no private
+                # `_rl`/`_layout` reach-in needed); `.lengths` on the resulting
+                # per-hap Ragged gives the exact per-variant REF byte length,
+                # including 0 variants for an empty hap.
                 streamed_ref_lens = data[k].ref.to_chars()[h].lengths
                 expected_ref_lens = expected.ref.to_chars()[h].lengths
                 np.testing.assert_array_equal(streamed_ref_lens, expected_ref_lens)

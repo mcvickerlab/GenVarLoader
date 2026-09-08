@@ -107,10 +107,12 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.21.1"
-# genoray >=3.0.0 (first release with the INFO/FORMAT field-read API) as the prebuilt
-# abi3 wheel from PyPI — one cp310-abi3 wheel covers py310-313 on both platforms.
-genoray = ">=3.0.0,<4"
+seqpro = "==0.22.0"
+# genoray >=3.4.0 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
+# py310-313 on both platforms. 3.4.0 carries SparseVar2._find_ranges_chunked, the
+# memory-bounded chunked range API _write_from_svar2 consumes (gvl#333). Mirrors
+# the pyproject range, which spans 3.x and 4.x.
+genoray = ">=3.4.0,<5"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
@@ -161,6 +163,8 @@ test-join-audit = { cmd = "pytest tests -p tests._join_audit_plugin", depends-on
     "gen-1kg",
 ] }
 typecheck = { cmd = "pyrefly check python/genvarloader tests" }
+# Inventory/verify docstring styles. Add --check to fail on any NumPy/mixed docstring.
+docstring-style = { cmd = "python scripts/docstring_style.py python/genvarloader" }
 bench = { cmd = "pytest tests/benchmarks --codspeed -p no:cov" }
 bench-local = { cmd = "pytest tests/benchmarks --benchmark-only -p no:cov" }
 # perf on the Python process (NOT py-spy --native, which slows deep-stack paths ~10x).

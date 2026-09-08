@@ -11,8 +11,10 @@ from .._threads import should_parallelize
 
 
 def _as_starts_stops(offsets: NDArray[np.integer]) -> NDArray[np.int64]:
-    """Normalize 1-D (n+1,) or 2-D (2, n) offsets to a contiguous (2, n) int64
-    starts/stops array. Both backends consume this single form."""
+    """Normalize offsets to a contiguous (2, n) int64 starts/stops array.
+
+    Accepts 1-D (n+1,) or 2-D (2, n) offsets. Both backends consume this single form.
+    """
     o = np.asarray(offsets)
     if o.ndim == 1:
         return np.ascontiguousarray(np.stack([o[:-1], o[1:]]), dtype=np.int64)

@@ -21,23 +21,22 @@ from ._variants._records import RaggedAlleles
 
 
 def get_dummy_dataset(spliced: bool = False):
-    """Return a dummy :class:`Dataset <genvarloader.Dataset>`  with 4 regions, 4 samples, max jitter of 2, a reference genome of all :code:`"N"`, genotypes, and
-    1 track "read-depth" where each track is :code:`[1, 2, 3, 4, 5, 6]` in the reference coordinate system, where :code:`3` is aligned
-    with each region's start coordinate. Is initialized to return ragged haplotypes and tracks with no jitter and deterministic reconstruction algorithms.
+    """Return a dummy :class:`Dataset <genvarloader.Dataset>`  with 4 regions, 4 samples, max jitter of 2, a reference genome of all :code:`"N"`, genotypes, and 1 track "read-depth" where each track is :code:`[1, 2, 3, 4, 5, 6]` in the reference coordinate system, where :code:`3` is aligned with each region's start coordinate.
 
-    Parameters
-    ----------
-    spliced
-        If :code:`True`, the dataset will be setup for splicing with all regions moved to chromosome 1 and
-        a splice indexer with 2 genes, "tp53" and "shh", corresponding to regions:
+    Is initialized to return ragged haplotypes and tracks with no jitter and deterministic
+    reconstruction algorithms.
 
-        .. code-block:: python
+    Args:
+        spliced: If :code:`True`, the dataset will be setup for splicing with all regions moved
+            to chromosome 1 and a splice indexer with 2 genes, "tp53" and "shh", corresponding
+            to regions:
 
-            {
-                "tp53": [3, 0, 2],
-                "shh": [1],
-            }
+            .. code-block:: python
 
+                {
+                    "tp53": [3, 0, 2],
+                    "shh": [1],
+                }
     """
     max_jitter = 2
 

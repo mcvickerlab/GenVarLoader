@@ -167,7 +167,6 @@ mod tests {
         pad: u8,
         parallel: bool,
     ) -> Vec<u8> {
-        let n_contigs = 1usize;
         let ref_arr = Array1::from_vec(reference.to_vec());
         let ref_offsets = Array1::from_vec(vec![0i64, reference.len() as i64]);
         let lengths: Vec<usize> = regions.iter().map(|r| (r[2] - r[1]).max(0) as usize).collect();

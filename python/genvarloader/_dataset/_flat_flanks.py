@@ -6,21 +6,32 @@ genome. All-numpy hot path.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from numpy.typing import NDArray
 
 from .._ragged import Ragged
 from .._utils import lengths_to_offsets
 from ..genvarloader import get_reference as _get_reference_ffi
-from ._flat_variants import _FlatWindow
+from ._flat_variants import _FlatWindow, _normalize_token_alphabet
+
+if TYPE_CHECKING:
+    import seqpro as sp
 
 
-def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dtype]:
+def build_token_lut(
+    alphabet: "str | bytes | sp.NucleotideAlphabet", unknown_token: int
+) -> tuple[NDArray, np.dtype]:
     """Build a 256-entry byte->token lookup table (seqpro-style).
 
-    Every byte value in ``alphabet`` maps to its position; every other byte
-    (including ``N`` and padded out-of-bounds positions) maps to ``unknown_token``.
+    ``alphabet`` accepts a ``str``, ``bytes``, or ``seqpro.NucleotideAlphabet`` (e.g.
+    ``seqpro.alphabets.DNA``) and is normalized to ``bytes`` (see
+    :func:`_normalize_token_alphabet`). Every byte value in the alphabet maps to its
+    position; every other byte (including ``N`` and padded out-of-bounds positions)
+    maps to ``unknown_token``.
     """
+    alphabet = _normalize_token_alphabet(alphabet)
     max_token = max(len(alphabet) - 1, unknown_token)
     dtype = np.uint8 if max_token <= np.iinfo(np.uint8).max else np.int32
     lut = np.full(256, unknown_token, dtype=dtype)
@@ -30,12 +41,13 @@ def build_token_lut(alphabet: bytes, unknown_token: int) -> tuple[NDArray, np.dt
 
 
 def _slice_flanks(data: NDArray[np.uint8], rw_off: NDArray[np.int64], flank_len: int):
-    """Derive per-variant (f5, f3) flanks from a contiguous ref-window read
-    ``rw = [start-L, end+L)``. ``f5`` = first ``L`` bytes of each row, ``f3`` =
-    last ``L``. Byte-identical to fetching ``[start-L, start)`` / ``[end, end+L)``
-    separately: rows are always ``ref_len + 2L >= 2L + 1`` long so the two
-    fixed-``L`` windows never overlap, and ``padded_slice`` pads OOB by absolute
-    coordinate so boundary padding matches. Both returned arrays are ``(n, L)``.
+    """Derive per-variant (f5, f3) flanks from a contiguous ref-window read ``rw = [start-L, end+L)``.
+
+    ``f5`` = first ``L`` bytes of each row, ``f3`` = last ``L``. Byte-identical to
+    fetching ``[start-L, start)`` / ``[end, end+L)`` separately: rows are always
+    ``ref_len + 2L >= 2L + 1`` long so the two fixed-``L`` windows never overlap,
+    and ``padded_slice`` pads OOB by absolute coordinate so boundary padding
+    matches. Both returned arrays are ``(n, L)``.
     """
     cols = np.arange(flank_len)
     f5 = data[rw_off[:-1, None] + cols]
@@ -54,8 +66,7 @@ def compute_flank_tokens(
         np.int64
     ],  # (b*p + 1,) variant boundaries per (instance, ploid) row
 ) -> tuple[NDArray, NDArray[np.int64]]:
-    """Ride-along flank tokens: ``[flank5 | flank3]`` (``2 * flank_len`` tokens) per
-    variant.
+    """Ride-along flank tokens: ``[flank5 | flank3]`` (``2 * flank_len`` tokens) per variant.
 
     Returns ``(token_data, offsets)``:
 
@@ -83,8 +94,10 @@ def compute_flank_tokens(
 
 
 def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
-    """Concatenate flank5 (fixed L) + alt (variable) + flank3 (fixed L) per variant
-    into a flat byte buffer. f5/f3 are (n_var, L) row-major flat (n_var*L,)."""
+    """Concatenate flank5 (fixed L) + alt (variable) + flank3 (fixed L) per variant into a flat byte buffer.
+
+    f5/f3 are (n_var, L) row-major flat (n_var*L,).
+    """
     n = alt_seq_off.shape[0] - 1
     out_off = np.empty(n + 1, np.int64)
     out_off[0] = 0
@@ -115,7 +128,7 @@ def compute_ref_window(
     lut: NDArray,
     row_offsets: NDArray[np.int64],
 ) -> "_FlatWindow":
-    """ref window = tokenized single contiguous read ``[start-L, end+L)``."""
+    """Ref window = tokenized single contiguous read ``[start-L, end+L)``."""
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
@@ -140,7 +153,7 @@ def compute_alt_window(
     lut: NDArray,
     row_offsets: NDArray[np.int64],
 ) -> "_FlatWindow":
-    """alt window = tokenized ``flank5 . alt . flank3`` assembly."""
+    """Alt window = tokenized ``flank5 . alt . flank3`` assembly."""
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
@@ -170,8 +183,7 @@ def tokenize_alleles(
     lut: NDArray,
     row_offsets: NDArray[np.int64],
 ) -> "_FlatWindow":
-    """Bare tokenized allele (no flanks) as a two-level ``_FlatWindow``: just the
-    LUT applied to the gathered allele bytes, with the allele byte offsets."""
+    """Bare tokenized allele (no flanks) as a two-level ``_FlatWindow``: just the LUT applied to the gathered allele bytes, with the allele byte offsets."""
     tok = lut[np.asarray(allele_data, np.uint8)]
     return _FlatWindow(
         tok,

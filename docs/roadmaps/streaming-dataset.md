@@ -766,8 +766,10 @@ Notes:
 
 ## Pointers
 
-- **Parity contract & migration conventions:** `docs/archive/roadmaps/rust-migration.md`
-  (completed; byte-identical parity, strangler-fig loop, differential-test harness).
+- **Parity contract & migration conventions:** the Rust-migration roadmap, retired in commit
+  `8f9d3c99` once that effort completed and reachable only in history from there
+  (`show 8f9d3c99^:docs/roadmaps/rust-migration.md`) — byte-identical parity, strangler-fig
+  loop, differential-test harness. Phase references below point into that document.
 - **SVAR2 read-bound precedent (the SVAR2-backend template):** rust-migration Phase 6a —
   `genoray_core::query` (`ContigReader`/`find_ranges`/`gather_haps_readbound`/`decode_hap`) +
   `reconstruct_haplotypes_from_svar2_readbound`. Reached by bumping the genoray git `rev` — no

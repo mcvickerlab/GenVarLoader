@@ -262,11 +262,13 @@ Active roadmaps live in `docs/roadmaps/`. **Any task covered by an active roadma
 
 - **`docs/roadmaps/streaming-dataset.md`** — the write-free, Rust-first streaming `StreamingDataset` effort (async double-buffered variant streaming). Read + update it for any work on that feature or its Rust engine.
 
-The completed Rust-migration effort is archived at **`docs/archive/roadmaps/rust-migration.md`** (+ its `phase-*.md` supporting docs). It is no longer a live tracker, but remains the reference for the **byte-identical parity contract** and the strangler-fig migration conventions that new Rust work still follows.
+The Rust-migration roadmap was retired once that effort completed (commit `8f9d3c99`), and its file was removed rather than archived. It stays reachable in the repository's history as the reference for the **byte-identical parity contract** and the strangler-fig migration conventions that new Rust work still follows.
 
 ## Streaming dataset work
 
-All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:
+All work on the write-free `StreamingDataset` effort (anything touching `python/genvarloader/_dataset/_streaming.py`, `src/stream/`, the SVAR1/SVAR2/VCF/PGEN `StreamBackend` path, or the StreamingDataset double-buffer engine) is coordinated through the **StreamingDataset** GitHub Project (`mcvickerlab/GenVarLoader`). Before starting streaming work:
+
+**Note:** this scope covers *only* the write-free `StreamingDataset` double-buffer engine. The separate, already-released `gvl.Dataset.to_dataloader(mode="buffered" | "double_buffered")` path over a written, file-backed dataset (`python/genvarloader/_double_buffered_loader.py`, `_buffered_loader.py`, `_producer.py`, `_shm_layout.py`, `_chunked.py`) is **not** streaming work — treat bugs/features there as normal `main`-targeted work, not StreamingDataset-board work.
 
 - **Check the project board first** — it is the source of truth for what is in flight, sequencing (waves), and status. Don't start a piece of streaming work without a tracking issue on the board.
 - **File streaming issues with a `streaming:` title prefix and add them to the StreamingDataset project** (in addition to a `type:` label). Split-out and follow-up issues (e.g. deferred sub-tasks, bugs found in review) go on the board too, cross-linked to their parent.
@@ -282,6 +284,7 @@ All work on the write-free `StreamingDataset` effort (anything touching `python/
   Do not describe genoray work as gated on a "genoray release".
 - **Pixi environments**: Use `-e dev` for development, `-e docs` for documentation, `-e py310`/`py311`/`py312`/`py313` for Python version testing. Platform is linux-64.
 - **Ruff config**: E501 (line length) is ignored.
+- **Docstrings**: Google style, enforced by ruff's pydocstyle rules (`[tool.ruff] lint.pydocstyle.convention = "google"`) on `python/genvarloader/` only. The `D1xx` missing-docstring rules are off — style is enforced on docstrings that exist, not their presence. New/edited docstrings in the package must be Google-style (`Args:`/`Returns:`/`Raises:` with colons, no NumPy `----` underlines). Sphinx renders them via napoleon (`napoleon_google_docstring = True`). Run `python scripts/docstring_style.py --check python/genvarloader` to verify no NumPy/mixed docstrings remain.
 - **Pyrefly**: Configured permissively; type annotations follow patterns in `_types.py`.
 - **Conventional commits**: Project uses commitizen for versioning.
 - **Test markers**: `@pytest.mark.slow` for slow tests (excluded by default).

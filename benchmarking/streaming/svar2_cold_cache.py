@@ -1,5 +1,7 @@
-"""SVAR2 streaming: cold-cache A/B ("sync" vs "svar2_engine") + the original
-synchronous-path IO-vs-CPU-bound split.
+"""SVAR2 streaming cold-cache benchmarks.
+
+A/B of "sync" vs "svar2_engine", plus the original synchronous-path
+IO-vs-CPU-bound split.
 
 MEASURES ONLY -- perf is secondary color here, never a pass/fail gate (see the
 project's perf-gate convention, CLAUDE.md / docs/roadmaps/streaming-dataset.md).
@@ -40,8 +42,9 @@ _STRATEGIES = ("sync", "svar2_engine")
 
 
 def _evict_page_cache(root: Path) -> None:
-    """Evict `root`'s regular files from the kernel page cache via
-    ``posix_fadvise(..., POSIX_FADV_DONTNEED)``, so a "cold" timed pass doesn't ride
+    """Evict `root`'s regular files from the kernel page cache.
+
+    Uses ``posix_fadvise(..., POSIX_FADV_DONTNEED)`` so a "cold" timed pass doesn't ride
     the store build's own write-back cache. Combined with building under a fresh
     ``tempfile.mkdtemp()`` per timed run (a never-faulted inode -- the same
     no-root-needed convention `cold_cache_overlap.py` uses), this is belt-and-
@@ -66,10 +69,12 @@ def _evict_page_cache(root: Path) -> None:
 
 
 def _time_strategy(fx, batch_size: int, strategy: str) -> float:
-    """Time one full `list(sds.to_iter(...))` sweep under `strategy`. Construction
-    (reading the store's static variant table) happens OUTSIDE the timed region --
-    only the sweep itself (window read + fill + drain) is timed, matching what a
-    training loop actually pays per epoch."""
+    """Time one full `list(sds.to_iter(...))` sweep under `strategy`.
+
+    Construction (reading the store's static variant table) happens OUTSIDE the
+    timed region -- only the sweep itself (window read + fill + drain) is timed,
+    matching what a training loop actually pays per epoch.
+    """
     sds = gvl.StreamingDataset(
         fx.bed, reference=fx.reference, variants=fx.svar2_path
     ).with_seqs("haplotypes")
@@ -94,12 +99,15 @@ def _fmt_range(vals: list[float]) -> str:
 def _ab_sweep(
     samples_list: list[int], records: int, repeats: int, batch_size: int
 ) -> None:
-    """Cold-cache A/B: "sync" (current SVAR2 default) vs "svar2_engine" (PR-3's
-    producer-thread pipeline engine). Per rep, per `n_samples`, EACH strategy gets
+    """Run the cold-cache A/B: "sync" vs "svar2_engine".
+
+    "sync" is the current SVAR2 default; "svar2_engine" is PR-3's producer-thread
+    pipeline engine. Per rep, per `n_samples`, EACH strategy gets
     its OWN freshly-built store (own `tempfile.mkdtemp()` inode, own
     `posix_fadvise(DONTNEED)` eviction pass) -- mirroring `cold_cache_overlap.py`'s
     per-(rep, strategy) fresh-build discipline exactly, so neither strategy can ride
-    the other's warm page cache within a rep."""
+    the other's warm page cache within a rep.
+    """
     import sys
 
     _repo_root = Path(__file__).resolve().parents[2]
@@ -163,9 +171,11 @@ def _ab_sweep(
 
 
 def _legacy_iosplit(samples_list: list[int], records: int, repeats: int) -> None:
-    """Original single-strategy ("sync") cold-cache timing + one pyinstrument
-    find_ranges-vs-gather/kernel breakdown per `n_samples`. Kept for IO/CPU-bound
-    investigation independent of the A/B ship decision above."""
+    """Time the original single-strategy ("sync") cold-cache path.
+
+    Adds one pyinstrument find_ranges-vs-gather/kernel breakdown per `n_samples`.
+    Kept for IO/CPU-bound investigation independent of the A/B ship decision above.
+    """
     import sys
 
     _repo_root = Path(__file__).resolve().parents[2]

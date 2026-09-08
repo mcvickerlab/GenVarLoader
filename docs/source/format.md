@@ -24,8 +24,9 @@ When the dataset was built from an `.svar`, the heavy per-variant arrays (`varia
 `dosages.npy`, `index.arrow`) are **not duplicated** into the dataset. Instead the dataset
 records a back-reference to the source `.svar` in `metadata.json` (see `svar_link` below).
 Likewise, a dataset built from an `.svar2` records a back-reference (`svar2_link`, below)
-and caches only small per-`(region, sample, ploidy)` range arrays under `genotypes/svar2_ranges/`
-— the bulk variant data stays in the `.svar2` store.
+and caches per-`(region, sample, ploidy)` range arrays under `genotypes/svar2_ranges/`
+— the bulk variant data stays in the `.svar2` store. See "`genotypes/svar2_ranges/` layout"
+below for the on-disk size of this cache; it is not small at cohort scale.
 
 ## `metadata.json` schema
 
@@ -41,6 +42,7 @@ and caches only small per-`(region, sample, ploidy)` range arrays under `genotyp
 | `version` | `SemanticVersion \| None` | Package version that wrote this dataset. Drives format dispatch. |
 | `svar_link` | `SvarLink \| None` | Back-reference to a source `.svar`, when present. |
 | `svar2_link` | `Svar2Link \| None` | Back-reference to a source `.svar2`, when present. |
+| `variants_fingerprint` | `Fingerprint \| None` | Bounded content fingerprint of `genotypes/variants.arrow` (blake2b over the first 1 MiB + total size). Set only when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from a PGEN/VCF-backed input; `None` for datasets written directly by `gvl.write`. `Dataset.open` verifies it against the on-disk file and raises `ValueError` on mismatch (e.g. the source variant index was rewritten out-of-band); absent (`None`) skips the check. |
 
 `SvarLink`:
 
@@ -87,9 +89,22 @@ Written only when the dataset's variant source is a `.svar2` store. `R` = number
 | `vk_indel_range.npy` | `(R, S, P, 2)` | Same, for the indel variant-key column. |
 | `dense_snp_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense SNP store. |
 | `dense_indel_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense indel store. |
-| `region_starts.npy` | `(R,)` | Per-region write-time start coordinate. Retained for parity/debugging; the read path derives per-query starts from the (post-jitter) query regions and does **not** read this array's values. |
 | `sample_cols.npy` | `(S,)` | Maps the dataset's selected-sample slot to the `.svar2` store's original sample index. |
 | `svar2_meta.json` | — | Records each array's `shape`/`dtype` plus `ploidy`. |
+
+`vk_snp_range.npy` and `vk_indel_range.npy` are each
+`(regions, samples, ploidy, 2)` int64, so the two together occupy
+
+```
+2 x regions x samples x ploidy x 2 x 8 bytes
+```
+
+This grows linearly in **both** the number of BED rows and the number of
+selected samples. It is not small at cohort scale: ~4,000 regions over 414,830
+diploid samples is approximately **98 GiB** for a single chromosome/panel.
+`gvl.write` logs the projected size before allocating and warns when it exceeds
+free disk. Budget disk accordingly, or reduce the region count or sample
+selection.
 
 At read time, `Dataset.__getitem__` slices these memmaps (numpy fancy-indexing; no interval
 search) to build the flat per-query inputs for the read-bound Rust kernels — no interval-search
@@ -140,13 +155,15 @@ for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the b
 A `.svar2`-backed dataset supports all four output modes (`haplotypes`, `variants`,
 `variant-windows`, and haplotype-realigned `tracks`), `unphased_union`, and
 `var_fields`-selected store INFO/FORMAT fields (on both `"variants"` and `"variant-windows"`).
-Plain haplotype output also supports splicing, `var_filter="exonic"`, and automatic
-reverse-complementation for negative-strand regions.
+Haplotype and `variants` output also support splicing, `var_filter="exonic"`, and
+automatic reverse-complementation for negative-strand regions. Spliced
+`RaggedVariants` are returned as complete `(transcript, sample, phase, ~variants)`
+cells.
 The following combinations are Phase-1 scope and raise `NotImplementedError` (or, for
 `extend_to_length`, at write time) instead of silently mis-computing:
 
-- Splicing with `variants`, `variant-windows`, or haplotype-realigned tracks.
-- `var_filter="exonic"` with non-haplotype output or haplotype-realigned tracks.
+- Splicing with `variant-windows` or haplotype-realigned tracks.
+- `var_filter="exonic"` with `variant-windows` or haplotype-realigned tracks.
 - `min_af` / `max_af` filtering (`.svar` only; see "Should I use `.svar` or `.svar2`" in the FAQ).
 - `annotated` haplotypes (`with_seqs("annotated")`).
 - `VarWindowOpt(ref="allele")` (bare-allele REF mode; REF alleles aren't stored in `.svar2`).
@@ -169,6 +186,7 @@ See the `genvarloader` skill's `.svar2` section for the full narrative and `var_
 | `0.18.0` | Variant coordinates switched to 1-based. |
 | `0.25.0` | `metadata.json` gains `svar_link`; old `genotypes/link.svar` symlink layout deprecated. `Metadata.version` typed as `SemanticVersion` (on-disk JSON unchanged). |
 | `0.37.0` | `metadata.json` gains `svar2_link`; `.svar2` accepted as a `gvl.write` variant source, cached under `genotypes/svar2_ranges/` and read via a read-bound, all-Rust path. |
+| `0.42.0 (unreleased)` | `metadata.json` gains `variants_fingerprint`, set when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from an input dataset; `Dataset.open` verifies it and raises on mismatch. |
 
 > **Upgrading legacy datasets.** A dataset written before `0.25.0` that was built from an
 > `.svar` will still open (with a `DeprecationWarning`). Run

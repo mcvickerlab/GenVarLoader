@@ -120,8 +120,10 @@ _CONTIG_RE = re.compile(r"##contig=<ID=([^,>]+),length=(\d+)>")
 
 
 def _contig_lengths(vcf_or_bcf: Path) -> dict[str, int]:
-    """Parse `##contig=<ID=...,length=...>` header lines. `vcfixture bulk`
-    sets `length` to the contig's POPULATED SPAN (max POS actually written),
+    """Parse `##contig=<ID=...,length=...>` header lines.
+
+    `vcfixture bulk` sets `length` to the contig's POPULATED SPAN (max POS
+    actually written),
     not a real chromosome length (see vcfixture-rs `src/bulk/mod.rs`) -- so
     this is the exact span a synthetic reference needs to cover, not a guess.
     """
@@ -140,10 +142,12 @@ def _contig_lengths(vcf_or_bcf: Path) -> dict[str, int]:
 def _build_reference(
     contig_lengths: dict[str, int], out_fasta: Path, seed: int
 ) -> Path:
-    """Synthesize a random-sequence FASTA covering each contig's populated
-    span (+ a small pad past the last variant, for indel/pad-char reach at
-    the contig end). Deterministic given `seed`; skipped if already built
-    (fixture reuse across repeats/strategies)."""
+    """Synthesize a random-sequence FASTA covering every contig's populated span.
+
+    A small pad past the last variant leaves room for indel/pad-char reach at the
+    contig end. Deterministic given `seed`; skipped if already built (fixture
+    reuse across repeats/strategies).
+    """
     if (
         out_fasta.exists()
         and (out_fasta.with_suffix(out_fasta.suffix + ".fai")).exists()
@@ -164,10 +168,12 @@ def _build_reference(
 def _make_bed(
     contig_lengths: dict[str, int], n_regions: int, region_len: int
 ) -> pl.DataFrame:
-    """`n_regions` non-overlapping regions per contig, spread across each
-    contig's populated span -- enough regions to force multiple read windows
-    (`StreamingDataset`'s default `_window_regions=64`) at any of the sweep's
-    `--n` sample counts."""
+    """Build `n_regions` non-overlapping regions per contig.
+
+    Regions are spread across each contig's populated span -- enough to force
+    multiple read windows (`StreamingDataset`'s default `_window_regions=64`) at
+    any of the sweep's `--n` sample counts.
+    """
     chroms: list[str] = []
     starts: list[int] = []
     for contig, length in contig_lengths.items():
@@ -189,8 +195,10 @@ def _make_bed(
 
 
 def _count_pvar_variants(pgen_path: Path) -> int:
-    """Non-header (`^#`) line count in the sibling `.pvar` -- the size of the
-    prefix `PgenWindowFiller` re-scans on every window (see module docstring).
+    """Count non-header (`^#`) lines in the sibling `.pvar`.
+
+    This is the size of the prefix `PgenWindowFiller` re-scans on every window
+    (see module docstring).
     """
     pvar = pgen_path.with_suffix(".pvar")
     out = subprocess.run(
@@ -201,7 +209,9 @@ def _count_pvar_variants(pgen_path: Path) -> int:
 
 
 def _filtered_variants_for_dataset(kind: str, fixture_dir: Path, n: int) -> Path:
-    """`gvl.write` (via `_write.py`'s `_reject_unsupported_variants`) requires
+    """Derive a filtered, `gvl.write`-compatible variant source once and cache it.
+
+    `gvl.write` (via `_write.py`'s `_reject_unsupported_variants`) requires
     bi-allelic, non-symbolic, non-breakend variants; `StreamingDataset` has no
     such check and reads whatever the fixture contains. `vcfixture bulk`'s
     `germline-1kgp` profile emits symbolic SVs (`<DEL>`/`<INS>`), so a raw
@@ -210,7 +220,8 @@ def _filtered_variants_for_dataset(kind: str, fixture_dir: Path, n: int) -> Path
     `_build_reference`) and use it for EVERY driver in the `--compare-dataset`
     arm -- engine, sync, AND dataset -- so all sweeps see the IDENTICAL
     variant set -- byte-identical parity (and the `bytes_emitted` cross-check)
-    requires the same input, not just the same (region, sample) cells."""
+    requires the same input, not just the same (region, sample) cells.
+    """
     filt_bcf = fixture_dir / f"bench_{n}.filtered.bcf"
     if not filt_bcf.exists():
         src_bcf = fixture_dir / f"bench_{n}.bcf"
@@ -272,10 +283,12 @@ class RunResult:
 
 
 def _drive_engine(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
-    """The shipped path: one `to_iter()` sweep, `_backend.build_engine` called
-    ONCE for the whole plan -- the producer thread decodes window N+1 while
-    the consumer generates window N's batches (`_streaming.py`'s "engine"
-    `_iter_batches` branch)."""
+    """Drive the shipped path: one `to_iter()` sweep over a whole-plan engine.
+
+    `_backend.build_engine` is called ONCE for the whole plan -- the producer
+    thread decodes window N+1 while the consumer generates window N's batches
+    (`_streaming.py`'s "engine" `_iter_batches` branch).
+    """
     n_windows = sum(1 for _ in sds._plan())
     t0 = time.perf_counter()
     n_batches = 0
@@ -291,15 +304,17 @@ def _drive_engine(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
 
 
 def _drive_sync(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
-    """Forced-synchronous baseline: rebuild a ONE-JOB engine per plan window
-    and fully drain it before starting the next window's engine. Because a
+    """Drive a forced-synchronous baseline: one single-job engine per plan window.
+
+    Each engine is fully drained before the next window's is built. Because a
     fresh producer thread can only start once `build_engine` is called (and
     the prior engine object is dropped once exhausted), no window's decode
     can overlap the previous window's consumption -- the cross-window
     pipelining `_drive_engine` gets from a single whole-plan engine is
     structurally absent here, without needing a Rust-side toggle (VCF/PGEN
     have no `read_window`/`generate_batch` split to drive by hand the way
-    SVAR1's Design C does)."""
+    SVAR1's Design C does).
+    """
     backend = sds._backend
     assert backend is not None
     ploidy = backend.ploidy
@@ -341,10 +356,13 @@ def _drive_sync(sds: "gvl.StreamingDataset", batch_size: int) -> RunResult:
 def _drive_dataset(
     sds: "gvl.StreamingDataset", fp: "FixturePaths", batch_size: int
 ) -> tuple[RunResult, float, int]:
-    """Write a gvl.Dataset once from the SAME variants+reference+bed, then iterate
-    it over the identical region-major (region, sample) plan order the streaming
-    run uses (haplotypes-only, jitter=0). Returns (sweep RunResult, write_time_s,
-    dataset_bytes). Write cost is preprocessing, reported separately."""
+    """Write a gvl.Dataset once, then sweep it in the streaming run's plan order.
+
+    Built from the SAME variants+reference+bed and iterated over the identical
+    region-major (region, sample) order the streaming run uses (haplotypes-only,
+    jitter=0). Returns (sweep RunResult, write_time_s, dataset_bytes). Write cost
+    is preprocessing, reported separately.
+    """
     del batch_size  # Dataset[r, s] access is not batched the way to_iter() is
     ds_dir = Path(tempfile.mkdtemp(prefix="gvl_bench_ds_"))
     try:

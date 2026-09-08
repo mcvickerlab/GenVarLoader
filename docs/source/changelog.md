@@ -67,6 +67,127 @@
 # Changelog
 
 
+# Changelog
+
+
+# Changelog
+
+
+# Changelog
+
+
+# Changelog
+
+
+# Changelog
+
+
+# Changelog
+
+
+# Changelog
+
+
+## v0.42.1 (2026-08-21)
+
+### Fix
+
+- **deps**: pick up genoray 4.0.1 and drop tracing from the build
+
+## v0.42.0 (2026-08-03)
+
+### Feat
+
+- **write**: preflight the svar2 range cache and accept max_mem
+- **concat**: verify variants.arrow fingerprint at open
+- **concat**: tracks, annot tracks, and svar/svar2 backends
+- **concat**: gvl.concat entry point for PGEN/VCF-backed datasets
+- **concat**: buffered streaming IO primitives
+- **concat**: preconditions and variants.arrow fingerprint
+- **concat**: provenance map and run coalescing for dataset merge
+
+### Fix
+
+- **write**: bound svar2 genotype-writing memory with max_mem
+- **concat**: scope duplicate-coordinate guard to axis="regions"
+- **concat**: close tie-order/schema gaps and drop full-array copies
+- **concat**: verify annot-track data agrees before copying on sample axis
+- **concat**: resolve has_dosages/fingerprint from the real store, enforce one variant source
+
+## v0.41.0 (2026-07-31)
+
+### BREAKING CHANGE
+
+- indexing a RaggedVariants allele field by integer
+(rv.alt[b][h], rv.ref[b][h]) now yields per-variant alleles instead of
+one concatenated bytes object. Callers relying on the concatenated
+value can recover it with b"".join(...). Requires seqpro>=0.22.
+
+### Fix
+
+- **svar2**: normalize contig names on the read path (#336)
+- seqpro>=0.22 for per-variant allele indexing (#330)
+
+## v0.40.2 (2026-07-24)
+
+### Fix
+
+- **dataloader**: #315 estimate upper-bounds Svar2Haps variant-windows payload
+
+## v0.40.1 (2026-07-23)
+
+### Fix
+
+- **dataloader**: charge variants flank_tokens overhead + clarify guard comments
+- **dataloader**: raise actionable SlotOverflowError on oversized chunk write
+- **dataloader**: derive double_buffered slot overhead from schema, drop magic 4096
+
+## v0.40.0 (2026-07-21)
+
+### Feat
+
+- **dataloader**: support variant-windows and flank tokens in mode='double_buffered'
+- **dataloader**: pass _FlatVariantWindows through the double-buffered consumer reshape
+- **dataloader**: shm kind=2 carries _FlatVariants.flank_tokens
+- **dataloader**: shm kind=4 serialization for _FlatVariantWindows
+- **dataloader**: replay VarWindowOpt and flank config in the producer schema
+- **dataloader**: support variant-windows and flank tokens in mode='buffered'
+- **dataloader**: instance-axis slicing for flat window and flank types
+- **dataloader**: byte accounting for variant-windows and variants flank_tokens
+
+### Fix
+
+- **dataloader**: propagate unphased_union to producer, Svar2 info-dtype guard + start accounting in variant-windows
+- **dataloader**: AF-filter-safe dummy_variant byte accounting + direct bound test
+- **dataloader**: store token_alphabet on Haps, drop lossy LUT inversion (restores double_buffered parity for colliding unknown_token)
+- **dataloader**: replace contiguity heuristic with round-trip verification in _token_alphabet_from_lut
+- **dataloader**: key producer-schema Config A/B on sequence_type, not stale window_opt
+- **flat-variants**: accept str/bytes/NucleotideAlphabet for with_settings(token_alphabet=...)
+
+## v0.39.0 (2026-07-17)
+
+### Feat
+
+- **flat-variants**: accept str/bytes/NucleotideAlphabet for VarWindowOpt.token_alphabet
+- **svar2**: support spliced variant records
+- **svar2**: scatter-write FFI entry for read-bound haplotypes
+- **reverse**: rc_bounded_rows_inplace for scattered rows
+
+### Fix
+
+- **svar2**: deterministic tie-break for scatter-write bounds sort
+- **svar2**: validate out_bounds and to_rc in scatter-write FFI entry
+- **reference**: reject in_memory=False with reordered/subset contigs (#285)
+
+### Refactor
+
+- **svar2**: per-row destination bounds in the reconstruct core
+
+### Perf
+
+- **svar2**: vectorize build_splice_plan permutation
+- **svar2**: scatter-write spliced haplotypes, no Python re-order
+
 ## v0.38.0 (2026-07-16)
 
 ### Feat
