@@ -292,7 +292,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             out_shape = (
                 len(idx),
                 len(self.tracks.active_tracks),
-                self.haps.genotypes.shape[-2],
+                self.haps.stored_ploidy,
                 None,
             )
 
@@ -442,7 +442,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             out_shape = (
                 len(idx),
                 len(self.tracks.active_tracks),
-                self.haps.genotypes.shape[-2],
+                self.haps.stored_ploidy,
                 None,
             )
 

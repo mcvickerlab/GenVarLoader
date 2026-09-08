@@ -326,6 +326,62 @@ class Haps(Reconstructor[_H]):
                 + "Doing this automatically is not yet supported."
             )
 
+    # ---- backend-agnostic query surface ----
+    #
+    # These describe the dataset, not the storage layout, so every caller in
+    # ``_impl.py`` / ``_reconstruct.py`` can ask a ``Haps`` about it without
+    # reaching into SVAR1-specific fields (``genotypes``, ``variants``). Each
+    # member exists because some caller was already doing exactly that. See
+    # docs/superpowers/specs/2026-09-08-haps-role-split-design.md.
+
+    @property
+    def stored_ploidy(self) -> int:
+        """Ploidy as laid out on disk, ignoring any ``unphased_union`` folding.
+
+        Distinct from :attr:`Dataset.ploidy`, which reports ``1`` under
+        ``unphased_union``. Grouping that is keyed on the stored layout (e.g.
+        :meth:`_allele_bytes_sum`'s result shape) must use this.
+        """
+        return int(self.genotypes.shape[-2])
+
+    @property
+    def has_ref_alleles(self) -> bool:
+        """Whether REF allele bytes are available (needed by ``ref='allele'``)."""
+        return self.variants.ref is not None
+
+    def var_field_dtype(self, field: str) -> np.dtype:
+        """The numpy dtype of per-variant *scalar* field ``field``.
+
+        Args:
+            field: A scalar variant field: ``"start"``, ``"ilen"``, ``"dosage"``,
+                or the name of a numeric INFO / per-call FORMAT field.
+
+        Returns:
+            The field's numpy dtype.
+
+        Raises:
+            KeyError: If ``field`` is unknown, or is one of the variable-length
+                allele fields ``"alt"``/``"ref"``, which have no scalar dtype --
+                callers size those from their actual byte payload instead.
+        """
+        if field in ("alt", "ref"):
+            raise KeyError(
+                f"{field!r} is a variable-length allele field with no scalar dtype;"
+                " size it from its byte payload instead."
+            )
+        if field == "start":
+            return self.variants.start.dtype
+        if field == "ilen":
+            return self.variants.ilen.dtype
+        if field == "dosage":
+            if self.dosages is None:
+                raise KeyError("this dataset has no dosages")
+            return self.dosages.data.dtype
+        try:
+            return self.variants.info[field].dtype
+        except KeyError:
+            raise KeyError(f"unknown variant field {field!r}") from None
+
     @property
     def ffi_static(self) -> _HapsFfiStatic:
         """Lazily-computed, cached FFI-ready sub-linear arrays (see _HapsFfiStatic)."""
@@ -530,7 +586,7 @@ class Haps(Reconstructor[_H]):
         )
 
         # genotypes are (r, s, p, ~v)
-        ploidy = cast(int, self.genotypes.shape[-2])
+        ploidy = self.stored_ploidy
         return hap_ilens.reshape(-1, ploidy)
 
     def haplotype_lengths_for_plan(
@@ -685,7 +741,7 @@ class Haps(Reconstructor[_H]):
         splice_plan: SplicePlan | None = None,
     ) -> ReconstructionRequest:
         """Compute the per-batch prep state for haplotype reconstruction."""
-        ploidy = cast(int, self.genotypes.shape[-2])
+        ploidy = self.stored_ploidy
         batch_size = len(idx)
         # (b)
         lengths = regions[:, 2] - regions[:, 1]
