@@ -13,6 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
+    from .._ragged import RaggedIntervals
     from ._splice import SplicePlan
 
 T = TypeVar("T", covariant=True)
@@ -41,5 +42,39 @@ class Reconstructor(Protocol[T]):
         ``to_rc`` is a per-row boolean mask (True = reverse-complement this row).
         On the Rust backend, flat-seq kinds fold RC in-kernel; on numba the
         caller's post-pass handles it and this param is ignored by each method.
+        """
+        ...
+
+
+class TrackRealigner(Protocol):
+    """Per-batch state for filling haplotype-realigned track blocks.
+
+    ``HapsTracks.__call__`` allocates one output buffer for the whole batch and
+    then fills it one track at a time. Everything the realign kernel needs that
+    does *not* vary across tracks -- the batch's regions, shifts, haplotype
+    offsets and whatever backend-specific arrays those imply -- is prepared once
+    by :meth:`Haps.track_realigner` and carried here, so the per-track loop stays
+    backend-agnostic and per-batch work is not repeated per track.
+    """
+
+    def fill(
+        self,
+        out: NDArray[np.float32],
+        o_idx: NDArray[np.integer],
+        intervals: "RaggedIntervals",
+        params: NDArray[np.float64],
+        strategy_id: int,
+    ) -> None:
+        """Write one track's realigned haplotype block into ``out``.
+
+        Args:
+            out: The destination slice for this track, laid out on the batch's
+                per-haplotype output offsets. Written in place.
+            o_idx: Per-query row into this track's intervals -- the sample-major
+                index for :attr:`TrackType.SAMPLE` tracks, the region index
+                otherwise.
+            intervals: This track's stored intervals.
+            params: The lowered insertion-fill parameters for this track.
+            strategy_id: The lowered insertion-fill strategy for this track.
         """
         ...

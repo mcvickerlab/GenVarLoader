@@ -37,7 +37,7 @@ from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
 from .._flat import _Flat
-from .._ragged import RaggedAnnotatedHaps, _COMP
+from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, _COMP
 from .._threads import should_parallelize
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
@@ -58,6 +58,7 @@ from ._flat_variants import (
 )
 from ._intervals import intervals_to_tracks
 from ._haps import _H, Haps, _Variants
+from ._protocol import TrackRealigner
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
 from ._svar2_link import Svar2Link, _resolve_svar2, _verify_svar2_fingerprint
@@ -294,6 +295,65 @@ class Svar2Haps(Haps[_H]):
     def has_ref_alleles(self) -> bool:
         """SVAR2 never carries REF allele bytes (the decode is ALT-only)."""
         return False
+
+    @property
+    def has_dosages(self) -> bool:
+        """SVAR2 never emits dosages.
+
+        ``dosage`` is a builtin name the read-bound decode kernel does not
+        produce, so it is filtered out of both :attr:`available_var_fields` and
+        :meth:`_requested_store_fields` and can never be requested.
+        """
+        return False
+
+    def check_track_realign_support(
+        self,
+        output_length: Literal["ragged", "variable"] | int,
+        splice_plan: "SplicePlan | None",
+        to_rc: NDArray[np.bool_] | None,
+        ragged_tracks: bool,
+    ) -> None:
+        """Reject the request shapes the read-bound track path cannot serve.
+
+        Args:
+            output_length: The requested output length.
+            splice_plan: The requested splice plan, if any.
+            to_rc: Per-query reverse-complement mask, if any.
+            ragged_tracks: Whether the tracks are being realigned at all.
+
+        Raises:
+            NotImplementedError: For splicing, annotated haps, a fixed output
+                length, or in-kernel reverse-complement.
+        """
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks is not supported for svar2 "
+                "datasets yet."
+            )
+        # Annotated haps are out of scope for svar2 (matches Svar2Haps.__call__).
+        # HapsTracks checks support BEFORE reaching Svar2Haps's own annotated
+        # guard, and get_haps_and_shifts returns plain Ragged[S1] regardless of
+        # kind, so without this an annotated view would silently yield
+        # non-annotated haps.
+        if issubclass(self.kind, RaggedAnnotatedHaps):
+            raise NotImplementedError(
+                "svar2 datasets do not support with_seqs('annotated') with tracks yet."
+            )
+        # The realign kernel has no in-kernel reverse-complement.
+        if to_rc is not None and bool(np.asarray(to_rc).any()):
+            raise NotImplementedError(
+                "In-kernel reverse-complement is not supported for svar2 "
+                "haplotype-realigned tracks."
+            )
+        # The readbound track kernel always sizes each hap to ref_len + diff
+        # (no output_length override), so a fixed-length request cannot be
+        # honored byte-identically. Guard rather than silently mis-size.
+        if ragged_tracks and isinstance(output_length, int):
+            raise NotImplementedError(
+                "Fixed-length (int output_length) haplotype-realigned tracks "
+                "are not supported for svar2 datasets yet; use ragged/variable "
+                "output."
+            )
 
     def var_field_dtype(self, field: str) -> np.dtype:
         """The dtype of a scalar variant field, from the store manifest.
@@ -768,6 +828,52 @@ class Svar2Haps(Haps[_H]):
         return out, geno_offset_idx, shifts, diffs, hap_lengths, None, None
 
     # ---- tracks ----
+
+    def track_realigner(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        shifts: NDArray[np.int32],
+        geno_idx: NDArray[np.integer],
+        track_lengths: NDArray[np.integer],
+        out_offsets: NDArray[np.integer],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.integer] | None,
+        to_rc: NDArray[np.bool_] | None,
+        base_seed: int,
+    ) -> TrackRealigner:
+        """Prepare the per-batch state for the read-bound track path.
+
+        ``geno_idx``/``keep``/``keep_offsets``/``to_rc`` describe the SVAR1
+        sparse-genotype layout and the exonic filter, neither of which the
+        read-bound decode uses: the kernel re-derives its own per-contig ranges
+        from the store, and :meth:`check_track_realign_support` has already
+        rejected the reverse-complement and exonic cases.
+
+        Args:
+            idx: Flat ``(region, sample)`` dataset indices for the batch.
+            regions: ``(b, 3)`` contig/start/end of each query.
+            shifts: ``(b, p)`` per-haplotype jitter shifts.
+            geno_idx: Unused; see above.
+            track_lengths: ``(b,)`` reference span each track block is read over.
+            out_offsets: Unused; the kernel sizes each hap natively.
+            keep: Unused; see above.
+            keep_offsets: Unused; see above.
+            to_rc: Unused; see above.
+            base_seed: Seed for seed-dependent insertion fills.
+
+        Returns:
+            A realigner whose ``fill`` writes one track at a time.
+        """
+        del geno_idx, out_offsets, keep, keep_offsets, to_rc
+        return _Svar2TrackRealigner(
+            haps=self,
+            idx=idx,
+            regions=regions,
+            shifts=shifts,
+            track_lengths=track_lengths,
+            base_seed=base_seed,
+        )
 
     def realign_track_block(
         self,
@@ -1552,3 +1658,44 @@ class Svar2Haps(Haps[_H]):
             "Ragged[np.bytes_]",
             _Flat.from_offsets(out_data, (b, P, None), out_off).view("S1"),
         )
+
+
+@dataclass(slots=True)
+class _Svar2TrackRealigner:
+    """SVAR2 :class:`TrackRealigner`: two standalone kernels per track.
+
+    Thin per-batch holder around :meth:`Svar2Haps.realign_track_block`, which
+    does its own per-contig cache slicing and therefore has no batch-scoped
+    arrays worth precomputing here.
+    """
+
+    haps: "Svar2Haps"
+    idx: NDArray[np.integer]
+    regions: NDArray[np.int32]
+    shifts: NDArray[np.int32]
+    track_lengths: NDArray[np.integer]
+    base_seed: int
+
+    def fill(
+        self,
+        out: NDArray[np.float32],
+        o_idx: NDArray[np.integer],
+        intervals: RaggedIntervals,
+        params: NDArray[np.float64],
+        strategy_id: int,
+    ) -> None:
+        """Fill one track's block from the read-bound realign kernels."""
+        block_data, _block_off = self.haps.realign_track_block(
+            idx=self.idx,
+            o_idx=o_idx,
+            regions=self.regions,
+            shifts=self.shifts,
+            track_lengths=self.track_lengths,
+            intervals=intervals,
+            params=np.ascontiguousarray(params, np.float64),
+            strategy_id=int(strategy_id),
+            base_seed=int(self.base_seed),
+        )
+        # block_data is (b, P) C-ordered with per-hap lengths == hap_lengths, so
+        # its offsets equal the caller's per-track offsets; copy into the slice.
+        out[:] = block_data

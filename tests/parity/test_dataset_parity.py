@@ -207,7 +207,7 @@ def test_tracks_realign_getitem_identical_across_backends(
     The spy targets this entry.
     """
     import genvarloader as gvl
-    import genvarloader._dataset._reconstruct as _recon_mod
+    import genvarloader._dataset._haps as _haps_mod
     from genvarloader._dataset._insertion_fill import (
         Constant,
         FlankSample,
@@ -221,10 +221,10 @@ def test_tracks_realign_getitem_identical_across_backends(
     ds_base = gvl.Dataset.open(ds_dir, reference=ref)
     ds_base = ds_base.with_seqs("haplotypes").with_tracks("signal")
 
-    orig_fused = getattr(_recon_mod, "intervals_and_realign_track_fused", None)
+    orig_fused = getattr(_haps_mod, "intervals_and_realign_track_fused", None)
     assert orig_fused is not None, (
-        "intervals_and_realign_track_fused not found on _recon_mod — "
-        "ensure it is imported at module level in _reconstruct.py"
+        "intervals_and_realign_track_fused not found on _haps_mod — "
+        "ensure it is imported at module level in _haps.py"
     )
 
     calls: dict[str, int] = {"n": 0}
@@ -245,7 +245,7 @@ def test_tracks_realign_getitem_identical_across_backends(
         strategy_name = type(strategy).__name__
         ds = ds_base.with_insertion_fill(strategy)
 
-        monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", _spy_fused)
+        monkeypatch.setattr(_haps_mod, "intervals_and_realign_track_fused", _spy_fused)
         calls["n"] = 0  # reset per-strategy counter
 
         # --- read (default rust backend, spy active) ---
@@ -255,7 +255,7 @@ def test_tracks_realign_getitem_identical_across_backends(
         assert calls["n"] > 0, (
             f"[{strategy_name}] intervals_and_realign_track_fused was NEVER "
             f"invoked during the read (calls={calls['n']}) — "
-            "the backstop is vacuous. Inspect HapsTracks.__call__ to "
+            "the backstop is vacuous. Inspect _Svar1TrackRealigner.fill to "
             "confirm intervals_and_realign_track_fused is called on the Rust path."
         )
 
@@ -277,7 +277,7 @@ def test_tracks_realign_getitem_identical_across_backends(
         _golden.assert_output_matches_golden(out, _golden.load_flat_golden(golden_name))
 
         # Restore original between strategies.
-        monkeypatch.setattr(_recon_mod, "intervals_and_realign_track_fused", orig_fused)
+        monkeypatch.setattr(_haps_mod, "intervals_and_realign_track_fused", orig_fused)
 
 
 # ---------------------------------------------------------------------------

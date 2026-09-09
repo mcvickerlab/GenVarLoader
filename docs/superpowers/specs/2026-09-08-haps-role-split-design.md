@@ -89,7 +89,7 @@ today by reaching into SVAR1 storage. Nothing is added speculatively.
 | `measure_variant_payload` | the `_allele_bytes_sum` + `variants.start.dtype` open-coding in both estimate branches | new wrapper over existing `_allele_bytes_sum` | **already exists** (`_svar2_haps.py:851`) |
 | `var_field_dtype` | `variants.info[f].dtype` + the `Svar2Haps` fork in `_info_field_dtype` | `variants.info[f].dtype` | `store_fields[f].dtype` |
 | `has_ref_alleles` | `variants.ref is not None` (`_impl.py:759`) | `variants.ref is not None` | `False` |
-| `realign_track_block` | `isinstance(self.haps, Svar2Haps)` in `HapsTracks.__call__` | the current SVAR1 fused body | the current `_call_svar2` body |
+| `check_track_realign_support` + `track_realigner` | `isinstance(self.haps, Svar2Haps)` in `HapsTracks.__call__` | the guards + fused kernel call from the current SVAR1 body | the guards from `_call_svar2` + its existing `realign_track_block` |
 
 `measure_variant_payload` is the keystone: `Svar2Haps` already implements it
 precisely because the estimate branches could not trust the placeholders. Making
@@ -107,9 +107,9 @@ both `isinstance` forks into one unconditional call.
 
 ### What stays
 
-- `HapsTracks._call_svar2`'s body — a genuine kernel-dispatch difference. It
-  moves from an `isinstance` in `HapsTracks` to a `realign_track_block`
-  override on each subclass.
+- The kernel-dispatch difference `HapsTracks._call_svar2` existed for. It moves
+  from an `isinstance` in `HapsTracks` onto per-class `track_realigner`
+  overrides; the duplicated orchestration around it does not survive.
 - Every `NotImplementedError` guard in `Svar2Haps` (`min_af`/`max_af`,
   annotated haps, splicing, jitter). Those are real capability gaps, not
   artifacts of the class shape.
@@ -147,12 +147,13 @@ correct bug report.
 If #356 has not merged when the final layer is written, that layer deletes the
 `Ragged` placeholder instead; the end state is identical either way.
 
-## Implementation: a 5-PR stack
+## Implementation: a 6-PR stack
 
 Each layer is independently green and independently reviewable. (Planned as
-four; the query surface split cleanly into a cheap "read scalars off the
+four. The query surface split cleanly into a cheap "read scalars off the
 reconstructor" layer and a heavier "measure the variant payload" layer, and
-splitting them kept each diff reviewable.)
+splitting them kept each diff reviewable. Then the track dispatch had to move
+*below* the ABC hoist rather than into it -- see layer 4.)
 
 1. `fix/svar2-haplotype-lengths-indels` — override `_haplotype_ilens` on
    `Svar2Haps` (delegating to `_haplotype_diffs`) plus a regression test
@@ -166,10 +167,17 @@ splitting them kept each diff reviewable.)
    `ref_allele_bytes` and `prepare_var_fields`; implement on `Haps`. The two
    `isinstance(haps_obj, Svar2Haps)` estimate forks and the `with_var_fields`
    fork all delete here, and `_impl.py` stops importing `Svar2Haps`.
-4. `refactor/haps-role-abc` — rename `Haps` -> `Svar1Haps`, hoist the ABC into
-   `Haps`, reparent `Svar2Haps` to it, and move the `HapsTracks.__call__`
-   dispatch onto a `realign_track_block` override. Mostly mechanical.
-5. `refactor/haps-drop-placeholders` — delete the fabricated `genotypes` /
+4. `refactor/haps-track-dispatch` — collapse `HapsTracks.__call__`'s two arms
+   into one body that reaches the backend only through
+   `Haps.check_track_realign_support` and `Haps.track_realigner` (returning a
+   per-batch `TrackRealigner`). `_call_svar2` and the last
+   `isinstance(self.haps, Svar2Haps)` delete here, and `_reconstruct.py` stops
+   importing `Svar2Haps`. `has_dosages` joins the query surface, retiring the
+   last `_impl.py` reach into SVAR1 storage.
+5. `refactor/haps-role-abc` — rename `Haps` -> `Svar1Haps`, hoist the ABC into
+   `Haps`, reparent `Svar2Haps` to it. Mechanical, because after layer 4
+   nothing outside `_haps.py` / `_flat_variants.py` touches SVAR1 storage.
+6. `refactor/haps-drop-placeholders` — delete the fabricated `genotypes` /
    `_Variants` from `Svar2Haps.from_path` and `_ShapeOnlyGenotypes`.
 
 ## Testing
@@ -208,6 +216,35 @@ with the arithmetic and a reproduction. Tightening the count before that lands
 turns three `tests/unit/dataset/test_output_bytes_dummy_variant.py` cases red
 (`estimated=7696 < actual=7728`, deficit 32 = 4 x 8). Fixing #362 first, then
 tightening, is the correct order; both are out of scope for this stack.
+
+## Found while implementing layer 4
+
+Two things in the layer-4 plan above were wrong, and reordering the stack was
+the fix.
+
+**`realign_track_block` was already taken.** The design named the new
+track-dispatch override after a method that already exists on `Svar2Haps`
+(`_svar2_haps.py`) as a *lower-level kernel helper* — the thing `_call_svar2`
+called inside its per-track loop. The role-level member is now
+`Haps.track_realigner`, returning a per-batch `TrackRealigner`; the SVAR2
+kernel helper keeps its name.
+
+**The dispatch had to move below the ABC hoist, not into it.** After layer 3,
+`_reconstruct.py` still read `haps.genotypes` and `haps.ffi_static` inside
+`HapsTracks.__call__`'s SVAR1 arm, and `_impl.py` still read `haps_obj.dosages`.
+Hoisting the ABC first would have left those as type errors against the role,
+to be papered over with `cast`/`assert isinstance` and then unpicked again one
+layer later. Doing the dispatch first means the hoist touches only class
+headers and field placement.
+
+**Why a `TrackRealigner` object rather than a per-track hook.** The obvious
+shape — one abstract "fill this track's block" method — would have re-run
+`_as_starts_stops(self.genotypes.offsets)` once per track. That array is
+`(2, regions*samples*ploidy)`, and the old code deliberately hoisted it out of
+the loop. Caching it on the reconstructor instead would pin a per-sample-scale
+allocation for the dataset's lifetime. Splitting the hook into "prepare once
+per batch" + "fill once per track" preserves the hoist by construction, and
+gives the per-batch state a name and a type.
 
 ## Non-goals
 

@@ -32,11 +32,11 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
     directly from HapsTracks.__call__ on the rust path) must produce the same
     float32 bytes as the frozen golden.
 
-    Spy guard: we monkeypatch ``_reconstruct_mod.intervals_and_realign_track_fused``
+    Spy guard: we monkeypatch ``_haps_mod.intervals_and_realign_track_fused``
     to count calls. The spy must fire at least once during the read.
     """
     import genvarloader as gvl
-    import genvarloader._dataset._reconstruct as _reconstruct_mod
+    import genvarloader._dataset._haps as _haps_mod
     from genvarloader._dataset._insertion_fill import (
         Constant,
         FlankSample,
@@ -51,10 +51,10 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
     ds_base = gvl.Dataset.open(ds_dir, reference=ref)
     ds_base = ds_base.with_seqs("haplotypes").with_tracks("signal")
 
-    orig_fused = getattr(_reconstruct_mod, "intervals_and_realign_track_fused", None)
+    orig_fused = getattr(_haps_mod, "intervals_and_realign_track_fused", None)
     assert orig_fused is not None, (
-        "intervals_and_realign_track_fused not found on _reconstruct_mod — "
-        "ensure it is imported at module level in _reconstruct.py"
+        "intervals_and_realign_track_fused not found on _haps_mod — "
+        "ensure it is imported at module level in _haps.py"
     )
 
     fill_strategies = [
@@ -80,9 +80,7 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
             return spy
 
         spy_fn = _make_spy(orig_fused)
-        monkeypatch.setattr(
-            _reconstruct_mod, "intervals_and_realign_track_fused", spy_fn
-        )
+        monkeypatch.setattr(_haps_mod, "intervals_and_realign_track_fused", spy_fn)
 
         calls["n"] = 0  # reset per-strategy
 
@@ -93,7 +91,7 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
         assert calls["n"] > 0, (
             f"[{strategy_name}] intervals_and_realign_track_fused was NEVER invoked "
             f"during the read (calls={calls['n']}) — the backstop is "
-            "vacuous. Ensure HapsTracks.__call__ calls intervals_and_realign_track_fused "
+            "vacuous. Ensure _Svar1TrackRealigner.fill calls intervals_and_realign_track_fused "
             "on the Rust path."
         )
 
@@ -117,6 +115,4 @@ def test_fused_tracks_dataset_parity(synthetic_case, tmp_path, monkeypatch):
         _golden.assert_output_matches_golden(out, _golden.load_flat_golden(golden_name))
 
         # Restore original between strategies.
-        monkeypatch.setattr(
-            _reconstruct_mod, "intervals_and_realign_track_fused", orig_fused
-        )
+        monkeypatch.setattr(_haps_mod, "intervals_and_realign_track_fused", orig_fused)
