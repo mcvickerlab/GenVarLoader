@@ -93,7 +93,8 @@ impl RustTable {
     /// not hold the cache mutex, or a future track producer thread would
     /// serialize on it.
     fn trees_for(&self, chrom: usize) -> Arc<Vec<BasicCOITree<u32, u32>>> {
-        let mut slot = self.tree_cache.lock().unwrap();
+        // Recover from a poisoned lock rather than propagating panic-on-panic.
+        let mut slot = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((cached_chrom, trees)) = slot.as_ref() {
             if *cached_chrom == chrom {
                 return Arc::clone(trees);
