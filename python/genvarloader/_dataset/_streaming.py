@@ -534,10 +534,12 @@ class StreamingDataset:
             of samples in the dataset.
         iteration_order: ``"auto"`` (default), ``"regions"``, or ``"samples"`` --
             see :meth:`to_iter` for the cartesian sweep this controls. It is a
-            no-op whenever the sample axis fits in one read-window chunk, which
-            is the default for any cohort under ~8.4M samples at
-            ``max_mem="512MB"`` -- the sample loop then runs exactly once and
-            both orders emit the identical plan. Check
+            no-op whenever the sample axis fits in one read-window chunk. At the
+            default ``max_mem="512MB"`` the threshold depends on how many tracks
+            are attached, since each track adds 768 B per cell: about 8.4M
+            samples with no tracks, ~340k with one track, ~170k with two (see
+            ``_streaming.py:845-853``). Below the threshold the sample loop
+            runs exactly once and both orders emit the identical plan. Check
             :attr:`iteration_order_is_active` to see whether this setting is
             actually doing anything for a given dataset/``max_mem`` combination.
     """
@@ -897,10 +899,11 @@ class StreamingDataset:
         """Whether `iteration_order` actually changes the visit order.
 
         `iteration_order` only matters when the sample axis is chunked. The
-        chunk size is derived from `max_mem`, and at the default
-        `max_mem="512MB"` it holds the entire sample axis for any cohort below
-        roughly 8.4 million -- so the sample loop runs once and both orders emit
-        the identical plan.
+        chunk size is derived from `max_mem`; at the default `max_mem="512MB"`
+        the cohort size below which it holds the entire sample axis depends on
+        track count (768 B/cell/track) -- about 8.4M with no tracks, ~340k with
+        one, ~170k with two -- below which the sample loop runs once and both
+        orders emit the identical plan.
 
         Returns:
             `True` when `_window_samples < n_samples`, so the two orders differ.
@@ -980,9 +983,11 @@ class StreamingDataset:
         and it is what lets `RustTable`'s per-contig tree cache hold.
 
         `iteration_order` only changes the VISIT ORDER, never the window set.
-        It is also a no-op whenever `_window_samples == n_samples` (the default
-        for any cohort under ~8.4M at `max_mem="512MB"`), because the sample
-        loop then runs exactly once.
+        It is also a no-op whenever `_window_samples == n_samples` (the
+        default at `max_mem="512MB"` for any cohort under ~8.4M with no
+        tracks, ~340k with one track, or ~170k with two -- each track adds
+        768 B/cell, see `_streaming.py:845-853`), because the sample loop
+        then runs exactly once.
         """
         n_regions, n_samples = self.shape
         if n_regions == 0:
@@ -2041,9 +2046,12 @@ class StreamingDataset:
         access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
         ``iteration_order`` (set at construction) picks between region-major and
         sample-major sweeps, but it only changes anything when the sample axis
-        is chunked across more than one read window -- which does not happen at
-        the default ``max_mem="512MB"`` for any realistic cohort, so the sample
-        loop runs once and both orders emit the identical plan. Check
+        is chunked across more than one read window. At the default
+        ``max_mem="512MB"`` the sample chunk holds the entire axis unless the
+        cohort is very large -- about 8.4M samples with no tracks, but only
+        ~340k with one track and ~170k with two, since each track adds 768 B
+        per cell (see ``_streaming.py:845-853``). Below that threshold the
+        sample loop runs once and both orders emit the identical plan. Check
         :attr:`iteration_order_is_active` before relying on it to change
         observed behavior.
 
