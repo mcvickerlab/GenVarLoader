@@ -1,9 +1,10 @@
 """SVAR2-backed haplotype/variant reconstructor (dataset read dispatch).
 
-``Svar2Haps`` is a *separate* reconstructor from the SVAR1 :class:`Haps` — the
-SVAR1 path is left byte-unchanged. It subclasses :class:`Haps` only so the many
-``isinstance(_, Haps)`` / ``case Haps()`` checks throughout the dataset
-machinery keep working; every read method is overridden.
+``Svar2Haps`` is the read-bound sibling of :class:`Svar1Haps`; the two share
+only the :class:`Haps` role (see ``_haps.py``), which declares what a
+haplotype reconstructor must answer and says nothing about how genotypes are
+stored. There is no per-region sparse genotype array and no in-memory variant
+table here -- everything is decoded from the ``.svar2`` store at read time.
 
 For a query block of ``n_q`` rows, each row ``q = (region r_q, sample slot si_q)``
 with post-jitter bounds ``[start_q, end_q)``, the cache (written by
@@ -32,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import numpy as np
 from genoray._contigs import ContigNormalizer
-from genoray._types import POS_TYPE, V_IDX_TYPE
+from genoray._types import POS_TYPE
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
@@ -40,7 +41,6 @@ from .._flat import _Flat
 from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, _COMP
 from .._threads import should_parallelize
 from .._utils import lengths_to_offsets
-from .._variants._records import RaggedAlleles
 from ..genvarloader import (
     Svar2Store,
     decode_variants_from_svar2_readbound,
@@ -57,7 +57,7 @@ from ._flat_variants import (
     _assemble_variant_buffers_rust,
 )
 from ._intervals import intervals_to_tracks
-from ._haps import _H, Haps, _Variants
+from ._haps import _H, Haps
 from ._protocol import TrackRealigner
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
@@ -208,35 +208,43 @@ def _ragged_arange_gather_2level(
     return data[src], new_var_off, new_str_off
 
 
-@dataclass(slots=True)
+@dataclass(kw_only=True, slots=True)
 class Svar2Haps(Haps[_H]):
     """Read-bound SVAR2 reconstructor. See module docstring."""
 
-    # New fields must default (they follow base Haps' defaulted fields).
-    store: "Svar2Store | None" = None
-    cache: "_Svar2Cache | None" = None
-    store_contigs: list[str] = field(default_factory=list)
+    store: "Svar2Store"
+    """The query-only handle on the ``.svar2`` store."""
+    cache: "_Svar2Cache"
+    """The per-query variant ranges written at ``genotypes/svar2_ranges/``."""
+    store_contigs: list[str]
     """The .svar2 store's contig names (used to open the store's ContigReaders)."""
-    ds_contigs: list[str] = field(default_factory=list)
+    ds_contigs: list[str]
     """The dataset's contig names (``regions[:, 0]`` indexes into this)."""
-    ploidy: int = 2
+    n_regions: int
+    """The dataset's region count, from the range cache's ``dense_snp_range`` shape."""
+    n_samples: int
+    """The dataset's sample count, from the range cache's ``vk_snp_range`` shape.
+
+    Together with :attr:`n_regions` this is the ``(R, S)`` grid a flat dataset
+    index unravels into. SVAR1 reads the same two numbers off its ``genotypes``
+    array's leading shape; there is no such array here.
+    """
+    ploidy: int
     """The store's ploidy, from the svar2 range cache's ``svar2_meta.json``.
 
-    Backs :attr:`stored_ploidy`. Held directly rather than read off a
-    ``genotypes`` array: svar2 has no per-region sparse genotype store, so the
-    inherited ``genotypes`` field is a placeholder here (see the class docstring).
+    Backs :attr:`stored_ploidy`.
+    """
+    store_fields: dict[str, "StoredField"]
+    """The .svar2 store's INFO/FORMAT field manifest, keyed by field key.
+
+    Populated from ``SparseVar2.available_fields``. These keys are additionally
+    advertised in ``available_var_fields`` so users can request them via ``var_fields``.
     """
     max_jitter: int = 0
     """The dataset's write-time max_jitter. When > 0 the cache's per-query ranges
     were computed over a max_jitter-padded window, which over-includes variants past
     the (unpadded) read window in variants mode (the decode kernel has no right-clip);
     guarded below."""
-    store_fields: dict[str, "StoredField"] = field(default_factory=dict)
-    """The .svar2 store's INFO/FORMAT field manifest, keyed by field key.
-
-    Populated from ``SparseVar2.available_fields``. These keys are additionally
-    advertised in ``available_var_fields`` so users can request them via ``var_fields``.
-    """
     _gather_memo: (
         tuple[int, NDArray[np.intp], NDArray[np.int32], list[_GatheredGroup]] | None
     ) = field(init=False, repr=False)
@@ -258,10 +266,17 @@ class Svar2Haps(Haps[_H]):
     """
 
     def __post_init__(self):
-        # Deliberately does NOT call Haps.__post_init__ (that reads an SVAR1
-        # variants table / AF cache which svar2 has no analogue for). Set only
-        # the init=False fields the base machinery reads.
-        self.n_variants = self.genotypes.lengths
+        # Deliberately does NOT call any SVAR1 setup (there is no variants table
+        # or AF cache to read). Set only the role's init=False fields.
+        #
+        # n_variants is all zeros, and wrong: the read-bound decode never counts
+        # a query's variants without also decoding them, so there is nothing to
+        # fill this with at open time. Tracked as #363 -- Dataset.n_variants()
+        # reports zeros on SVAR2. Kept zero-valued rather than absent because the
+        # shape (R, S, P) is what callers read it for.
+        self.n_variants = np.zeros(
+            (self.n_regions, self.n_samples, self.ploidy), np.int32
+        )
         self.available_var_fields = ["alt", "ilen", "start"] + [
             k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS
         ]
@@ -358,9 +373,9 @@ class Svar2Haps(Haps[_H]):
     def var_field_dtype(self, field: str) -> np.dtype:
         """The dtype of a scalar variant field, from the store manifest.
 
-        The base implementation reads ``self.variants``, which is a placeholder
-        here; the .svar2 store's INFO/FORMAT dtypes live in ``store_fields``, and
-        ``start``/``ilen`` are fixed by the read-bound decode kernel's output.
+        There is no in-memory variant table here: the .svar2 store's INFO/FORMAT
+        dtypes live in ``store_fields``, and ``start``/``ilen`` are fixed by the
+        read-bound decode kernel's output.
         """
         if field in ("alt", "ref"):
             raise KeyError(
@@ -440,32 +455,9 @@ class Svar2Haps(Haps[_H]):
         if missing := [f for f in var_fields if f not in allowed]:
             raise ValueError(f"Missing variant fields: {missing}")
 
-        # Minimal base-Haps fields. genotypes carries only the (R, S, P, None)
-        # shape (so ploidy = shape[-2] and n_variants.shape are available); its
-        # data is empty (svar2 has no per-region sparse genotype store).
-        empty_geno = Ragged.from_offsets(
-            np.empty(0, V_IDX_TYPE),
-            (R, S, P, None),
-            np.zeros(R * S * P + 1, np.int64),
-        )
-        empty_alt = RaggedAlleles.from_offsets(
-            np.empty(0, np.uint8).view("S1"), (0, None), np.zeros(1, np.int64)
-        )
-        dummy_variants = _Variants(
-            path=svar2_path,
-            start=np.empty(0, POS_TYPE),
-            ilen=np.empty(0, np.int32),
-            ref=None,
-            alt=empty_alt,
-            info={},
-        )
-
         return cls(
             path=path,
             reference=reference,
-            variants=dummy_variants,
-            genotypes=empty_geno,
-            dosages=None,
             kind=cast("type[_H]", kind),
             filter=None,
             min_af=min_af,
@@ -474,6 +466,8 @@ class Svar2Haps(Haps[_H]):
             cache=cache,
             store_contigs=list(sv.contigs),
             ds_contigs=list(contigs),
+            n_regions=R,
+            n_samples=S,
             ploidy=P,
             max_jitter=max_jitter,
             store_fields=store_fields,
@@ -582,7 +576,6 @@ class Svar2Haps(Haps[_H]):
         Callers reach this only via ``_getitem_spliced``, which asserts ``jitter == 0``
         and ``deterministic`` — hence zero shifts.
         """
-        assert self.store is not None
         regions = np.asarray(regions, np.int32)
         P = self.stored_ploidy
         b = len(idx)
@@ -695,13 +688,13 @@ class Svar2Haps(Haps[_H]):
     ) -> NDArray[np.int32]:
         """SVAR2 per-haplotype length deltas. Backs ``Dataset.haplotype_lengths``.
 
-        Must be overridden: the base :class:`Haps` implementation reads
-        ``self.genotypes``/``self.variants``, which are permanently-empty
-        SVAR1-shaped placeholders for this reconstructor, so inheriting it
-        silently yields all-zero deltas -- i.e. ``haplotype_lengths()`` reporting
-        the unadjusted reference span, and ``_output_bytes_per_instance``
-        under-sizing the ``"haplotypes"``/``"annotated"`` slots (the sibling of
-        the ``"variants"``/``"variant-windows"`` defect in #315).
+        The deltas come from the read-bound kernel, not from a stored genotype
+        array. Before the role split, ``Svar2Haps`` inherited the SVAR1 body and
+        it read empty placeholders, silently yielding all-zero deltas -- i.e.
+        ``haplotype_lengths()`` reporting the unadjusted reference span, and
+        ``_output_bytes_per_instance`` under-sizing the
+        ``"haplotypes"``/``"annotated"`` slots (the sibling of the
+        ``"variants"``/``"variant-windows"`` defect in #315). Fixed in #364.
 
         ``keep``/``keep_offsets`` carry the SVAR1 exonic *pre*-filter's output.
         The read-bound kernel applies the exonic filter itself (it is handed
@@ -911,7 +904,6 @@ class Svar2Haps(Haps[_H]):
                 "SVAR2 exonic filtering with haplotype-realigned tracks is not "
                 "supported yet."
             )
-        assert self.store is not None
         regions = np.asarray(regions, np.int32)
         P = self.stored_ploidy
         b = len(idx)
@@ -1033,9 +1025,7 @@ class Svar2Haps(Haps[_H]):
         that :meth:`_reconstruct_variants`/:meth:`_reconstruct_variant_windows` use, so
         callers that only need cheap per-instance *measures* -- not the full
         reconstructed output -- can share this single counting entry point instead of
-        re-deriving the ``p_eff``/fold logic (or, worse, reading
-        ``self.genotypes``/``self.variants``, which are permanently-empty SVAR1-shaped
-        placeholders for this reconstructor -- see issue #315). Used by
+        re-deriving the ``p_eff``/fold logic. Used by
         ``Dataset._output_bytes_per_instance`` for the ``"variants"``/``"variant-windows"``
         estimate branches.
 
@@ -1501,7 +1491,7 @@ class Svar2Haps(Haps[_H]):
         ):
             return memo[3]
 
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+        R_all, S_all = self.n_regions, self.n_samples
         r_q, si_q = np.unravel_index(idx, (R_all, S_all))
         groups: list[_GatheredGroup] = [
             (ci, qsel, self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P))
@@ -1566,7 +1556,6 @@ class Svar2Haps(Haps[_H]):
         vk_* rows come out ``(n, P, 2)`` -> reshaped ``(n*P, 2)`` in row = q*P+p
         order, which is exactly what the kernel expects.
         """
-        assert self.cache is not None
         c = self.cache
         region_starts = np.ascontiguousarray(regions_grp[:, 1], np.uint32)
         orig_samples = np.ascontiguousarray(c.sample_cols[si_q], np.int64)

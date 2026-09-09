@@ -144,16 +144,20 @@ as-is**, then delete `_ShapeOnlyGenotypes` in the final layer of this stack.
 Asking the contributor to absorb this refactor would be unfair scope creep on a
 correct bug report.
 
-If #356 has not merged when the final layer is written, that layer deletes the
-`Ragged` placeholder instead; the end state is identical either way.
+#356 had not merged when the final layer was written, so layer 5 deletes the
+plain `Ragged` placeholder instead of `_ShapeOnlyGenotypes`. The end state is
+identical either way, and #356 can be closed unmerged once this stack lands:
+there is no longer an allocation for it to shrink.
 
-## Implementation: a 6-PR stack
+## Implementation: a 5-PR stack
 
 Each layer is independently green and independently reviewable. (Planned as
-four. The query surface split cleanly into a cheap "read scalars off the
-reconstructor" layer and a heavier "measure the variant payload" layer, and
-splitting them kept each diff reviewable. Then the track dispatch had to move
-*below* the ABC hoist rather than into it -- see layer 4.)
+four, then six, and landed as five. The query surface split cleanly into a cheap
+"read scalars off the reconstructor" layer and a heavier "measure the variant
+payload" layer, and splitting them kept each diff reviewable. Then the track
+dispatch had to move *below* the ABC hoist rather than into it -- see layer 4.
+Finally the placeholder deletion turned out to be inseparable from the hoist --
+see layer 5.)
 
 1. `fix/svar2-haplotype-lengths-indels` — override `_haplotype_ilens` on
    `Svar2Haps` (delegating to `_haplotype_diffs`) plus a regression test
@@ -175,10 +179,10 @@ splitting them kept each diff reviewable. Then the track dispatch had to move
    importing `Svar2Haps`. `has_dosages` joins the query surface, retiring the
    last `_impl.py` reach into SVAR1 storage.
 5. `refactor/haps-role-abc` — rename `Haps` -> `Svar1Haps`, hoist the ABC into
-   `Haps`, reparent `Svar2Haps` to it. Mechanical, because after layer 4
-   nothing outside `_haps.py` / `_flat_variants.py` touches SVAR1 storage.
-6. `refactor/haps-drop-placeholders` — delete the fabricated `genotypes` /
-   `_Variants` from `Svar2Haps.from_path` and `_ShapeOnlyGenotypes`.
+   `Haps`, reparent `Svar2Haps` to it, and delete the fabricated `genotypes` /
+   `_Variants` from `Svar2Haps.from_path` in the same commit. Mechanical outside
+   `_haps.py`, because after layer 4 nothing else touches SVAR1 storage except
+   `get_variants_flat`.
 
 ## Testing
 
@@ -191,12 +195,13 @@ This is a behavior-preserving refactor except for layer 1, which fixes a bug.
 - The existing SVAR1/SVAR2 parity suite in `tests/dataset/` already pins the
   behavior that must not move.
 - New in layer 1: the `haplotype_lengths` regression test described above.
-- New in layer 5: assert `Svar2Haps` has no `genotypes`/`variants` attribute at
-  all — replacing PR #356's two allocation-size tests, which become moot once
-  there is nothing to allocate.
-- New in layer 4: round-trip `replace(haps, min_af=...)` on both subclasses, to
-  pin that the settings block stays `dataclasses.replace`-able across the
-  hierarchy change.
+- New in layer 5 (`tests/unit/dataset/test_haps_role_split.py`): `Haps` is
+  abstract and uninstantiable; neither implementation is left abstract; the role
+  declares no SVAR1 storage field and `Svar2Haps` has no such *attribute* at all
+  (`slots=True` makes that stronger than a field check); and the settings block
+  stays `dataclasses.replace`-able on both sides of the hierarchy. The first two
+  replace PR #356's allocation-size tests, which become moot once there is
+  nothing to allocate.
 - `tests/unit/test_slot_fit_property.py:85` and several docstrings in
   `tests/dataset/test_svar2_*.py` describe the placeholders; they need updating
   in the layer that removes what they describe.
@@ -245,6 +250,41 @@ the loop. Caching it on the reconstructor instead would pin a per-sample-scale
 allocation for the dataset's lifetime. Splitting the hook into "prepare once
 per batch" + "fill once per track" preserves the hoist by construction, and
 gives the per-batch state a name and a type.
+
+## Found while implementing layer 5
+
+**Layers 5 and 6 are one layer.** The plan had the ABC hoist and the placeholder
+deletion as separate PRs, on the theory that the placeholders could keep
+existing for a commit after `Svar2Haps` was reparented. They cannot. Both
+classes are `slots=True` dataclasses, so reparenting `Svar2Haps` onto a role
+that does not declare `genotypes` / `variants` / `dosages` / `var_field_data`
+removes those slots outright — there is nowhere left for a fabricated value to
+be stored. Deleting them is not a follow-up to the hoist; it *is* the hoist. The
+stack is five PRs, not six.
+
+**`kw_only=True` is what makes the split possible at all.** `Svar1Haps` adds
+four required fields, and they follow the role's defaulted ones (`var_fields`,
+`dummy_variant`, the token block, ...). Without `kw_only` that is a
+`TypeError` at class creation, and the workaround — giving every storage field a
+meaningless default — is exactly the shape that let the placeholders exist. It
+costs nothing here because every construction site was already all-keyword.
+
+It also pays for itself immediately on the other side: `Svar2Haps.store` and
+`.cache` were `X | None = None` purely to satisfy the same ordering rule, with
+three `assert ... is not None` lines apologising for it downstream. Keyword-only
+fields let both become required, and the asserts delete.
+
+**`Svar2Haps` needs `n_regions` / `n_samples` of its own.** They were the last
+thing the placeholder `genotypes` was really carrying: `_gathered_groups`
+unravels a flat dataset index against `genotypes.shape[:2]`. `from_path` already
+computed both from the range cache and threw them away. They are now fields.
+
+**`n_variants` stays, and stays zero.** It is on the role rather than the SVAR1
+side because `_impl.py` reads `.n_variants.shape[-1]` for ploidy on any `Haps`.
+`Svar2Haps.__post_init__` now sets it explicitly to a documented
+`zeros((R, S, P))` rather than inheriting zeros as a side effect of an empty
+placeholder — same value, but no longer an accident. #363 tracks making it
+correct.
 
 ## Non-goals
 

@@ -1,19 +1,19 @@
-"""Haps caches FFI-ready sub-linear arrays once (Task 5)."""
+"""Svar1Haps caches FFI-ready sub-linear arrays once (Task 5)."""
 
 from __future__ import annotations
 
 import numpy as np
 
 import genvarloader as gvl
-from genvarloader._dataset._haps import Haps
+from genvarloader._dataset._haps import Svar1Haps
 
 
-def _haps(track_dataset_path, reference) -> Haps:
+def _haps(track_dataset_path, reference) -> Svar1Haps:
     ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs(
         "haplotypes"
     )
     seqs = ds._seqs
-    assert isinstance(seqs, Haps)
+    assert isinstance(seqs, Svar1Haps)
     return seqs
 
 

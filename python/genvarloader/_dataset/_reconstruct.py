@@ -4,10 +4,10 @@ Houses the *compound* reconstructors (:class:`SeqsTracks`, :class:`HapsTracks`)
 that combine a sequence source with tracks, plus the
 :func:`_build_reconstructor` factory.
 
-Re-exports the leaf reconstructors (:class:`Ref`, :class:`Haps`,
-:class:`Tracks`) and supporting types (``Reconstructor``,
-``ReconstructionRequest``, ``_Variants``, ``TrackType``) from their split
-modules for backward-compatible import paths.
+Re-exports the leaf reconstructors (:class:`Ref`, the :class:`Haps` role and
+its :class:`Svar1Haps` implementation, :class:`Tracks`) and supporting types
+(``Reconstructor``, ``ReconstructionRequest``, ``_Variants``, ``TrackType``)
+from their split modules for backward-compatible import paths.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing_extensions import assert_never
 from .._flat import _Flat
 from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
-from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
+from ._haps import _H, Haps, ReconstructionRequest, Svar1Haps, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
 from ._flat_variants import _FlatVariantWindows
@@ -43,6 +43,7 @@ from ._tracks import (
 # ``_reconstruct``):
 __all__ = [
     "Haps",
+    "Svar1Haps",
     "HapsTracks",
     "ReconstructionRequest",
     "Reconstructor",
