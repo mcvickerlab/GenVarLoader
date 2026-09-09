@@ -538,7 +538,7 @@ class StreamingDataset:
             default ``max_mem="512MB"`` the threshold depends on how many tracks
             are attached, since each track adds 768 B per cell: about 8.4M
             samples with no tracks, ~340k with one track, ~170k with two (see
-            ``_streaming.py:845-853``). Below the threshold the sample loop
+            ``TRACK_BYTES_PER_CELL``). Below the threshold the sample loop
             runs exactly once and both orders emit the identical plan. Check
             :attr:`iteration_order_is_active` to see whether this setting is
             actually doing anything for a given dataset/``max_mem`` combination.
@@ -986,7 +986,7 @@ class StreamingDataset:
         It is also a no-op whenever `_window_samples == n_samples` (the
         default at `max_mem="512MB"` for any cohort under ~8.4M with no
         tracks, ~340k with one track, or ~170k with two -- each track adds
-        768 B/cell, see `_streaming.py:845-853`), because the sample loop
+        768 B/cell, see `TRACK_BYTES_PER_CELL`), because the sample loop
         then runs exactly once.
         """
         n_regions, n_samples = self.shape
@@ -2050,7 +2050,7 @@ class StreamingDataset:
         ``max_mem="512MB"`` the sample chunk holds the entire axis unless the
         cohort is very large -- about 8.4M samples with no tracks, but only
         ~340k with one track and ~170k with two, since each track adds 768 B
-        per cell (see ``_streaming.py:845-853``). Below that threshold the
+        per cell (see ``TRACK_BYTES_PER_CELL``). Below that threshold the
         sample loop runs once and both orders emit the identical plan. Check
         :attr:`iteration_order_is_active` before relying on it to change
         observed behavior.
