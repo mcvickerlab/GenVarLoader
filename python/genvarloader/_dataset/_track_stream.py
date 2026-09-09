@@ -150,11 +150,16 @@ class _TrackBackend:
             # Clamp to the track's OWN contig length. `ends` may have been
             # extended past the region end to read ahead for deletions (issue
             # #279 spec section 3.2), and that extension can run off the contig.
-            # Clamping MATCHES the written path rather than diverging from it:
-            # `gvl.write` clamps `gvl_bed` at write time, so a written dataset
-            # has no interval data past the contig end either. Done per track,
-            # not once per window, because two tracks may disagree about a
-            # contig's length and each must be queried within its own bounds.
+            # The clamp cannot lose data: a track's header DEFINES its contig
+            # lengths, so a query past the contig end has nothing to return --
+            # only an out-of-bounds error (BigWigs raises; Table silently
+            # returns zeros). NOTE: `gvl.write` does NOT clamp its bed --
+            # `_prep_bed` (`_write.py:649-679`) only sorts, adds a strand
+            # column, and EXPANDS by `max_jitter` -- so do not justify this by
+            # appeal to the written path; the written path simply has no
+            # intervals out there either, for the same header reason. Done per
+            # track, not once per window, because two tracks may disagree about
+            # a contig's length and each must be queried within its own bounds.
             t_contig = normalize_contig_name(contig, track.contigs)
             if t_contig is None:  # pragma: no cover - validated in __init__
                 raise AssertionError(

@@ -44,11 +44,29 @@ def test_defaults_preserve_current_behavior():
 
 def test_with_len_sets_output_length_and_copies():
     sds = _tiny_sds()
-    out = sds.with_len(200)
+    # `_tiny_sds`'s regions are 10 bp, which is also `with_len`'s upper bound
+    # (see `test_with_len_rejects_length_past_min_region`), so pick a length
+    # inside it -- the point of this test is the copy semantics, not the bound.
+    out = sds.with_len(8)
     assert out is not sds
-    assert out._output_length == 200
+    assert out._output_length == 8
     assert sds._output_length == "ragged"  # original unchanged
     assert sds.with_len("ragged")._output_length == "ragged"
+
+
+def test_with_len_rejects_length_past_min_region():
+    """`with_len(L)` must be bounded above, exactly as `Dataset.with_len` is.
+
+    `Dataset.with_len` (`_impl.py:551-559`) raises once `output_length` passes
+    the minimum region length; without the same guard streaming silently
+    zero-pads past the region, producing bytes on exactly the call the parity
+    oracle refuses. `_tiny_sds`'s regions are 10 bp, so 10 is the largest
+    accepted length and 11 must raise.
+    """
+    sds = _tiny_sds()
+    assert sds.with_len(10)._output_length == 10  # the bound itself is allowed
+    with pytest.raises(ValueError, match="minimum region length"):
+        sds.with_len(11)
 
 
 def test_with_len_rejects_variable_and_nonpositive():
