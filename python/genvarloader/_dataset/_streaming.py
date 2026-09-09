@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal, cast
+from typing import TYPE_CHECKING, Callable, Literal, NamedTuple, cast
 
 import numpy as np
 import polars as pl
@@ -23,7 +23,11 @@ if TYPE_CHECKING:
     import torch.utils.data as td
     import genoray
 
+    from .._ragged import RaggedIntervals, RaggedTracks
+    from .._types import IntervalTrack
     from ._flat_variants import VarWindowOpt
+    from ._insertion_fill import InsertionFill
+    from ._track_stream import _TrackBackend
 
 # Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
 # report a `with_seqs(...)` value back in error messages (`_iter_batches`'s
@@ -200,13 +204,344 @@ def _declared_info_numeric_dtypes(vcf: "genoray.VCF") -> dict[str, bool]:
     return out
 
 
+class _ItvArrays(NamedTuple):
+    """One track's WINDOW intervals, already coerced for the FFI.
+
+    The Rust kernels take C-contiguous arrays of a fixed dtype, so a coercion
+    has to happen somewhere. Doing it per BATCH repeats a WINDOW-scale copy
+    ``ceil(window_rows / batch_size)`` times per track:
+    ``BigWigs._intervals_from_offsets`` slices ``coordinates[:, 0]`` /
+    ``coordinates[:, 1]`` out of one interleaved ``(n_intervals, 2)`` buffer,
+    so ``starts``/``ends`` are strided views and each coercion is a genuine
+    materialization. (``Table``'s happen to be contiguous already, and so does
+    the written path's on-disk interval store, but that is a property of those
+    sources, not a contract the kernels' callers can assume.) Coercing ONCE per
+    window -- at :func:`_coerce_window_itvs`, right after the window read --
+    keeps the same bytes for one copy instead of one per batch.
+
+    Deliberately NOT `_ffi_array`: unlike ``geno_v_idxs`` (a genuine
+    dataset-global memmap, where ``_ffi_array`` guards against an accidental
+    sample-scale copy), these arrays are WINDOW-bounded -- freshly read per
+    window by ``_TrackBackend.read_window``, never a memmap over the whole
+    dataset -- so a copy here is window-sized by construction.
+    """
+
+    starts: "NDArray[np.int32]"
+    ends: "NDArray[np.int32]"
+    values: "NDArray[np.float32]"
+    #: CSR row offsets over the WHOLE window's ``(row,)`` cells, so a batch is
+    #: selected with ``offset_idxs`` rather than by re-slicing the intervals.
+    offsets: "NDArray[np.int64]"
+
+
+def _coerce_window_itvs(per_track: "list[RaggedIntervals]") -> "list[_ItvArrays]":
+    """Coerce one window's per-track intervals for the FFI, once per window.
+
+    The ``RaggedIntervals`` handed back by ``_TrackBackend.read_window`` are
+    shaped ``(n_regions, n_samples, None)``; the kernels only ever read the
+    flat data buffers and the CSR offsets, which a reshape to ``(row, None)``
+    would leave untouched, so this both flattens and coerces in one step.
+
+    Args:
+        per_track: One ``RaggedIntervals`` per track, name-sorted.
+
+    Returns:
+        One :class:`_ItvArrays` per track, in the same order.
+    """
+    return [
+        _ItvArrays(
+            starts=np.ascontiguousarray(itvs.starts.data, np.int32),
+            ends=np.ascontiguousarray(itvs.ends.data, np.int32),
+            values=np.ascontiguousarray(itvs.values.data, np.float32),
+            offsets=np.ascontiguousarray(itvs.starts.offsets, np.int64),
+        )
+        for itvs in per_track
+    ]
+
+
+def _tracks_from_intervals(
+    per_track: "list[_ItvArrays]",
+    offset_idxs: NDArray[np.int64],
+    starts: NDArray[np.int32],
+    lengths: NDArray[np.int64],
+) -> "RaggedTracks":
+    """Rasterize one batch's intervals into a `(batch, n_tracks, None)` Ragged.
+
+    Mirrors `Tracks._call_float32`'s rasterization (`_tracks.py:388-419`): each
+    track fills its own contiguous `n_per_track` block with a single vectorized
+    `intervals_to_tracks` call. The per-cell VALUES are what byte-parity is
+    defined over, and those come from the kernel calls -- do not change them.
+
+    It deliberately does NOT copy that function's final assembly step. The
+    written path builds a track-major buffer but labels it with
+    `lengths_to_offsets(repeat(lengths, "b -> b t"))`, whose flattened cumsum
+    is `(b, t)`-ordered. Track-major `(t, b)` and interleaved `(b, t)` agree
+    only when `batch == 1`, which is the only way the written path is ever
+    reached in the parity oracle (`Dataset[r, s]` indexes one cell). Streaming
+    yields real batches, so this reorders the track-major buffer into `(b, t)`
+    order before labelling it. Copying the written assembly verbatim here
+    produced track `t`'s row `b+1` where row `b`'s track `t+1` belonged.
+
+    Args:
+        per_track: One `_ItvArrays` per track, name-sorted, each covering the
+            WHOLE window's `(row,)` cells -- not pre-sliced to the batch. The
+            batch is selected with `offset_idxs`, which is the mechanism
+            `_call_float32` itself uses (its `o_idx` indexes the un-sliced
+            interval array), and which avoids a redundant reshape-and-slice per
+            batch. Already FFI-coerced once per window by
+            `_coerce_window_itvs`; do NOT re-coerce here (see `_ItvArrays`).
+        offset_idxs: `(batch,)` int64 row indices into `per_track`, selecting
+            this batch's cells out of the window.
+        starts: `(batch,)` int32 query starts, one per row.
+        lengths: `(batch,)` int64 output length, one per row.
+
+    Returns:
+        A `RaggedTracks` of shape `(batch, n_tracks, None)`.
+    """
+    from .._ragged import RaggedTracks
+    from .._utils import lengths_to_offsets
+    from ._intervals import intervals_to_tracks
+    from ._svar2_haps import _ragged_arange_gather
+
+    n_tracks = len(per_track)
+    batch = len(lengths)
+    ofsts_per_t = lengths_to_offsets(lengths)
+    n_per_track = int(ofsts_per_t[-1])
+    out = np.empty(n_tracks * n_per_track, np.float32)
+
+    for t, itvs in enumerate(per_track):
+        intervals_to_tracks(
+            offset_idxs=offset_idxs,
+            starts=starts,
+            itv_starts=itvs.starts,
+            itv_ends=itvs.ends,
+            itv_values=itvs.values,
+            itv_offsets=itvs.offsets,
+            out=out[t * n_per_track : (t + 1) * n_per_track],
+            out_offsets=ofsts_per_t,
+        )
+
+    # `out` is now TRACK-major: block `t` holds every row of track `t`, so its
+    # flat row order is `(t, b)`. A `(b, t, None)` Ragged indexes element
+    # `b * n_tracks + t`, i.e. `(b, t)` order. Those two coincide only when
+    # `batch == 1`, which is why the written path (whose oracle is indexed one
+    # cell at a time) never surfaces the difference -- see the module note in
+    # `_tracks_from_intervals`'s docstring. Reorder once, vectorized.
+    tm_offsets = lengths_to_offsets(np.tile(np.asarray(lengths), n_tracks))
+    k = np.arange(batch * n_tracks)
+    perm = (k % n_tracks) * batch + (k // n_tracks)
+    data, out_offsets = _ragged_arange_gather(out, tm_offsets, perm)
+
+    result = Ragged.from_offsets(data, (batch, n_tracks, None), out_offsets)  # type: ignore[bad-argument-type, no-matching-overload]  # shape tuple carries an explicit None for the ragged axis
+    return cast(RaggedTracks, result)
+
+
+class _RealignWindow(NamedTuple):
+    """The genotype views a re-aligned track window needs, or nothing.
+
+    Exists as its own optional rather than three separately-nullable fields on
+    :class:`_TrackWindow` so that "re-alignment is on" and "the arrays
+    re-alignment needs are present" cannot disagree: there is one thing to
+    check, and checking it hands you all three arrays already narrowed.
+    """
+
+    diffs: "NDArray[np.int32]"
+    geno_offsets: "NDArray[np.int64]"
+    geno_offset_idx: "NDArray[np.intp]"
+
+
+class _TrackWindow(NamedTuple):
+    """One window's track state, computed once and consumed per batch.
+
+    Bundled rather than left as eight loose locals because these values are
+    produced under a ``tb is not None`` guard and consumed under a *second*
+    one several hundred lines downstream. Two guards that must agree but
+    cannot be seen together is exactly the shape a reader mis-reads and a type
+    checker rejects; one optional binding narrows the whole set at once.
+    """
+
+    itvs: "list[_ItvArrays]"
+    names: "list[str]"
+    row_starts: "NDArray[np.int32]"
+    row_ends: "NDArray[np.int32]"
+    row_lengths: "NDArray[np.int64]"
+    realign: "_RealignWindow | None"
+
+
+def _realigned_tracks_from_intervals(
+    per_track: "list[_ItvArrays]",
+    names: list[str],
+    insertion_fill: "dict[str, InsertionFill] | None",
+    offset_idxs: NDArray[np.int64],
+    regions_batch: NDArray[np.int32],
+    geno_offset_idx: NDArray[np.int64],
+    geno_offsets: NDArray[np.int64],
+    geno_v_idxs: NDArray,
+    v_starts: NDArray[np.int32],
+    ilens: NDArray[np.int32],
+    row_lengths: NDArray[np.int64],
+    diffs: NDArray[np.int32],
+    out_lengths: NDArray[np.int64],
+    base_seed: int,
+) -> "RaggedTracks":
+    """Realign one batch's tracks to haplotype coordinates via the fused kernel.
+
+    Mirrors `HapsTracks.__call__`'s per-track loop (`_reconstruct.py:168-260`)
+    almost verbatim -- same fused kernel, same per-track buffer -- but does
+    NOT copy its final assembly. That call site builds a TRACK-major buffer
+    (`out[track_ofst*n_per_track:(track_ofst+1)*n_per_track]`) and labels it
+    with offsets computed from `(b, t, p)`-shaped `out_lengths`
+    (`repeat(out_lengths, "b p -> b t p")`), so the claimed layout and the
+    physical layout only agree when `batch == 1` -- the only way the written
+    path's `Dataset[r, s]` oracle ever reaches it (see `_tracks_from_intervals`,
+    which fixes the same defect for the un-realigned case). That written-path
+    defect is runtime-verified and filed as issue #371 -- batched
+    `Dataset[r_arr, s_arr]` attaches tracks to the wrong rows whenever
+    `n_tracks > 1`; do not "fix" streaming to match it. Streaming yields
+    real batches, so this reorders the track-major buffer into `(b, t, p)`
+    order before labelling it, generalizing `_tracks_from_intervals`'s 2-D
+    `(t, b) -> (b, t)` transpose to the 3-D `(t, b, p) -> (b, t, p)` case.
+
+    Args:
+        per_track: One `_ItvArrays` per track (name-sorted; `names` gives the
+            matching order), each covering the WHOLE window's `(row,)` cells.
+            `offset_idxs` selects this batch's rows out of the window. Already
+            FFI-coerced once per window by `_coerce_window_itvs`; do NOT
+            re-coerce here (see `_ItvArrays`).
+        names: Track names, same order as `per_track` -- used to resolve each
+            track's `insertion_fill` strategy.
+        insertion_fill: Per-track override of the default `Repeat5p()`
+            insertion-fill strategy, or `None` (every track uses the default).
+        offset_idxs: `(batch,)` int64 row indices into `per_track`, selecting
+            this batch's cells out of the window (always per-cell for
+            `tracks=`-constructed datasets -- the `TrackType.ANNOT` per-region
+            branch is unreachable from this constructor).
+        regions_batch: `(batch, 3)` int32 `(contig_idx, start, end)`, one row
+            per (region, sample) pair in this batch. Only column 1 (start) is
+            read by the Rust kernel.
+        geno_offset_idx: `(batch, ploidy)` int64, WINDOW-LOCAL indices into
+            `geno_offsets` -- unlike the written path's dataset-global
+            `ravel_multi_index` (`_haps.py:776`), the window read backend hands
+            back window-local CSR offsets, so no re-basing is needed beyond
+            slicing to this batch's rows.
+        geno_offsets: `(2, n_window_rows*ploidy)` int64 window CSR
+            starts/stops (`_Svar1Backend.read_window`'s `(o_starts, o_stops)`,
+            stacked) -- the WHOLE window's, indexed by `geno_offset_idx`.
+        geno_v_idxs: The store's global `variant_idxs` memmap
+            (`_Svar1Backend.geno_v_idxs`).
+        v_starts: The store's global per-variant start positions.
+        ilens: The store's global per-variant ILEN differences.
+        row_lengths: `(batch,)` int64 region lengths (possibly
+            jitter-translated), one per (region, sample) row -- the raw
+            reference-coordinate track length before deletion extension.
+        diffs: `(batch, ploidy)` int32 per-(row, hap) reference-length diffs
+            from `get_diffs_sparse`, already sliced to this batch's rows.
+        out_lengths: `(batch, ploidy)` int64 output length per (row, hap) --
+            ragged (the real haplotype length) or a fixed `with_len(L)` value.
+        base_seed: Base seed for the `FlankSample` insertion-fill strategy;
+            unused by every other strategy.
+
+    Returns:
+        A `RaggedTracks` of shape `(batch, n_tracks, ploidy, None)`.
+    """
+    from .._ragged import RaggedTracks
+    from .._threads import should_parallelize
+    from .._utils import lengths_to_offsets
+    from ..genvarloader import intervals_and_realign_track_fused
+    from ._insertion_fill import Repeat5p
+    from ._insertion_fill import lower as _lower_insertion_fills
+    from ._svar2_haps import _ragged_arange_gather
+    from ._utils import _ffi_array
+
+    n_tracks = len(per_track)
+    batch, ploidy = geno_offset_idx.shape
+    fill_map = insertion_fill or {}
+
+    track_lengths = row_lengths - diffs.clip(max=0).min(1)
+    out_ofsts_per_t = np.ascontiguousarray(lengths_to_offsets(out_lengths), np.int64)
+    track_ofsts_per_t = np.ascontiguousarray(
+        lengths_to_offsets(track_lengths), np.int64
+    )
+    n_per_track = int(out_ofsts_per_t[-1])
+    out = np.empty(n_tracks * n_per_track, np.float32)
+
+    strat_list = [fill_map.get(name, Repeat5p()) for name in names]
+    strat_ids, strat_params = _lower_insertion_fills(strat_list)
+
+    geno_offset_idx = np.ascontiguousarray(geno_offset_idx, np.int64)
+    geno_offsets = np.ascontiguousarray(geno_offsets, np.int64)
+    # All-zero shifts is correct ONLY because streaming never sets
+    # `deterministic=False`: the written path draws nonzero shifts exclusively
+    # when a fixed output length is combined with non-deterministic sampling
+    # (`_haps.py:740-742`), and `to_iter`'s docstring records `deterministic` as
+    # having no observable effect here. Wiring `deterministic=False` without
+    # also wiring these shifts would silently produce wrong bytes, so change
+    # both together or neither.
+    shifts = np.zeros((batch, ploidy), np.int32)
+    offset_idxs = np.ascontiguousarray(offset_idxs, np.int64)
+
+    for t, (name, itvs) in enumerate(zip(names, per_track)):
+        _out = out[t * n_per_track : (t + 1) * n_per_track]
+        intervals_and_realign_track_fused(
+            out=_out,
+            out_offsets=out_ofsts_per_t,
+            regions=regions_batch,
+            shifts=shifts,
+            geno_offset_idx=geno_offset_idx,
+            geno_v_idxs=_ffi_array(geno_v_idxs, np.int32, "geno_v_idxs"),
+            geno_offsets=geno_offsets,
+            v_starts=v_starts,
+            ilens=ilens,
+            offset_idxs=offset_idxs,
+            # Already coerced ONCE per window by `_coerce_window_itvs` -- these
+            # are window-scale buffers, and re-coercing here would repeat that
+            # copy for every batch and every track. See `_ItvArrays` for why
+            # the coercion is necessary and why it is not `_ffi_array`.
+            itv_starts=itvs.starts,
+            itv_ends=itvs.ends,
+            itv_values=itvs.values,
+            itv_offsets=itvs.offsets,
+            track_offsets=track_ofsts_per_t,
+            params=np.ascontiguousarray(strat_params[t], np.float64),
+            strategy_id=int(strat_ids[t]),
+            base_seed=int(base_seed),
+            keep=None,
+            keep_offsets=None,
+            to_rc=None,
+            parallel=should_parallelize(n_per_track * 4),
+        )
+
+    # `out` is TRACK-major: block `t` holds every (row, hap) cell of track
+    # `t` in `(row, hap)` C-order, so its flat row order is `(t, row, hap)`.
+    # A `(batch, n_tracks, ploidy, None)` Ragged indexes element
+    # `row*n_tracks*ploidy + t*ploidy + hap`, i.e. `(row, t, hap)` order.
+    # Reorder once, vectorized (see the docstring above).
+    n_bp = batch * ploidy
+    tm_offsets = lengths_to_offsets(np.tile(out_lengths.reshape(-1), n_tracks))
+    perm = (
+        np.arange(n_tracks * n_bp)
+        .reshape(n_tracks, batch, ploidy)
+        .transpose(1, 0, 2)
+        .reshape(-1)
+    )
+    data, out_offsets = _ragged_arange_gather(out, tm_offsets, perm)
+
+    result = Ragged.from_offsets(
+        data,
+        (batch, n_tracks, ploidy, None),  # type: ignore[bad-argument-type, no-matching-overload]
+        out_offsets,
+    )
+    return cast(RaggedTracks, result)
+
+
 @dataclass(frozen=True, slots=True)
 class StreamingDataset:
     """Write-free, iterable-only dataset. Region-major iteration; no random access.
 
     Two ways to construct:
 
-    - Public API: ``StreamingDataset(regions, reference=..., variants=<path>)``.
+    - Public API: ``StreamingDataset(regions, reference=..., variants=<path>,
+      tracks=...)``. At least one of ``variants`` or ``tracks`` is required.
       ``variants`` is classified by path suffix, mirroring :func:`gvl.write`'s
       classification (``_write.py``): a ``.svar`` directory (a genoray
       ``SparseVar``/SVAR1 store), a ``.svar2`` directory (a genoray
@@ -214,6 +549,15 @@ class StreamingDataset:
       supported. ``jitter>0`` (a per-region reproducible read-window
       translation) is supported with the default ``"engine"`` prefetch
       strategy -- see :meth:`to_iter`'s docstring for the rng contract.
+      ``tracks`` (an :class:`~genvarloader._types.IntervalTrack`, e.g.
+      :class:`~genvarloader.BigWigs` or :class:`~genvarloader.Table`, or a
+      sequence of them) is optional and composes with ``variants``: supplied
+      alone, the dataset is tracks-only (no ``reference``/``variants`` needed,
+      no ploidy axis, and :meth:`with_seqs` raises); supplied alongside
+      ``variants``, both sources are attached to the same dataset. When
+      ``variants`` is omitted, ``contigs``/``samples`` are derived from the
+      tracks' own intersection instead of a variant source (mirroring
+      :func:`gvl.write`'s sample-intersection rule).
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
@@ -237,6 +581,16 @@ class StreamingDataset:
             term scales with cohort size, so peak memory is bounded by
             ``max_mem`` (offsets) + ``batch_size`` (output), independent of the number
             of samples in the dataset.
+        iteration_order: ``"auto"`` (default), ``"regions"``, or ``"samples"`` --
+            see :meth:`to_iter` for the cartesian sweep this controls. It is a
+            no-op whenever the sample axis fits in one read-window chunk. At the
+            default ``max_mem="512MB"`` the threshold depends on how many tracks
+            are attached, since each track adds 768 B per cell: about 8.4M
+            samples with no tracks, ~340k with one track, ~170k with two (see
+            ``TRACK_BYTES_PER_CELL``). Below the threshold the sample loop
+            runs exactly once and both orders emit the identical plan. Check
+            :attr:`iteration_order_is_active` to see whether this setting is
+            actually doing anything for a given dataset/``max_mem`` combination.
     """
 
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
@@ -263,10 +617,16 @@ class StreamingDataset:
     _window_regions: int = 64
     _window_samples: int = 1
     _max_mem_bytes: int = 512 * 1024 * 1024
+    # Resolved iteration order; NEVER "auto" after __init__. See `_plan`.
+    _iteration_order: str = "regions"
     # The split read/generate backend (real SVAR1 path). When set, _iter_batches
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
     _backend: "_Svar1Backend | _Svar2Backend | _VcfBackend | _PgenBackend | None" = None
+    # Interval-track read backend (issue #279 Task 5), set whenever `tracks=`
+    # was supplied (variants-only, tracks-only, or mixed). `None` means no
+    # tracks were requested.
+    _track_backend: "_TrackBackend | None" = None
     # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
     # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
     # `_backend is not None`:
@@ -305,22 +665,45 @@ class StreamingDataset:
     _var_window_opt: "VarWindowOpt | None" = None
     _var_window_lut: "NDArray | None" = None
     _var_window_lut_dtype: "np.dtype | None" = None
+    # Issue #279 Task 7: mixed SVAR1 variants + re-aligned tracks. `_realign_tracks`
+    # mirrors `Dataset.with_settings(realign_tracks=...)` -- `True` (default)
+    # re-aligns float tracks to haplotype coordinates via the fused kernel;
+    # `False` returns reference-coordinate (as-is) tracks with no ploidy axis.
+    # `_insertion_fill` mirrors `Dataset.with_insertion_fill`: `None` means
+    # every track defaults to `Repeat5p()` (resolved per-track at read time,
+    # matching the written path's `tracks.insertion_fill.get(name, Repeat5p())`).
+    _realign_tracks: bool = True
+    _insertion_fill: "dict[str, InsertionFill] | None" = None
 
     def __init__(
         self,
         regions,
         reference: str | Path | None = None,
         variants: str | Path | None = None,
+        tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
         *,
         jitter: int = 0,
         max_mem: str | int = "512MB",
         contigs: list[str] | None = None,
+        iteration_order: Literal["auto", "regions", "samples"] = "auto",
         n_samples: int | None = None,
         ploidy: int | None = None,
         samples: list[str] | None = None,
         _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
         | None = None,
     ):
+        # Normalize `tracks` into a flat list ONCE, before the variants/tracks
+        # classification below -- both the tracks-only branch and the
+        # post-regions `_TrackBackend` construction (further down) consume this
+        # list. A bare `IntervalTrack` (e.g. a single `BigWigs`) is wrapped;
+        # anything else Sequence-like (list/tuple, NOT str/bytes) is flattened.
+        if tracks is None:
+            _track_list: "list[IntervalTrack]" = []
+        elif isinstance(tracks, Sequence) and not isinstance(tracks, (str, bytes)):
+            _track_list = list(tracks)
+        else:
+            _track_list = [tracks]
+
         # Every construction path must define this: the injected-callback (test) path
         # leaves it None; the real `.svar` branch below sets it to the `_Svar1Backend`
         # instance.
@@ -401,11 +784,37 @@ class StreamingDataset:
                     f"variants={p} has an unrecognized file type; expected a "
                     "VCF, PGEN, or SparseVar (.svar) store."
                 )
+        elif _track_list:
+            # Tracks-only: no variant backend. `contigs`/`samples` are derived
+            # from the tracks' intersection instead, mirroring `gvl.write`'s
+            # sample-intersection rule (`_write.py:346-364`). There is no
+            # ploidy axis for track-only output -- `ploidy` is set to a
+            # placeholder that is never used to shape output (no haplotype
+            # reconstruction happens on this path).
+            if contigs is None:
+                contigs = sorted(
+                    set.intersection(*(set(t.contigs) for t in _track_list))
+                )
+                if not contigs:
+                    raise ValueError(
+                        "Tracks share no contigs; a tracks-only StreamingDataset"
+                        " needs at least one contig common to every track."
+                    )
+            if samples is None:
+                samples = sorted(
+                    set.intersection(*(set(t.samples) for t in _track_list))
+                )
+                if not samples:
+                    raise ValueError(
+                        "Tracks share no samples; a tracks-only StreamingDataset"
+                        " needs at least one sample common to every track."
+                    )
+            n_samples = len(samples)
+            ploidy = 1  # placeholder; never used for output shaping
         else:
             raise ValueError(
-                "StreamingDataset(...) requires either `variants` (a path to a "
-                "VCF, PGEN, or SparseVar/.svar store, public API) or "
-                "`_reconstruct_window` (injected-callback, internal/test API)."
+                "StreamingDataset requires at least one source: `variants=`,"
+                " `tracks=`, or the internal `_reconstruct_window=`."
             )
 
         bed = regions if isinstance(regions, pl.DataFrame) else sp.bed.read(regions)
@@ -423,6 +832,14 @@ class StreamingDataset:
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
         object.__setattr__(self, "_backend", _backend_obj)
+        _track_backend_obj = None
+        if _track_list:
+            from ._track_stream import _TrackBackend
+
+            _track_backend_obj = _TrackBackend(
+                _track_list, self._regions, list(self.contigs), list(self._samples)
+            )
+        object.__setattr__(self, "_track_backend", _track_backend_obj)
         # See the field's comment: internal/experimental, flipped only by the
         # cold-cache A-vs-C harness via `object.__setattr__`. Backend-derived so a
         # non-SVAR1 backend (e.g. `_Svar2Backend`, whose producer-thread engine ships
@@ -447,6 +864,8 @@ class StreamingDataset:
             "_var_window_opt",
             "_var_window_lut",
             "_var_window_lut_dtype",
+            "_realign_tracks",
+            "_insertion_fill",
         ):
             object.__setattr__(
                 self, _name, type(self).__dataclass_fields__[_name].default
@@ -474,6 +893,15 @@ class StreamingDataset:
         # may declare a different per-cell resident-window cost (e.g. `_Svar2Backend`
         # caches vk_snp_range + vk_indel_range pairs instead), so defer to it when set.
         cell_bytes = getattr(_backend_obj, "_cell_bytes", int(ploidy) * 16)
+        if _track_backend_obj is not None:
+            # Each (region, sample) cell also materializes intervals for every
+            # track: start+end (i32) + value (f32) = 12 B per interval. Budget a
+            # conservative constant per cell per track until a measured
+            # estimate is available (follow-up) -- this is what lets
+            # `_window_samples` actually shrink under a tight `max_mem` when
+            # tracks are present (spec Sections 2.5, 4.4).
+            TRACK_BYTES_PER_CELL = 12 * 64
+            cell_bytes += TRACK_BYTES_PER_CELL * len(_track_backend_obj.names)
         max_cells = max(1, max_mem_bytes // (cell_bytes * n_slots))
         window_samples = max(1, min(int(n_samples), max_cells))
         region_target = 64  # measured read-amortization knee; see roadmap Plan 2.
@@ -494,9 +922,42 @@ class StreamingDataset:
                 1, min(SUPERBATCH_TARGET_ROWS, max_mem_bytes // max(1, bytes_per_row))
             )
 
+        if iteration_order not in ("auto", "regions", "samples"):
+            raise ValueError(
+                "iteration_order must be one of 'auto', 'regions', 'samples';"
+                f" got {iteration_order!r}."
+            )
+        if iteration_order == "auto":
+            # Keyed off the SOURCE MIX, never per-class micro-properties.
+            # Tracks-only -> samples, because BigWigs holds one file per sample.
+            # Mixed -> regions, the roadmap's decision (non-optimal for the
+            # track axis; `iteration_order="samples"` is the escape hatch).
+            has_tracks = _track_backend_obj is not None
+            has_variants = _backend_obj is not None
+            resolved = "samples" if (has_tracks and not has_variants) else "regions"
+        else:
+            resolved = iteration_order
+        object.__setattr__(self, "_iteration_order", resolved)
+
     @property
     def shape(self) -> tuple[int, int]:
         return (len(self._regions), self.n_samples)
+
+    @property
+    def iteration_order_is_active(self) -> bool:
+        """Whether `iteration_order` actually changes the visit order.
+
+        `iteration_order` only matters when the sample axis is chunked. The
+        chunk size is derived from `max_mem`; at the default `max_mem="512MB"`
+        the cohort size below which it holds the entire sample axis depends on
+        track count (768 B/cell/track) -- about 8.4M with no tracks, ~340k with
+        one, ~170k with two -- below which the sample loop runs once and both
+        orders emit the identical plan.
+
+        Returns:
+            `True` when `_window_samples < n_samples`, so the two orders differ.
+        """
+        return self._window_samples < self.shape[1]
 
     @property
     def samples(self) -> list[str]:
@@ -566,10 +1027,16 @@ class StreamingDataset:
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
         """Yield one WINDOW per step: `(region_idxs, sample_chunk)`.
 
-        Cartesian and single-contig. Both the region axis (`_window_regions`) and
-        the sample axis (`_window_samples`) are chunked so the offsets buffer stays
-        within `max_mem` regardless of cohort size. NOT pairwise: the traversal is a
-        fixed cartesian sweep and the window is the read granularity.
+        Cartesian and single-contig. The contig-run loop is outermost in BOTH
+        iteration orders: it is required by the single-contig Rust invariant,
+        and it is what lets `RustTable`'s per-contig tree cache hold.
+
+        `iteration_order` only changes the VISIT ORDER, never the window set.
+        It is also a no-op whenever `_window_samples == n_samples` (the
+        default at `max_mem="512MB"` for any cohort under ~8.4M with no
+        tracks, ~340k with one track, or ~170k with two -- each track adds
+        768 B/cell, see `TRACK_BYTES_PER_CELL`), because the sample loop
+        then runs exactly once.
         """
         n_regions, n_samples = self.shape
         if n_regions == 0:
@@ -578,13 +1045,32 @@ class StreamingDataset:
         run_bounds = np.flatnonzero(np.diff(contig_idxs)) + 1
         run_starts = np.concatenate(([0], run_bounds))
         run_ends = np.concatenate((run_bounds, [n_regions]))
+        sample_major = self._iteration_order == "samples"
         for r_lo, r_hi in zip(run_starts, run_ends):
-            for w_lo in range(int(r_lo), int(r_hi), self._window_regions):
-                w_hi = min(w_lo + self._window_regions, int(r_hi))
-                r_idx = np.arange(w_lo, w_hi, dtype=np.intp)
-                for s_lo in range(0, n_samples, self._window_samples):
-                    s_hi = min(s_lo + self._window_samples, n_samples)
-                    yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
+            # Materialize each region window's index array ONCE and re-yield the
+            # same object per sample chunk. `_iter_batches` stores these in
+            # `plan_jobs`, so allocating inside the inner loop would multiply
+            # job residency by n_sample_chunks.
+            windows = [
+                np.arange(
+                    w_lo, min(w_lo + self._window_regions, int(r_hi)), dtype=np.intp
+                )
+                for w_lo in range(int(r_lo), int(r_hi), self._window_regions)
+            ]
+            chunks = [
+                np.arange(
+                    s_lo, min(s_lo + self._window_samples, n_samples), dtype=np.intp
+                )
+                for s_lo in range(0, n_samples, self._window_samples)
+            ]
+            if sample_major:
+                for s in chunks:
+                    for w in windows:
+                        yield w, s
+            else:
+                for w in windows:
+                    for s in chunks:
+                        yield w, s
 
     def _rng_gen(self) -> np.random.Generator:
         """Build the one `Generator` for this `to_iter` call's jitter draws.
@@ -663,6 +1149,55 @@ class StreamingDataset:
         injected `_reconstruct_window` path (tests) reconstructs the whole window and
         slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
+        if self._backend is None and self._track_backend is not None:
+            # Tracks-only: no variant engine, so drive the plan directly. The
+            # window is the read granularity; batches slice it.
+            if self._jitter > 0:
+                # `read_window`'s contract is that jittered reads must be given
+                # the SAME translated bounds the variant engine got. There is no
+                # variant engine here to derive them from, so fail fast rather
+                # than silently reading unjittered bounds -- the same choice the
+                # SVAR2 and non-"engine"-prefetch guards make in this file.
+                raise NotImplementedError(
+                    "Read-time jitter (jitter>0) is not yet supported for"
+                    " tracks-only StreamingDatasets: there is no variant engine"
+                    " to derive translated region bounds from. Use jitter=0, or"
+                    " supply `variants=` as well."
+                )
+            tb = self._track_backend
+            for r_idx, s_idx in self._plan():
+                per_track = tb.read_window(r_idx, s_idx)
+                n_s = len(s_idx)
+                flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                flat_s = np.tile(np.asarray(s_idx, np.intp), len(r_idx))
+                n_rows = len(flat_r)
+                starts = self._regions[r_idx, 1]
+                ends = self._regions[r_idx, 2]
+                flat_starts = np.repeat(starts, n_s).astype(np.int32)
+                lengths = np.repeat(ends - starts, n_s).astype(np.int64)
+                # Flatten (region, sample) -> row ONCE per window, so each
+                # batch is a contiguous row slice and offset_idxs is a plain
+                # arange. `output_length` is applied here when it is an int.
+                if isinstance(self._output_length, int):
+                    lengths = np.full(len(lengths), self._output_length, np.int64)
+                # Flatten AND FFI-coerce ONCE per window, then select each
+                # batch's rows with `offset_idxs` rather than re-slicing the
+                # intervals. This is the mechanism the written path uses
+                # (`_tracks.py`'s `o_idx` indexes the un-sliced array) and it
+                # keeps the per-batch work to one kernel call per track over
+                # buffers that are already contiguous (see `_ItvArrays`).
+                flat_itvs = _coerce_window_itvs(per_track)
+                for lo in range(0, n_rows, batch_size):
+                    hi = min(lo + batch_size, n_rows)
+                    out = _tracks_from_intervals(
+                        flat_itvs,
+                        np.arange(lo, hi, dtype=np.int64),
+                        flat_starts[lo:hi],
+                        lengths[lo:hi],
+                    )
+                    yield out, flat_r[lo:hi], flat_s[lo:hi]
+            return
+
         if self._backend is not None:
             # Resolve the effective fixed/ragged length ONCE: -1 = ragged (per-hap
             # actual length, the pre-Wave-A default), >=0 = fixed (issue #277
@@ -687,6 +1222,93 @@ class StreamingDataset:
             # mirroring `_variants` -- threaded through `build_engine`/the engine
             # constructor and selects the `next_batch_variant_windows` puller below.
             _variant_windows = self._seq_kind is dict
+            # Issue #279 Task 7: mixed variants + tracks is SVAR1-ONLY in v1.
+            # The fused re-alignment kernel wiring below assumes
+            # `_Svar1Backend`-shaped inputs (`geno_v_idxs`/`_v_starts`/`_ilens`,
+            # window-local CSR offsets from `read_window`); VCF/PGEN/SVAR2
+            # would need their own per-backend wiring (later follow-up, not
+            # required by #279). Checked BEFORE any engine/plan work so a
+            # doomed combination fails fast, matching the SVAR2 jitter/out_len
+            # guard just below.
+            if self._track_backend is not None and not isinstance(
+                self._backend, _Svar1Backend
+            ):
+                raise NotImplementedError(
+                    "StreamingDataset tracks= combined with a variant source is "
+                    "only supported for the SVAR1 (.svar) backend; got "
+                    f"{type(self._backend).__name__}. VCF/PGEN/SVAR2 + track "
+                    "re-alignment is a later follow-up (issue #279)."
+                )
+            # Task 8 (spec §3.3/§8): `with_seqs("variant-windows")` + tracks +
+            # `realign_tracks=True` mirrors the WRITTEN path's own `ValueError`
+            # verbatim (`_reconstruct.py:537-543`) -- windows are
+            # reference-oriented and the written path itself refuses to
+            # re-align them, so this is a real semantic rejection, not a
+            # streaming gap. Exception type matters here: `NotImplementedError`
+            # is not a `ValueError` subclass, so a caller mirroring the written
+            # path's error handling would not catch it.
+            if (
+                self._track_backend is not None
+                and _variant_windows
+                and self._realign_tracks
+            ):
+                raise ValueError(
+                    "with_seqs('variant-windows') with tracks requires"
+                    " with_settings(realign_tracks=False) (windows are"
+                    " reference-oriented; re-alignment is not supported)."
+                )
+            # Deviation from the spec §3.3 table's row 2 -- recorded, not
+            # silently dropped: the table also claims `with_seqs("variants")` +
+            # tracks + `realign_tracks=True` raises the written path's
+            # `ValueError`, "same message shape" as variant-windows. Verified
+            # against the actual written path (`_build_reconstructor`,
+            # `_reconstruct.py:514-547`, and confirmed empirically): NEITHER
+            # `with_seqs("variants")` nor `with_seqs("annotated")` has any
+            # guard there for ANY `realign_tracks` value -- both dispatch to
+            # `HapsTracks`/`SeqsTracks` and are fully SUPPORTED by
+            # `Dataset[r, s]` today (`with_insertion_fill`'s own allow-list at
+            # `_impl.py:872` includes "variants" for the same reason). So there
+            # is no written-path `ValueError` to mirror for either kind; both
+            # are purely a streaming wiring gap (the fused kernel below only
+            # assembles bare haplotype bytes) and get `NotImplementedError`
+            # uniformly, independent of `realign_tracks`.
+            if self._track_backend is not None and (_variants or _variant_windows):
+                raise NotImplementedError(
+                    "StreamingDataset tracks= combined with "
+                    f"with_seqs({_SEQ_KIND_NAMES.get(self._seq_kind, self._seq_kind)!r}) "
+                    "is not yet wired for streaming (the written Dataset DOES "
+                    "support this combination); use with_seqs('haplotypes') "
+                    "(the default) with tracks=."
+                )
+            if self._track_backend is not None and _annotated:
+                raise NotImplementedError(
+                    "StreamingDataset tracks= combined with "
+                    "with_seqs('annotated') is not yet wired for streaming (the "
+                    "written Dataset DOES support this combination); use "
+                    "with_seqs('haplotypes') (the default) with tracks=."
+                )
+            # Deliberate seam, NOT covered by any required parity test (the
+            # fixture is built with `max_jitter=None`): `_Svar1Backend.read_window`
+            # (used below, per-window, to size the deletion-extended track query)
+            # always queries the RAW unjittered `_regions` bounds, while the
+            # haplotype engine and the track query itself use the jitter-translated
+            # bounds (`_jitter_region_bounds`). Under jitter>0 this can miss a
+            # boundary deletion and under-extend the track query. Fail fast rather
+            # than silently under-size the track buffer, matching the tracks-only
+            # branch's identical jitter guard just above in this file.
+            if (
+                self._track_backend is not None
+                and self._jitter > 0
+                and self._realign_tracks
+            ):
+                raise NotImplementedError(
+                    "StreamingDataset read-time jitter (jitter>0) is not yet "
+                    "supported together with tracks= re-alignment (realign_tracks="
+                    "True, the default): the deletion-extension query would need "
+                    "jitter-translated region bounds too. Use jitter=0, or "
+                    "with_settings(realign_tracks=False) (which skips the "
+                    "deletion-extension query entirely)."
+                )
             # Minor (Wave B PR-B3a review): resolve ONCE per `_iter_batches` call, not
             # once per batch inside the packing loop below -- `active_var_fields`
             # allocates a new list every call.
@@ -800,9 +1422,16 @@ class StreamingDataset:
                 # `_window_samples`/`_window_regions` chunking (issue #277 review
                 # finding). `_jitter==0` (the default) takes the untranslated path
                 # unchanged, preserving the jitter=0 byte-parity gate exactly.
-                if self._jitter > 0:
-                    rng = self._rng_gen()
-                    region_offsets = self._region_jitter_offsets(rng)
+                # `region_offsets` is None exactly when jitter is off. Narrowing
+                # on the array rather than re-testing `self._jitter > 0` at each use
+                # keeps the flag and the data it implies from disagreeing, and lets
+                # the producer here and the track consumer below share one guard.
+                region_offsets = (
+                    self._region_jitter_offsets(self._rng_gen())
+                    if self._jitter > 0
+                    else None
+                )
+                if region_offsets is not None:
                     engine_jobs = [
                         (
                             contig_idx,
@@ -877,6 +1506,122 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
                     n_rows = len(flat_r)
+                    # Issue #279 Task 7: read this window's tracks once, here --
+                    # the composition point the per-window loop already has, no
+                    # separate cursor needed. Guarded on `tb is not None` so a
+                    # haplotype-only stream pays nothing extra.
+                    tb = self._track_backend
+                    if tb is not None:
+                        from ._genotypes import get_diffs_sparse
+
+                        s_idx_w = np.arange(s_lo, s_hi, dtype=np.intp)
+                        if region_offsets is not None:
+                            # Tracks MUST use the SAME translated bounds the
+                            # engine got (`region_offsets`, drawn once above,
+                            # before `plan_jobs` was built), or tracks and
+                            # haplotypes silently disagree by up to `jitter`
+                            # bases.
+                            t_starts, t_ends = self._jitter_region_bounds(
+                                region_offsets, r_idx
+                            )
+                        else:
+                            t_starts = np.ascontiguousarray(
+                                self._regions[r_idx, 1], np.int32
+                            )
+                            t_ends = np.ascontiguousarray(
+                                self._regions[r_idx, 2], np.int32
+                            )
+                        row_starts_w = np.repeat(t_starts, n_s).astype(np.int32)
+                        row_ends_w = np.repeat(t_ends, n_s).astype(np.int32)
+                        row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
+                        P = backend.ploidy
+
+                        if self._realign_tracks:
+                            # Spec section 3.2: the written path's stored
+                            # intervals were extracted over `gvl_bed` AFTER
+                            # `extend_to_length`/`max_jitter` widening; here
+                            # `_regions` is the raw BED, so a region touching a
+                            # deletion needs its track query extended by that
+                            # region's max deletion length, or the realigned
+                            # track underflows. Computed ONCE per window
+                            # (whole-window rows), reused per batch below.
+                            #
+                            # The extension below is the SAME formula the read
+                            # path uses for the rasterization buffer itself --
+                            # `track_lengths = row_lengths -
+                            # diffs.clip(max=0).min(1)` in
+                            # `_realigned_tracks_from_intervals` and, verbatim,
+                            # in the WRITTEN reader (`_reconstruct.py:191`,
+                            # `:382`). Taking the per-region max over the
+                            # window's samples makes the query a superset of
+                            # every row's buffer, so this can never under-read
+                            # for its own kernel, whatever the written store
+                            # did.
+                            #
+                            # It does NOT match the written WRITER's
+                            # `chromEnd` extension (`_write.py:1084`: the end
+                            # of the highest-indexed overlapping variant,
+                            # `POS - min(ILEN, 0)`), which for e.g. two 5 bp
+                            # deletions stores LESS than its own reader asks
+                            # for. That asymmetry can only ever leave the
+                            # written path with zeros in a tail streaming fills
+                            # with real values, and it is unobservable today
+                            # because (a) ragged re-alignment never reads past
+                            # reference index `region_len - 1`
+                            # (`shift_and_realign_track_core`'s trailing fill
+                            # bounds `writable_ref` by `track.len() -
+                            # track_idx`), and (b) `with_len(L)` is bounded by
+                            # the minimum region length on BOTH sides -- see
+                            # `with_len`, which grew that guard for this reason.
+                            # An `extend_to_length` follow-up must revisit both.
+                            o_starts, o_stops = backend.read_window(r_idx, s_idx_w)
+                            geno_offsets_w = np.stack([o_starts, o_stops])
+                            geno_offset_idx_w = np.arange(
+                                n_rows * P, dtype=np.intp
+                            ).reshape(n_rows, P)
+                            diffs_w = get_diffs_sparse(
+                                geno_offset_idx_w,
+                                backend.geno_v_idxs,
+                                geno_offsets_w,
+                                backend._ilens,
+                                q_starts=row_starts_w,
+                                q_ends=row_ends_w,
+                                v_starts=backend._v_starts,
+                            )
+                            max_del_row = -diffs_w.clip(max=0).min(1)
+                            region_max_del = max_del_row.reshape(len(r_idx), n_s).max(1)
+                            t_ends_ext = np.ascontiguousarray(
+                                t_ends.astype(np.int64) + region_max_del, np.int32
+                            )
+                            realign_w = _RealignWindow(
+                                diffs=diffs_w,
+                                geno_offsets=geno_offsets_w,
+                                geno_offset_idx=geno_offset_idx_w,
+                            )
+                        else:
+                            # Un-realigned tracks stay in reference coordinates
+                            # -- no deletion-extension read-ahead needed.
+                            realign_w = None
+                            t_ends_ext = t_ends
+
+                        per_track = tb.read_window(
+                            r_idx,
+                            s_idx_w,
+                            np.ascontiguousarray(t_starts, np.int32),
+                            np.ascontiguousarray(t_ends_ext, np.int32),
+                        )
+                        track_w = _TrackWindow(
+                            # Flattened AND FFI-coerced ONCE per window, not
+                            # once per batch per track (see `_ItvArrays`).
+                            itvs=_coerce_window_itvs(per_track),
+                            names=tb.names,
+                            row_starts=row_starts_w,
+                            row_ends=row_ends_w,
+                            row_lengths=row_lengths_w,
+                            realign=realign_w,
+                        )
+                    else:
+                        track_w = None
                     for lo in range(0, n_rows, batch_size):
                         hi = min(lo + batch_size, n_rows)
                         nxt = next_batch()
@@ -1033,11 +1778,81 @@ class StreamingDataset:
                             )
                         else:
                             data, offsets = nxt
-                            out = Ragged.from_offsets(
-                                np.asarray(data).view("S1"),
-                                (hi - lo, backend.ploidy, None),
-                                np.asarray(offsets, np.int64),
-                            )
+                            if track_w is not None:
+                                # Issue #279 Task 7: haplotype BYTES are
+                                # discarded here -- the mixed-tracks output
+                                # convention is "tracks alone" (matching the
+                                # tracks-only path's `data[i]` contract). Only
+                                # `offsets` is needed, for the real per-(row,
+                                # hap) output length -- this already reflects
+                                # `with_len(L)` when set, since
+                                # `svar1_generate_batch` bakes the fixed length
+                                # into `offsets` itself.
+                                if track_w.realign is not None:
+                                    out_lengths = np.diff(
+                                        np.asarray(offsets, np.int64)
+                                    ).reshape(hi - lo, backend.ploidy)
+                                    regions_batch = np.stack(
+                                        [
+                                            np.zeros(hi - lo, np.int32),
+                                            track_w.row_starts[lo:hi],
+                                            track_w.row_ends[lo:hi],
+                                        ],
+                                        axis=1,
+                                    ).astype(np.int32)
+                                    # The written path's own formula, verbatim:
+                                    # xor-reduce of the dataset-global ravel
+                                    # index (`_reconstruct.py:216-218`). Only
+                                    # `FlankSample` reads this seed -- every
+                                    # strategy the parity tests exercise
+                                    # (Repeat5p, Repeat5pNormalized) ignores it
+                                    # -- but matching the formula costs nothing
+                                    # and removes a gratuitous divergence. Exact
+                                    # `FlankSample` parity remains unattainable
+                                    # in ANY batched path, written or streaming,
+                                    # because the kernel also mixes in the
+                                    # batch-local query index
+                                    # (`src/tracks/mod.rs:583-590`) and the
+                                    # `Dataset[r, s]` oracle always has query 0.
+                                    _idx = flat_r[lo:hi].astype(np.uint64) * np.uint64(
+                                        self.n_samples
+                                    ) + flat_s[lo:hi].astype(np.uint64)
+                                    base_seed = int(np.bitwise_xor.reduce(_idx))
+                                    out = _realigned_tracks_from_intervals(
+                                        track_w.itvs,
+                                        track_w.names,
+                                        self._insertion_fill,
+                                        np.arange(lo, hi, dtype=np.int64),
+                                        regions_batch,
+                                        track_w.realign.geno_offset_idx[lo:hi],
+                                        track_w.realign.geno_offsets,
+                                        backend.geno_v_idxs,
+                                        backend._v_starts,
+                                        backend._ilens,
+                                        track_w.row_lengths[lo:hi],
+                                        track_w.realign.diffs[lo:hi],
+                                        out_lengths,
+                                        base_seed,
+                                    )
+                                else:
+                                    if isinstance(self._output_length, int):
+                                        _lengths = np.full(
+                                            hi - lo, self._output_length, np.int64
+                                        )
+                                    else:
+                                        _lengths = track_w.row_lengths[lo:hi]
+                                    out = _tracks_from_intervals(
+                                        track_w.itvs,
+                                        np.arange(lo, hi, dtype=np.int64),
+                                        track_w.row_starts[lo:hi],
+                                        _lengths,
+                                    )
+                            else:
+                                out = Ragged.from_offsets(
+                                    np.asarray(data).view("S1"),
+                                    (hi - lo, backend.ploidy, None),
+                                    np.asarray(offsets, np.int64),
+                                )
                         yield (out, flat_r[lo:hi], flat_s[lo:hi])
                 # `-O`-safe (Minor 3): a bare `assert` is stripped under `python -O`,
                 # silently dropping this end-of-plan invariant.
@@ -1066,6 +1881,20 @@ class StreamingDataset:
                 # bounds through without a backend signature change. This experimental,
                 # non-default toggle (issue #283 A-vs-C measurement) is out of scope
                 # for that change; fail fast rather than silently ignoring jitter.
+                # Tracks are wired into the "engine" drive only; this branch
+                # yields haplotypes and would drop them entirely -- silently
+                # wrong output, the failure mode every other guard here exists
+                # to prevent. Unreachable through the public API
+                # (`_prefetch_strategy` is backend-derived), but the A-vs-C
+                # bench harness sets it via `object.__setattr__`.
+                if self._track_backend is not None:
+                    raise NotImplementedError(
+                        "StreamingDataset tracks= is only supported with the "
+                        'default "engine" prefetch strategy; the experimental '
+                        '"readahead" toggle has no track path and would yield '
+                        "haplotypes alone. Do not set tracks= with "
+                        '_prefetch_strategy="readahead".'
+                    )
                 if self._jitter > 0:
                     raise NotImplementedError(
                         "StreamingDataset read-time jitter (jitter>0) is only "
@@ -1293,6 +2122,16 @@ class StreamingDataset:
         Iteration is a fixed cartesian sweep of BED regions x samples in a
         data-layout-optimal order (region-major for variants). There is no random
         access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
+        ``iteration_order`` (set at construction) picks between region-major and
+        sample-major sweeps, but it only changes anything when the sample axis
+        is chunked across more than one read window. At the default
+        ``max_mem="512MB"`` the sample chunk holds the entire axis unless the
+        cohort is very large -- about 8.4M samples with no tracks, but only
+        ~340k with one track and ~170k with two, since each track adds 768 B
+        per cell (see ``TRACK_BYTES_PER_CELL``). Below that threshold the
+        sample loop runs once and both orders emit the identical plan. Check
+        :attr:`iteration_order_is_active` before relying on it to change
+        observed behavior.
 
         Args:
             batch_size: Number of ``(region, sample)`` cells per yielded batch.
@@ -1306,6 +2145,18 @@ class StreamingDataset:
         Yields:
             ``(data, region_idxs, sample_idxs)`` when ``return_indices`` is ``True``,
             otherwise ``data`` alone.
+
+        **Tracks** (``tracks=``): when tracks are active, ``data`` is the tracks
+        ALONE -- never a ``(haplotypes, tracks)`` pair, even when a variant source
+        and a reference are both present. This differs deliberately from written
+        ``gvl.Dataset[r, s]``, which returns both halves. With variants and the
+        default ``realign_tracks=True`` the tracks are re-aligned to haplotype
+        coordinates and carry a ploidy axis, shape
+        ``(batch, n_tracks, ploidy, None)``; with ``realign_tracks=False`` they
+        stay in reference coordinates and drop it, ``(batch, n_tracks, None)``;
+        without variants the shape is ``(batch, n_tracks, None)``. The track axis
+        is ordered by track NAME (never ``tracks=`` argument order) and is never
+        squeezed -- a single track still yields a length-1 axis.
 
         **Read-time jitter** (``jitter>0``, set via ``with_settings``):
         When ``jitter>0``, each region's read window is translated by an integer
@@ -1405,8 +2256,20 @@ class StreamingDataset:
                 (``.svar2``) backend (not yet wired; see the SVAR1/VCF/PGEN
                 engines).
             ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
-                supplied for any other ``kind``.
+                supplied for any other ``kind``. Also raised if this
+                ``StreamingDataset`` has no variant source at all (tracks-only
+                construction, i.e. ``variants=`` was never supplied) --
+                ``with_seqs`` has nothing to reconstruct from.
         """
+        if self._backend is None and self._reconstruct_window is None:
+            # Tracks-only: no variant source to reconstruct from (never true of
+            # the injected-callback test path, which sets `_reconstruct_window`
+            # even though it also has no `_backend`).
+            raise ValueError(
+                "with_seqs() requires a variant source; this StreamingDataset"
+                " has no variant source (tracks only), so it yields tracks"
+                " alone from to_iter()."
+            )
         kind_map = {
             "haplotypes": RaggedSeqs,
             "annotated": RaggedAnnotatedHaps,
@@ -1463,6 +2326,15 @@ class StreamingDataset:
         per hap. Unlike :meth:`Dataset.with_len`, ``"variable"`` is not accepted:
         :meth:`to_iter` always yields ``Ragged`` (there is no ArrayDataset analog),
         so pad the ragged output yourself for a dense array.
+
+        Args:
+            length: ``"ragged"``, or a positive int no larger than the smallest
+                region in the BED.
+
+        Raises:
+            NotImplementedError: If ``length`` is ``"variable"``.
+            ValueError: If ``length`` is not a positive int, or exceeds the
+                smallest region length.
         """
         if length == "variable":
             raise NotImplementedError(
@@ -1475,6 +2347,25 @@ class StreamingDataset:
                     f"with_len(length) must be a positive int or 'ragged', got {length!r}."
                 )
             length = int(length)
+            # Mirror `Dataset.with_len`'s upper bound (`_impl.py:551-559`):
+            # the written oracle refuses `output_length + 2*jitter >
+            # min_region_len + 2*max_jitter`, and without the same guard
+            # streaming silently ZERO-PADS past the region on exactly the call
+            # the oracle rejects -- bytes no parity test can check. Streaming
+            # has no `max_jitter` (there is no written store to have been
+            # widened at write time) and its jitter TRANSLATES the window
+            # rather than consuming slack inside it (see `with_settings`), so
+            # both `2 * jitter` terms drop out and the bound is just the
+            # smallest region length.
+            min_r_len = int((self._regions[:, 2] - self._regions[:, 1]).min())
+            if length > min_r_len:
+                raise ValueError(
+                    f"with_len({length}) exceeds the minimum region length"
+                    f" ({min_r_len}), which is the maximum output length of this"
+                    " StreamingDataset. `Dataset.with_len` raises for the same"
+                    " call, so there would be no parity oracle for the result;"
+                    " streaming would silently zero-pad past the region."
+                )
         out = copy.copy(self)
         object.__setattr__(out, "_output_length", length)
         return out
@@ -1488,6 +2379,7 @@ class StreamingDataset:
         min_af: "float | None" = None,
         max_af: "float | None" = None,
         var_fields: "list[str] | None" = None,
+        realign_tracks: "bool | None" = None,
     ) -> "StreamingDataset":
         """Modify jitter / rng / determinism, returning a new dataset.
 
@@ -1533,6 +2425,12 @@ class StreamingDataset:
                 combining it with any other output kind raises
                 :class:`NotImplementedError` at iterate time (matches how
                 ``min_af``/``max_af`` are guarded).
+            realign_tracks: Whether tracks are re-aligned to haplotype coordinates
+                (default ``True``). ``False`` skips re-alignment: tracks keep
+                reference coordinates and DROP the ploidy axis (shape
+                ``(b, t, ~l)`` instead of ``(b, t, p, ~l)``), matching
+                :meth:`Dataset.with_settings`. Only meaningful when ``tracks=`` was
+                given; ignored otherwise.
 
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
@@ -1574,6 +2472,87 @@ class StreamingDataset:
                     f"Servable: {self.servable_var_fields}."
                 )
             object.__setattr__(out, "_var_fields", list(var_fields))
+        if realign_tracks is not None:
+            object.__setattr__(out, "_realign_tracks", bool(realign_tracks))
+        return out
+
+    def with_insertion_fill(
+        self, fill: "InsertionFill | dict[str, InsertionFill]"
+    ) -> "StreamingDataset":
+        """Set the insertion-fill strategy for re-aligned tracks.
+
+        Mirrors :meth:`Dataset.with_insertion_fill`. Only meaningful when
+        ``tracks=`` AND ``variants=`` were given and ``realign_tracks`` is
+        ``True`` (the default). Insertion fill is read only while re-aligning
+        tracks to haplotype coordinates, so each of those three conditions is
+        required and each raises when it does not hold.
+
+        Args:
+            fill: Either a single :class:`InsertionFill` applied to every track,
+                or a mapping from track name to a per-track strategy. A mapping
+                must cover every track name exactly (see
+                :attr:`StreamingDataset` construction docs for track naming);
+                an unknown or missing name raises :class:`ValueError`.
+
+        Returns:
+            A new :class:`StreamingDataset` with the strategy set.
+
+        Raises:
+            ValueError: If the dataset has no tracks, if it has no variants, if
+                ``realign_tracks`` is ``False`` (in either case the strategy
+                would have no effect), or if ``fill`` is a mapping whose keys
+                don't exactly match the track names.
+        """
+        from ._insertion_fill import InsertionFill
+
+        tb = self._track_backend
+        # Spec section 3.1: raise the written path's `ValueError`s
+        # (`_impl.py:872-889`) rather than silently accepting a setting that
+        # cannot change any byte -- the same fail-fast contract the
+        # `var_fields` and `min_af`/`max_af` guards in this file enforce.
+        if tb is None:
+            raise ValueError(
+                "with_insertion_fill requires tracks; there are none on this"
+                " StreamingDataset. Pass tracks= at construction first."
+            )
+        if self._backend is None:
+            # The third case in which the setting cannot change a byte, and the
+            # one the two checks around it used to miss: on a tracks-only
+            # dataset `_realign_tracks` is still `True` by default, but
+            # `_insertion_fill` is read at exactly one site -- the MIXED
+            # realigned branch of `_iter_batches` -- which the tracks-only drive
+            # never reaches. Accepting the call there is precisely the silent
+            # no-op the comment above refuses.
+            raise ValueError(
+                "with_insertion_fill has no effect on a tracks-only"
+                " StreamingDataset: insertion fill only applies while"
+                " re-aligning tracks to haplotype coordinates, which requires a"
+                " variant source. Pass variants= at construction first, or drop"
+                " the call."
+            )
+        if not self._realign_tracks:
+            raise ValueError(
+                "with_insertion_fill has no effect when realign_tracks=False"
+                " (insertion fill only applies while re-aligning tracks to"
+                " haplotype coordinates). Use"
+                " with_settings(realign_tracks=True) first, or drop the call."
+            )
+        names = list(tb.names)
+        if isinstance(fill, InsertionFill):
+            resolved = {name: fill for name in names}
+        else:
+            fill_names = set(fill)
+            if fill_names != set(names):
+                missing = set(names) - fill_names
+                extra = fill_names - set(names)
+                raise ValueError(
+                    "with_insertion_fill(dict) must have exactly one entry per "
+                    f"track name. Missing: {sorted(missing)}. Unknown: "
+                    f"{sorted(extra)}."
+                )
+            resolved = dict(fill)
+        out = copy.copy(self)
+        object.__setattr__(out, "_insertion_fill", resolved)
         return out
 
     def __getitem__(self, idx) -> None:
@@ -1882,6 +2861,10 @@ class _Svar1Backend:
 
         self._svar_path = str(svar_path)
         self._store = Svar1Store(str(svar_path), self.n_samples, self.ploidy)
+        # Issue #279 Task 7: lazily-opened memmap of `variant_idxs.npy`, exposed
+        # via the `geno_v_idxs` property below. `None` until first accessed --
+        # a haplotype-only stream never touches it.
+        self._geno_v_idxs: NDArray | None = None
 
         # Per contig: register three scalars and cache the contig-local u32 arrays the
         # range search borrows. The arrays stay HERE (numpy) and cross per call as
@@ -2193,6 +3176,28 @@ class _Svar1Backend:
             call_field_i16=call_field_i16,
             **_win_mode_kwargs(var_window),
         )
+
+    @property
+    def geno_v_idxs(self) -> NDArray:
+        """The store's `variant_idxs` as a read-only memmap.
+
+        The Rust `Svar1Store` holds this as a zero-copy mmap for its own reads;
+        the fused track kernel needs it on the Python side, so open a second
+        read-only view rather than copying. Opened lazily: a haplotype-only
+        stream never touches it.
+
+        Returns:
+            A 1-D read-only `np.memmap` of the store's variant indices.
+        """
+        if self._geno_v_idxs is None:
+            from genoray._types import V_IDX_TYPE
+
+            self._geno_v_idxs = np.memmap(
+                Path(self._svar_path) / "variant_idxs.npy",
+                dtype=V_IDX_TYPE,
+                mode="r",
+            )
+        return self._geno_v_idxs
 
     def read_window(
         self, r_idx: NDArray[np.intp], s_idx: NDArray[np.intp]

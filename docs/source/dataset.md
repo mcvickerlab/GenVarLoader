@@ -199,6 +199,12 @@ ChunkAssembler → DenseChunk`. **Streaming VCF/BCF makes htslib a hard runtime
 requirement** (statically linked into gvl's wheel via genoray's `conversion` feature; no separate
 install step).
 
+`StreamingDataset` also accepts `tracks=`, mirroring `gvl.write`'s `IntervalTrack |
+Sequence[IntervalTrack]` (a [`BigWigs`](api.md#genvarloader.BigWigs) or
+[`Table`](api.md#genvarloader.Table), or a sequence of them) — see "Interval track streaming
+(`tracks=`)" below. At least one of `variants=`/`tracks=` is required; `tracks=` alone builds a
+tracks-only dataset with no `reference` and no ploidy axis.
+
 For the VCF/BCF path, that normalization requirement is **not enforced**: genoray's
 `ChunkAssembler` applies atomization (biallelic split) automatically on read, but does not
 perform left-alignment or REF/FASTA check-ref, and does not validate the input at all —
@@ -417,6 +423,118 @@ The **`.svar2` backend** does not yet support these knobs. It is currently
 **haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
 `with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
 `NotImplementedError` (SVAR2 support is a known follow-up).
+
+### Interval track streaming (`tracks=`)
+
+`StreamingDataset(..., tracks=...)` reads `BigWigs`/`Table` interval data directly, the same way
+it reads variants — no `gvl.write()` step. `tracks=` accepts an `IntervalTrack` (a
+[`BigWigs`](api.md#genvarloader.BigWigs) or [`Table`](api.md#genvarloader.Table)) or a sequence
+of them, exactly like `gvl.write`'s `tracks=`. Passing `tracks=` alone (no `variants=`) builds a
+tracks-only dataset — `reference` is not needed, there is no ploidy axis, and `with_seqs` raises;
+passing it alongside `variants=` attaches both sources to the same dataset.
+
+```python
+sds = gvl.StreamingDataset(
+    "rois.bed", tracks=gvl.BigWigs.from_table("signal", "bw_table.tsv")
+)  # tracks-only: no reference, no variants=
+
+for tracks, region_idxs, sample_idxs in sds.to_iter(batch_size=32):
+    ...  # tracks: Ragged[f32], shape (batch, n_tracks, ~length)
+```
+
+The track axis is ordered by track **name** (lexicographic sort), never by `tracks=` argument
+order — this matches the written path's sorted `available_tracks`. The axis is **never
+squeezed**: even a single track yields a length-1 axis, so shapes are always rank-4 (with a
+ploidy axis) or rank-3 (without one), never rank-3/rank-2 for the one-track case.
+
+Output shape depends on whether the tracks are re-aligned to haplotype coordinates
+(`realign_tracks`, default `True`, same meaning as `Dataset.with_settings(realign_tracks=)`):
+
+| Case | Shape |
+|---|---|
+| No variant source, or `realign_tracks=False` | `(batch, n_tracks, ~length)` |
+| Variant source + `realign_tracks=True` (default) | `(batch, n_tracks, ploidy, ~length)` |
+
+```{important}
+**When tracks are active, `to_iter()` yields the tracks ALONE — never a `(haplotypes, tracks)`
+pair — even when both a variant source and a `reference` are attached.** This is a deliberate
+difference from a written `gvl.Dataset[r, s]`, which returns both halves together when both are
+configured. It will surprise anyone porting code from the written path: there is currently no way
+to get haplotypes and tracks out of the same `StreamingDataset.to_iter()` call.
+```
+
+**Mixed variants + tracks is SVAR1-only in v1.** Combining `tracks=` with a VCF/BCF, PGEN, or
+`.svar2` variant source raises `NotImplementedError` — none of those three backends exposes the
+genotype seam the re-alignment kernel needs. Tracks alone (no `variants=`) work on every backend
+combination, since there is nothing to re-align against.
+
+`with_seqs` combined with tracks only wires the default `"haplotypes"` kind; the written path
+supports more, and streaming's gaps raise rather than silently degrade:
+
+| `with_seqs(...)` + tracks | Written `Dataset` | `StreamingDataset` |
+|---|---|---|
+| `"variant-windows"`, `realign_tracks=True` | `ValueError` (windows are reference-oriented; re-alignment is refused) | same `ValueError` |
+| `"variant-windows"`, `realign_tracks=False` | supported | `NotImplementedError` (not yet wired) |
+| `"variants"` (either `realign_tracks`) | supported | `NotImplementedError` (not yet wired) |
+| `"annotated"` (either `realign_tracks`) | supported | `NotImplementedError` (not yet wired) |
+
+Two new methods configure track output, both mirroring their `Dataset` namesakes:
+
+- **`with_settings(realign_tracks=...)`** — `True` (default) re-aligns tracks to haplotype
+  coordinates (needs a variant source); `False` keeps reference coordinates and drops the ploidy
+  axis. Only meaningful when `tracks=` was given.
+- **`with_insertion_fill(fill)`** — sets the per-track insertion-fill strategy used while
+  re-aligning (a single `InsertionFill` for every track, or a `dict[str, InsertionFill]` keyed by
+  track name). Raises `ValueError` if the dataset has no tracks, or if `realign_tracks=False` (the
+  setting would have no effect) — same guard as `Dataset.with_insertion_fill`.
+
+**`iteration_order`** (`"auto" | "regions" | "samples"`, constructor arg) picks region-major vs
+sample-major sweeps. `"auto"` resolves at construction from the source mix:
+
+| Sources | `"auto"` resolves to | Why |
+|---|---|---|
+| variants only | `"regions"` | Variant stores are position-major; a region window is one contiguous span |
+| tracks only | `"samples"` | `BigWigs` holds one file per sample; sample-major walks a single file front-to-back |
+| variants + tracks | `"regions"` | Favours the variant axis — **deliberately non-optimal for the track axis** |
+
+For a mixed variants + tracks dataset, `"auto"` therefore optimises the variant side at the track
+side's expense. If track reads dominate your wall-clock, pass `iteration_order="samples"`
+explicitly — that is the intended escape hatch, not a workaround.
+
+Either way it is a **no-op unless `max_mem` forces the sample axis to chunk** —
+below that threshold both orders visit the identical plan. The threshold depends on how many
+tracks are attached (each track adds 768 B/cell to the `max_mem` budget), so don't compute it by
+hand — check the `iteration_order_is_active` property instead:
+
+```python
+sds.iteration_order_is_active  # True iff iteration_order actually changes anything here
+```
+
+**Read-time jitter is not yet supported with tracks.** `with_settings(jitter=...)` raises
+`NotImplementedError` when combined with tracks, in both shapes it can take:
+
+- **tracks only** — there is no variant engine to derive jitter-translated region bounds from, so
+  a jittered read would silently use unjittered bounds.
+- **variants + tracks with `realign_tracks=True`** (the default) — the deletion-extension query
+  that sizes the track buffer would need the translated bounds too, and would otherwise
+  under-extend at a region boundary.
+
+Both fail fast rather than return wrong bytes. Use `jitter=0`, or
+`with_settings(realign_tracks=False)`, which skips the deletion-extension query entirely.
+
+```{note}
+Two different knobs are called "jitter" and both bear on parity. `with_settings(jitter=...)` is
+**read-time** jitter on a `StreamingDataset`; `gvl.write(..., max_jitter=...)` is a **write-time**
+parameter of the written dataset you compare against. Satisfying one says nothing about the other
+— a streaming dataset at `jitter=0` still fails the parity gate below if its oracle was written
+with `max_jitter>0`.
+```
+
+**v1 parity is gated on `gvl.write(..., extend_to_length=False, max_jitter=None)`.** Streaming
+tracks do not yet reproduce `extend_to_length=True` (the `gvl.write` default) or `max_jitter>0` —
+both require a whole-cohort, write-time scan (`max_ends`) that a write-free design can't do
+per-window. Build the parity oracle with `extend_to_length=False, max_jitter=None` until that
+follow-up lands.
 
 `StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
 and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises

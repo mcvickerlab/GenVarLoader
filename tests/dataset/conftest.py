@@ -1333,3 +1333,147 @@ def empty_region_case(request, tmp_path_factory):
         raise ValueError(f"empty_region_case: unknown backend {backend!r}")
 
     return _case
+
+
+@dataclass(slots=True)
+class StreamingTracksFixture:
+    """Fixture for interval-streaming parity (issue #279).
+
+    Deliberately hostile to the two bugs the spec calls out (Section 8):
+
+    - Track names are passed in NON-alphabetical order (``zeta`` before
+      ``alpha``) so a test that assumes ``tracks=`` argument order fails
+      loudly. The written path sorts (`_tracks.py:283`), so the expected
+      track axis is ``[alpha, zeta]``.
+    - The bed includes a region overlapping a deletion, so the indel
+      re-alignment path is exercised rather than the trivial one.
+    """
+
+    #: A `pl.DataFrame` of BED3+ regions (NOT a path) -- pass it straight to
+    #: `gvl.StreamingDataset(f.bed, ...)`. Never call `gvl.read_bedlike()` on
+    #: it, and never treat it as a `Path`.
+    bed: pl.DataFrame
+    reference_path: Path
+    svar_path: Path
+    dataset_path: Path
+    bigwigs: gvl.BigWigs
+    table: gvl.Table
+    #: Same track as `bigwigs` plus one extra sample the dataset does not have.
+    #: Exercises the Section 8 "strict superset" row and the query-by-NAME rule.
+    bigwigs_superset: gvl.BigWigs
+    samples: list[str]
+    #: Contig order the dataset's `regions[:, 0]` indexes into.
+    contigs_list: list[str]
+
+
+@pytest.fixture(scope="module")
+def streaming_tracks_fixture(
+    tmp_path_factory, svar1_multicontig_fixture
+) -> StreamingTracksFixture:
+    """SVAR1 variants + two interval tracks, written with parity-safe flags.
+
+    Scope is ``module``, not ``session``: it depends on the module-scoped
+    ``svar1_multicontig_fixture`` and pytest forbids the wider scope.
+    """
+    base = svar1_multicontig_fixture
+    tmp_dir = tmp_path_factory.mktemp("streaming_tracks")
+
+    # `Svar1MultiContigFixture` has fields svar_path / reference_path /
+    # contigs / bed / dataset_path. `bed` is ALREADY a pl.DataFrame (do not
+    # call read_bedlike on it), and there is NO `samples` field -- take the
+    # sample names from the written dataset so they match its public order.
+    bed = base.bed
+    samples = list(gvl.Dataset.open(base.dataset_path).samples)
+
+    # Contig sizes come from the reference .fai, NOT from the bed. Both
+    # contigs are only 40 bp; padding past the reference length would make
+    # the bigwig header disagree with the reference.
+    fai = pl.read_csv(
+        str(base.reference_path) + ".fai",
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "length", "offset", "linebases", "linewidth"],
+    )
+    contig_sizes = [
+        (r["chrom"], int(r["length"]))
+        for r in fai.iter_rows(named=True)
+        if r["chrom"] in set(bed["chrom"].to_list())
+    ]
+
+    # --- track "alpha": one bigwig per sample -------------------------------
+    # bigwig entries must be SORTED and NON-OVERLAPPING. The bed's regions are
+    # 20 bp sliding windows at starts 0,4,...,20, so they overlap heavily --
+    # emitting intervals per region would produce an invalid file that
+    # `addEntries` rejects. Instead tile each contig with disjoint 10 bp bins,
+    # which still covers every region.
+    BIN = 10
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(samples):
+        p = tmp_dir / f"{sample}.alpha.bw"
+        with pyBigWig.open(str(p), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            chroms, starts, ends, values = [], [], [], []
+            for contig, size in contig_sizes:
+                for b, lo in enumerate(range(0, size, BIN)):
+                    hi = min(lo + BIN, size)
+                    chroms.append(contig)
+                    starts.append(lo)
+                    ends.append(hi)
+                    # Distinct per (sample, contig, bin) so a wrong sample, a
+                    # wrong contig, or an off-by-one bin is visible in values.
+                    values.append(
+                        float(10 * (i + 1) + b)
+                        + (0.5 if contig != contig_sizes[0][0] else 0.0)
+                    )
+            bw.addEntries(chroms, starts, ends=ends, values=values)
+        bw_paths[sample] = str(p)
+    alpha = gvl.BigWigs("alpha", bw_paths)
+    superset_paths = {"zz_extra_sample": bw_paths[samples[0]]}
+    superset_paths.update(bw_paths)
+    alpha_superset = gvl.BigWigs("alpha", superset_paths)
+
+    # --- track "zeta": a long-form Table ------------------------------------
+    # Same disjoint binning, different values, so the two tracks are never
+    # confusable with each other. The `1000 * c_idx` term is what makes the
+    # value distinct per (sample, contig, bin): without it, (sample, chr1, b)
+    # and (sample, chr2, b) collide and a Table-path bug that reads the RIGHT
+    # sample and bin from the WRONG contig is invisible to a value check.
+    rows = []
+    for i, sample in enumerate(samples):
+        for c_idx, (contig, size) in enumerate(contig_sizes):
+            for b, lo in enumerate(range(0, size, BIN)):
+                rows.append(
+                    {
+                        "sample_id": sample,
+                        "chrom": contig,
+                        "start": lo,
+                        "end": min(lo + BIN, size),
+                        "value": float(1000 * c_idx + 100 * (i + 1) + b),
+                    }
+                )
+    zeta = gvl.Table("zeta", pl.DataFrame(rows))
+
+    out = tmp_dir / "tracks.gvl"
+    gvl.write(
+        path=out,
+        bed=bed,
+        variants=base.svar_path,
+        # NON-alphabetical on purpose: the written track axis must still be
+        # [alpha, zeta] because Tracks.from_path sorts (_tracks.py:283).
+        tracks=[zeta, alpha],
+        # Parity is gated on these in v1 -- see spec Section 3.2.
+        extend_to_length=False,
+        max_jitter=None,
+    )
+
+    return StreamingTracksFixture(
+        bed=bed,
+        reference_path=base.reference_path,
+        svar_path=base.svar_path,
+        dataset_path=out,
+        bigwigs=alpha,
+        table=zeta,
+        bigwigs_superset=alpha_superset,
+        samples=samples,
+        contigs_list=list(base.contigs),
+    )
