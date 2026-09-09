@@ -1161,20 +1161,52 @@ class StreamingDataset:
                     f"{type(self._backend).__name__}. VCF/PGEN/SVAR2 + track "
                     "re-alignment is a later follow-up (issue #279)."
                 )
-            # No implementation builds tracks output for anything but the bare
-            # haplotype (`RaggedSeqs`) output kind -- annotated/variants/
-            # variant-windows would silently drop the tracks the caller asked
-            # for. Fail fast rather than return wrong output (broader than the
-            # spec's two named guards for `with_seqs("variant-windows")` /
-            # `with_seqs("variants")`: no combination is wired for `tracks=`
-            # yet, so all three non-haplotype kinds are rejected uniformly).
-            if self._track_backend is not None and (
-                _annotated or _variants or _variant_windows
+            # Task 8 (spec §3.3/§8): `with_seqs("variant-windows")` + tracks +
+            # `realign_tracks=True` mirrors the WRITTEN path's own `ValueError`
+            # verbatim (`_reconstruct.py:537-543`) -- windows are
+            # reference-oriented and the written path itself refuses to
+            # re-align them, so this is a real semantic rejection, not a
+            # streaming gap. Exception type matters here: `NotImplementedError`
+            # is not a `ValueError` subclass, so a caller mirroring the written
+            # path's error handling would not catch it.
+            if (
+                self._track_backend is not None
+                and _variant_windows
+                and self._realign_tracks
             ):
+                raise ValueError(
+                    "with_seqs('variant-windows') with tracks requires"
+                    " with_settings(realign_tracks=False) (windows are"
+                    " reference-oriented; re-alignment is not supported)."
+                )
+            # Deviation from the spec §3.3 table's row 2 -- recorded, not
+            # silently dropped: the table also claims `with_seqs("variants")` +
+            # tracks + `realign_tracks=True` raises the written path's
+            # `ValueError`, "same message shape" as variant-windows. Verified
+            # against the actual written path (`_build_reconstructor`,
+            # `_reconstruct.py:514-547`, and confirmed empirically): NEITHER
+            # `with_seqs("variants")` nor `with_seqs("annotated")` has any
+            # guard there for ANY `realign_tracks` value -- both dispatch to
+            # `HapsTracks`/`SeqsTracks` and are fully SUPPORTED by
+            # `Dataset[r, s]` today (`with_insertion_fill`'s own allow-list at
+            # `_impl.py:872` includes "variants" for the same reason). So there
+            # is no written-path `ValueError` to mirror for either kind; both
+            # are purely a streaming wiring gap (the fused kernel below only
+            # assembles bare haplotype bytes) and get `NotImplementedError`
+            # uniformly, independent of `realign_tracks`.
+            if self._track_backend is not None and (_variants or _variant_windows):
                 raise NotImplementedError(
                     "StreamingDataset tracks= combined with "
-                    "with_seqs('annotated'), with_seqs('variants'), or "
-                    "with_seqs('variant-windows') is not yet supported; use "
+                    f"with_seqs({_SEQ_KIND_NAMES.get(self._seq_kind, self._seq_kind)!r}) "
+                    "is not yet wired for streaming (the written Dataset DOES "
+                    "support this combination); use with_seqs('haplotypes') "
+                    "(the default) with tracks=."
+                )
+            if self._track_backend is not None and _annotated:
+                raise NotImplementedError(
+                    "StreamingDataset tracks= combined with "
+                    "with_seqs('annotated') is not yet wired for streaming (the "
+                    "written Dataset DOES support this combination); use "
                     "with_seqs('haplotypes') (the default) with tracks=."
                 )
             # Deliberate seam, NOT covered by any required parity test (the

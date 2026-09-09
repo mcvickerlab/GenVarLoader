@@ -630,30 +630,76 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
     _assert_cell_equal(data[0], expected, ctx=f"cell (r={r}, s={s}): ")
 
 
-def test_mixed_tracks_non_svar1_raises(streaming_case):
+@pytest.mark.parametrize("src", ["vcf", "pgen"])
+def test_mixed_tracks_non_svar1_raises(streaming_case, src):
     """Mixed variants+tracks is SVAR1-ONLY in v1.
 
-    Combining ``tracks=`` with a VCF (or PGEN/SVAR2) variant source must raise
+    Combining ``tracks=`` with a VCF or PGEN variant source must raise
     ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks
-    or produce wrong output.
+    or produce wrong output. Parametrized across both non-SVAR1 backends
+    ``streaming_case`` supports (SVAR2 has its own fixture shape -- see
+    ``test_mixed_tracks_svar2_raises`` -- and SVAR1 is the one backend this
+    guard must NOT fire for, exercised by the parity tests above).
+
+    Sample ids come from the written oracle's own ``samples`` (not a
+    hand-typed guess) so the ``Table`` construction here can't drift out of
+    sync with whichever fixture ``src`` selects.
     """
-    bed, reference, variants, _written = streaming_case("vcf")
+    bed, reference, variants, written = streaming_case(src)
+    samples = list(written.samples)
     table = gvl.Table(
         "t",
         pl.DataFrame(
             {
-                "sample_id": ["s0", "s1", "s2"],
-                "chrom": ["chr1", "chr1", "chr1"],
-                "start": [0, 0, 0],
-                "end": [10, 10, 10],
-                "value": [1.0, 2.0, 3.0],
+                "sample_id": samples,
+                "chrom": ["chr1"] * len(samples),
+                "start": [0] * len(samples),
+                "end": [10] * len(samples),
+                "value": [float(i) for i in range(len(samples))],
             }
         ),
     )
     sds = gvl.StreamingDataset(
         bed, reference=reference, variants=variants, tracks=table
     )
-    with pytest.raises(NotImplementedError, match="SVAR1"):
+    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
+        next(iter(sds.to_iter(batch_size=1)))
+
+
+def test_mixed_tracks_svar2_raises(streaming_svar2_case):
+    """Same guard, SVAR2 source.
+
+    ``streaming_svar2_case`` returns ``(bed, reference, variants)`` -- three
+    values, not ``streaming_case``'s four -- because it has no plain
+    ``gvl.Dataset.open(...)`` oracle wired up (see its docstring in
+    ``conftest.py``), so sample ids are hand-typed from the shared
+    ``_SVAR1_MC_VCF`` fixture text (``S0``/``S1``/``S2``) that
+    ``svar2_multicontig_fixture`` converts, rather than read off a `written`
+    dataset.
+    """
+    bed, reference, variants = streaming_svar2_case
+    # `svar2_multicontig_fixture`'s bed spans BOTH chr1 and chr2 (unlike the
+    # vcf/pgen fixtures above, which are single-contig) -- `_TrackBackend`
+    # validates contig coverage against every contig the bed references, so
+    # the table must cover chr2 too or construction fails before the guard
+    # under test ever runs.
+    samples = ["S0", "S1", "S2"]
+    table = gvl.Table(
+        "t",
+        pl.DataFrame(
+            {
+                "sample_id": samples * 2,
+                "chrom": ["chr1"] * len(samples) + ["chr2"] * len(samples),
+                "start": [0] * len(samples) * 2,
+                "end": [10] * len(samples) * 2,
+                "value": [float(i) for i in range(len(samples) * 2)],
+            }
+        ),
+    )
+    sds = gvl.StreamingDataset(
+        bed, reference=reference, variants=variants, tracks=table
+    )
+    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
         next(iter(sds.to_iter(batch_size=1)))
 
 
@@ -683,3 +729,180 @@ def test_insertion_fill_without_realign_raises(streaming_tracks_fixture):
     ).with_settings(realign_tracks=False)
     with pytest.raises(ValueError, match="no effect when realign_tracks=False"):
         sds.with_insertion_fill(gvl.Repeat5pNormalized())
+
+
+# --- Issue #279 Task 8: guards for unsupported track combinations ---------
+
+
+def test_variant_windows_with_realigned_tracks_raises(streaming_tracks_fixture):
+    """Spec §3.3: a REAL written-path `ValueError`, not a streaming gap.
+
+    `with_seqs("variant-windows")` windows are reference-oriented; the written
+    path's own `_build_reconstructor` (`_reconstruct.py:537-543`) refuses to
+    re-align them for ANY backend, so streaming must raise the exact
+    `ValueError` (not `NotImplementedError`) -- a caller mirroring the written
+    path's error handling needs to catch the same exception type here.
+    """
+    f = streaming_tracks_fixture
+    opt = gvl.VarWindowOpt(flank_length=2, token_alphabet=b"ACGT", unknown_token=4)
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    )
+    with pytest.raises(ValueError, match="realign_tracks"):
+        next(iter(sds.with_seqs("variant-windows", opt).to_iter(batch_size=1)))
+
+
+def test_variant_windows_tracks_realign_false_raises_streaming_gap(
+    streaming_tracks_fixture,
+):
+    """`with_seqs("variant-windows")` + tracks + `realign_tracks=False`.
+
+    The written path SUPPORTS this exact combination (`_build_reconstructor`
+    returns `SeqsTracks` when `realign_tracks` is `False`, per the same
+    `_reconstruct.py:537-543` branch the previous test exercises the other
+    side of); streaming just hasn't wired the fused kernel for anything but
+    bare haplotype output, so this is `NotImplementedError` -- a genuinely
+    different exception from the `ValueError` above, and it must stay that
+    way (asserting `NotImplementedError` here catches a regression that
+    widens the `ValueError` guard to also swallow this supported case).
+    """
+    f = streaming_tracks_fixture
+    opt = gvl.VarWindowOpt(flank_length=2, token_alphabet=b"ACGT", unknown_token=4)
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(realign_tracks=False)
+    with pytest.raises(NotImplementedError, match="variant-windows"):
+        next(iter(sds.with_seqs("variant-windows", opt).to_iter(batch_size=1)))
+
+
+@pytest.mark.parametrize("realign_tracks", [True, False])
+def test_variants_with_tracks_raises_streaming_gap(
+    streaming_tracks_fixture, realign_tracks
+):
+    """`with_seqs("variants")` + tracks: NOT a written-path `ValueError`.
+
+    Deviation from the Task 8 brief / design spec §3.3 table's row 2, recorded
+    at the guard site in `_streaming.py` and here: verified empirically
+    against the actual written `Dataset` (`Dataset.open(...).with_seqs(
+    "variants")[r, s]` with tracks active and `realign_tracks=True` indexes
+    successfully -- no `ValueError` exists in `_build_reconstructor` for this
+    combination, for either `realign_tracks` value; `with_insertion_fill`'s
+    own allow-list at `_impl.py:872` including `"variants"` is independent
+    confirmation). So there is no written-path `ValueError` to mirror here;
+    streaming just hasn't wired the fused kernel for anything but bare
+    haplotype output, hence `NotImplementedError` for BOTH `realign_tracks`
+    values, unlike the "variant-windows" pair of tests above where one side
+    really is a written-path `ValueError`.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(realign_tracks=realign_tracks)
+    with pytest.raises(NotImplementedError, match="variants"):
+        next(iter(sds.with_seqs("variants").to_iter(batch_size=1)))
+
+
+@pytest.mark.parametrize("realign_tracks", [True, False])
+def test_annotated_with_tracks_raises_streaming_gap(
+    streaming_tracks_fixture, realign_tracks
+):
+    """`with_seqs("annotated")` + tracks: also unwired, also no written-path
+    `ValueError` to mirror.
+
+    The SVAR1 `HapsTracks.__call__` this streaming path fuses into has no
+    annotated-specific guard at all (only the separate SVAR2 `_call_svar2`
+    path rejects `RaggedAnnotatedHaps`, and that combination is unreachable
+    here -- mixed tracks are SVAR1-only). So, like `"variants"` above, this is
+    a pure streaming wiring gap: `NotImplementedError` for both
+    `realign_tracks` values.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(realign_tracks=realign_tracks)
+    with pytest.raises(NotImplementedError, match="annotated"):
+        next(iter(sds.with_seqs("annotated").to_iter(batch_size=1)))
+
+
+def test_jitter_with_realigned_tracks_raises(streaming_tracks_fixture):
+    """`jitter>0` + `realign_tracks=True` (the default) has no oracle.
+
+    The deletion-extension track query always sizes itself off
+    `_Svar1Backend.read_window`'s RAW, un-jittered region bounds, while the
+    haplotype engine and the track query itself would use jitter-translated
+    bounds -- silently under-extending the buffer under jitter. The guard for
+    this already exists (`_streaming.py`'s realign_tracks branch just below
+    the SVAR1-only check); this closes the Task 7 review's "currently
+    untested" gap, not a new code change.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(jitter=1)
+    with pytest.raises(NotImplementedError, match="jitter"):
+        next(iter(sds.to_iter(batch_size=1)))
+
+
+def test_jitter_with_unrealigned_tracks_produces_output(streaming_tracks_fixture):
+    """`jitter>0` + `realign_tracks=False` + variants is a LIVE branch.
+
+    Un-realigned tracks stay in reference coordinates, so they need no
+    deletion-extension read-ahead and can safely reuse the SAME
+    jitter-translated bounds the haplotype engine gets (`_streaming.py`'s
+    `region_offsets is not None` branch feeding `t_starts`/`t_ends` when
+    `realign_tracks` is `False`). This is deliberately NOT a byte-parity test
+    -- jitter has no written oracle by design (see `to_iter`'s docstring) --
+    it only asserts the combination actually produces output for every cell
+    instead of raising, catching a regression that widens either jitter guard
+    to also cover this supported branch.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(jitter=1, realign_tracks=False)
+    n_cells = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        assert data.shape[0] == len(r_idx)
+        n_cells += len(r_idx)
+    n_regions, n_samples = sds.shape
+    assert n_cells == n_regions * n_samples
+
+
+def test_realign_false_with_len_matches_written(streaming_tracks_fixture):
+    """`realign_tracks=False` + `with_len(L)` mixed-path parity.
+
+    The one branch that substitutes a FIXED length for the region length
+    (`_streaming.py`'s `isinstance(self._output_length, int)` check inside the
+    `track_w.realign is None` arm) rather than the deletion-extended
+    `out_lengths` the `realign_tracks=True` branch above it uses. Neither
+    `test_realign_false_drops_ploidy_axis` (ragged, no `with_len`) nor
+    `test_fixed_output_length_parity` (`realign_tracks=True`, the default)
+    exercises this combination. `L=12` for the same reason as
+    `test_fixed_output_length_parity`: the fixture's 20bp regions and
+    `extend_to_length=False, max_jitter=None` writing mean the written
+    oracle's own `with_len` guard has no room to serve anything bigger.
+    """
+    f = streaming_tracks_fixture
+    L = 12
+    sds = (
+        gvl.StreamingDataset(
+            f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+        )
+        .with_settings(realign_tracks=False)
+        .with_len(L)
+    )
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_tracks("alpha")
+        .with_settings(realign_tracks=False)
+        .with_len(L)
+    )
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
