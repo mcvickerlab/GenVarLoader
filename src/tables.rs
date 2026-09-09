@@ -6,6 +6,8 @@ use pyo3::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 /// One sample's intervals on one contig, sorted by start.
 #[derive(Default, Clone)]
@@ -21,9 +23,21 @@ struct ContigStore {
     samples: Vec<SampleIntervals>, // indexed by sample_code
 }
 
+/// Cached per-sample COITrees for the most recently queried contig, keyed by
+/// chrom code.
+type TreeCache = Mutex<Option<(usize, Arc<Vec<BasicCOITree<u32, u32>>>)>>;
+
 #[pyclass]
 pub struct RustTable {
     store: Vec<ContigStore>, // indexed by chrom_code (0..n_contigs)
+    /// Most recently queried contig's trees. One slot: `_plan()` is
+    /// contig-run-major in both iteration orders, so a sweep rebuilds each
+    /// contig exactly once. `Mutex` (not `RefCell`) because `#[pyclass]`
+    /// requires `Sync`; this mirrors the codebase's pyclass-mutable-state
+    /// pattern in `src/ffi/stream_core.rs:124`.
+    tree_cache: TreeCache,
+    #[cfg(test)]
+    build_count: std::sync::atomic::AtomicUsize,
 }
 
 impl RustTable {
@@ -49,7 +63,12 @@ impl RustTable {
             cell.ends.push(ends[i]);
             cell.values.push(values[i]);
         }
-        RustTable { store }
+        RustTable {
+            store,
+            tree_cache: Mutex::new(None),
+            #[cfg(test)]
+            build_count: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Build one COITree per sample for `chrom`. Intervals are stored half-open
@@ -66,6 +85,31 @@ impl RustTable {
                 BasicCOITree::new(&ivs)
             })
             .collect()
+    }
+
+    /// Trees for `chrom`, reusing the cached set when it is the same contig.
+    ///
+    /// Returns an `Arc` so the lock is released before querying — a query must
+    /// not hold the cache mutex, or a future track producer thread would
+    /// serialize on it.
+    fn trees_for(&self, chrom: usize) -> Arc<Vec<BasicCOITree<u32, u32>>> {
+        let mut slot = self.tree_cache.lock().unwrap();
+        if let Some((cached_chrom, trees)) = slot.as_ref() {
+            if *cached_chrom == chrom {
+                return Arc::clone(trees);
+            }
+        }
+        #[cfg(test)]
+        self.build_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let trees = Arc::new(self.build_trees(chrom));
+        *slot = Some((chrom, Arc::clone(&trees)));
+        trees
+    }
+
+    #[cfg(test)]
+    fn builds_for_test(&self) -> usize {
+        self.build_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Count interval overlaps for each (region, sample) pair.
@@ -93,7 +137,7 @@ impl RustTable {
         if chrom_code < 0 {
             return out;
         }
-        let trees = self.build_trees(chrom_code as usize);
+        let trees = self.trees_for(chrom_code as usize);
         for (sj, &s) in sel_samples.iter().enumerate() {
             debug_assert!(
                 (s as usize) < trees.len(),
@@ -124,7 +168,7 @@ impl RustTable {
             return (coords, values);
         }
         let chrom = chrom_code as usize;
-        let trees = self.build_trees(chrom);
+        let trees = self.trees_for(chrom);
         let n_sel = sel_samples.len();
         for ri in 0..q_starts.len() {
             for (sj, &s) in sel_samples.iter().enumerate() {
@@ -483,5 +527,28 @@ mod tests {
         // region [0,60) on chr0 with both samples has >=1 interval -> exceeds 1 byte
         let res = t.write_track_impl(&tmp, &[0i32], &[0i32], &[60i32], &[0i32, 1], 1);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_tree_cache_reuses_same_contig() {
+        let t = toy();
+        // Two queries on the same contig must reuse one build.
+        let _ = t.count(0, &[0], &[100], &[0]);
+        let _ = t.count(0, &[0], &[100], &[0]);
+        assert_eq!(t.builds_for_test(), 1, "same contig must build trees once");
+
+        // Switching contigs rebuilds; switching back rebuilds again (one slot).
+        let _ = t.count(1, &[0], &[100], &[0]);
+        assert_eq!(t.builds_for_test(), 2);
+        let _ = t.count(0, &[0], &[100], &[0]);
+        assert_eq!(t.builds_for_test(), 3);
+    }
+
+    #[test]
+    fn test_cache_does_not_change_results() {
+        let t = toy();
+        let a = t.count(0, &[0, 10], &[100, 50], &[0, 1]);
+        let b = t.count(0, &[0, 10], &[100, 50], &[0, 1]);
+        assert_eq!(a, b);
     }
 }
