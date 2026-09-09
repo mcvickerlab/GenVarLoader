@@ -26,7 +26,7 @@ annotated haps, and exonic filtering for non-haplotype outputs.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
@@ -1010,6 +1010,42 @@ class Svar2Haps(Haps[_H]):
                 alt_bytes_sum[qsel] = row_bytes.reshape(len(qsel), P).sum(-1)
 
         return n_vars_total, ref_span_sum, alt_bytes_sum
+
+    def ref_allele_bytes(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> NDArray[np.int64]:
+        """Unsupported: the ``.svar2`` store carries no REF allele bytes.
+
+        The read-bound decode is ALT-only, so there is nothing to measure.
+        :attr:`has_ref_alleles` is ``False`` and callers must gate on it;
+        reaching here means a caller did not.
+
+        Args:
+            idx: Unused.
+            regions: Unused.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError(
+            "the .svar2 store carries no REF allele bytes (has_ref_alleles is False)"
+        )
+
+    def prepare_var_fields(self, var_fields: list[str]) -> "Svar2Haps":
+        """Record ``var_fields``; SVAR2 has no storage to pre-load.
+
+        Field values are read on demand by the decode kernel
+        (``decode_variants_from_svar2_readbound``) straight from the ``.svar2``
+        store, so unlike SVAR1 there are no INFO/dosage/custom-FORMAT columns
+        to memmap ahead of time.
+
+        Args:
+            var_fields: The variant fields the dataset should emit.
+
+        Returns:
+            A new reconstructor with ``var_fields`` set.
+        """
+        return replace(self, var_fields=var_fields)
 
     def _reconstruct_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]

@@ -25,7 +25,6 @@ from ._flat_variants import DummyVariant
 from ._indexing import DatasetIndexer, SpliceIndexer, is_str_arr
 from ._insertion_fill import InsertionFill
 from ._rag_variants import RaggedVariants
-from ._haps import _svar_format_fields
 from ._reconstruct import (
     Haps,
     HapsTracks,
@@ -335,46 +334,11 @@ class Dataset:
             if missing or not isinstance(self._seqs, Haps):
                 raise ValueError(f"Missing variant fields: {missing}")
 
-            from ._svar2_haps import Svar2Haps
-
-            if isinstance(self._seqs, Svar2Haps):
-                # SVAR2 field values are read on demand by the decode kernel
-                # (decode_variants_from_svar2_readbound); there is no SVAR1 variants
-                # table to lazily load INFO/dosage/custom-FORMAT columns from — this
-                # reconstructor's `variants` is a dummy placeholder.
-                haps = replace(
-                    to_evolve.get("_seqs", self._seqs), var_fields=var_fields
-                )
-                to_evolve["_seqs"] = haps
-            else:
-                haps = to_evolve.get("_seqs", self._seqs)
-                # Discover custom FORMAT fields so we don't try to load them as INFO.
-                custom_fmt = _svar_format_fields(haps.variants.path.parent)
-                # Lazily load any newly-requested info columns into the existing
-                # _Variants struct (mutates haps.variants.info in place).
-                builtin = {"alt", "ilen", "start", "ref", "dosage"}
-                new_info_fields = [
-                    f
-                    for f in var_fields
-                    if f not in builtin
-                    and f not in haps.variants.info
-                    and f not in custom_fmt
-                ]
-                if new_info_fields:
-                    haps.variants.load_info(new_info_fields)
-                # Lazily memmap dosages if newly requested.
-                if "dosage" in var_fields and haps.dosages is None:
-                    haps = _lazy_load_dosages(self, haps)
-                # Lazily memmap custom FORMAT fields if newly requested.
-                new_custom_fields = {
-                    f: custom_fmt[f]
-                    for f in var_fields
-                    if f in custom_fmt and f not in haps.var_field_data
-                }
-                if new_custom_fields:
-                    haps = _lazy_load_custom_fields(self, haps, new_custom_fields)
-                haps = replace(haps, var_fields=var_fields)
-                to_evolve["_seqs"] = haps
+            # Each backend knows how (and whether) to make the requested
+            # fields readable: SVAR1 lazily memmaps the columns, SVAR2 reads
+            # them on demand in the decode kernel and only has to record them.
+            haps = to_evolve.get("_seqs", self._seqs)
+            to_evolve["_seqs"] = haps.prepare_var_fields(var_fields)
 
         if splice_info is not None:
             if splice_info is False:
@@ -1443,45 +1407,25 @@ class Dataset:
                 raise AssertionError("variants mode requires Haps")
             haps_obj = self._seqs
             var_fields = haps_obj.var_fields
-            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
-            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
-            n_vars_total = n_vars_flat.sum(-1)  # over ploidy → (n_inst,)
-            ploidy = n_vars.shape[-1]
-            # Real (on-disk) ploidy, NOT `ploidy` above: under unphased_union,
-            # `ploidy` is folded to 1 (see Dataset.n_variants), but
-            # _allele_bytes_sum groups by the STORED genotypes shape (always
-            # the real ploidy, unphased_union-agnostic). Reshaping its
-            # (len(ds_idx) * real_ploidy,) result with the folded `ploidy`
-            # mis-groups it (wrong element count -> ValueError) instead of
-            # summing every real haplotype's contribution into one
-            # per-instance total, which is what unphased_union's un-deduped
-            # union semantics require either way.
-            real_ploidy = haps_obj.stored_ploidy
+            # `ploidy` here is the OUTPUT ploidy axis (folded to 1 under
+            # unphased_union; see Dataset.n_variants), used only for the
+            # per-group offset and dummy-fill accounting below. The payload
+            # measures come from the reconstructor, already summed over the
+            # stored ploidy.
+            ploidy = self.n_variants(regions, samples).shape[-1]
 
-            # Svar2Haps: self.n_variants (-> self.genotypes.lengths) and
-            # _allele_bytes_sum (-> self.genotypes[...]/self.variants.alt) both
-            # read permanently-empty SVAR1-shaped placeholders for this
-            # reconstructor (see Svar2Haps.from_path) -- they are never
-            # populated because svar2 reconstructs read-bound straight from the
-            # on-disk store. Re-derive n_vars_total (and, below, the alt byte
-            # sum) from the SAME per-instance decode
-            # measure_variant_payload/_reconstruct_variants use, instead of
-            # those placeholders (issue #315).
-            from ._svar2_haps import Svar2Haps
-
-            svar2_alt_bytes: NDArray[np.int64] | None = None
-            if isinstance(haps_obj, Svar2Haps):
-                # NB: unlike the reference/track branches, we do NOT widen
-                # regions_arr by self.jitter here. The Svar2Haps read-bound
-                # decode guards jitter>0 (raises NotImplementedError, "right-
-                # clip"; see _svar2_haps.py and its jitter_guard tests), so this
-                # branch only ever runs at jitter=0 and the raw region is the
-                # exact decode window. If that guard is ever lifted (right-clip
-                # added), widen by self.jitter here to keep est an upper bound.
-                regions_arr = self._full_regions[r_idx]
-                n_vars_total, _svar2_ref_span_unused, svar2_alt_bytes = (
-                    haps_obj.measure_variant_payload(ds_idx, regions_arr)
-                )
+            # NB: regions_arr is NOT widened by self.jitter (unlike the
+            # reference/track branches). The SVAR1 measure ignores it outright
+            # -- its genotypes are already grouped by region -- and the
+            # Svar2Haps read-bound decode guards jitter>0 (raises
+            # NotImplementedError, "right-clip"; see _svar2_haps.py and its
+            # jitter_guard tests), so it only ever runs at jitter=0, where the
+            # raw region is the exact decode window. If that guard is lifted,
+            # widen by self.jitter here to keep est an upper bound.
+            regions_arr = self._full_regions[r_idx]
+            n_vars_total, _ref_span_unused, alt_bytes = (
+                haps_obj.measure_variant_payload(ds_idx, regions_arr)
+            )
 
             # "start" is unconditionally emitted by the flat/ragged variant
             # builders regardless of var_fields (see get_variants_flat's
@@ -1499,18 +1443,13 @@ class Dataset:
                         continue
                     dosage_dtype = haps_obj.var_field_dtype("dosage")
                     total += n_vars_total * dosage_dtype.itemsize
-                elif f in ("alt", "ref"):
-                    if svar2_alt_bytes is not None:
-                        # Svar2Haps: "ref" is never in available_var_fields (its
-                        # .variants.ref is always None), so this is always "alt".
-                        assert f == "alt", (
-                            "Svar2Haps does not support the bare 'ref' var_field"
-                        )
-                        total += svar2_alt_bytes
-                    else:
-                        # Allele scan: _allele_bytes_sum returns (len(ds_idx) * real_ploidy,).
-                        per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
-                        total += per_ploid.reshape(-1, real_ploidy).sum(-1)
+                elif f == "alt":
+                    total += alt_bytes
+                elif f == "ref":
+                    # Bare REF allele bytes -- distinct from the ref="window"
+                    # genome span. Only reachable on a backend that stores REF;
+                    # with_seqs/with_var_fields rejects "ref" otherwise.
+                    total += haps_obj.ref_allele_bytes(ds_idx, regions_arr)
                 else:
                     # INFO column: numeric, known dtype -- from the on-disk
                     # schema on SVAR1, from the store manifest on SVAR2.
@@ -1541,14 +1480,10 @@ class Dataset:
             # dummy-variant fill: a (region, sample, ploid) group with 0
             # *post-filter* variants still emits one dummy row when
             # dummy_variant is active (see Haps.dummy_variant /
-            # _FlatVariants.fill_empty_groups). n_vars_total/n_vars_flat above
-            # are *raw on-disk* counts (self.n_variants()), not post-AF-filter
-            # counts -- min_af/max_af can zero out a group that had real
-            # on-disk variants, so "raw count == 0" is NOT a safe test for
-            # "the flat builder will dummy-fill this group". Rather than
-            # re-deriving the exact post-filter empty-group count here (a
-            # second AF-filter pass duplicating the one in
-            # Haps._allele_bytes_sum / the ref="window" span above),
+            # _FlatVariants.fill_empty_groups). n_vars_total above is a
+            # per-instance total already summed over the stored ploidy, so it
+            # cannot say WHICH of an instance's groups came out empty.
+            # Rather than re-deriving the per-group post-filter counts here,
             # conservatively charge the dummy row's cost for *every*
             # (region, sample, ploid) group -- there are exactly `ploidy` such
             # groups per instance. This only ever over-counts (each instance
@@ -1609,111 +1544,25 @@ class Dataset:
             assert opt is not None, "variant-windows requires a VarWindowOpt"
             L = int(opt.flank_length)
             tok_itemsize = np.dtype(haps_obj.token_lut.dtype).itemsize
-            n_vars = self.n_variants(regions, samples)  # (n_inst, ploidy)
-            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
-            n_vars_total = n_vars_flat.sum(-1)
-            ploidy = n_vars.shape[-1]
-            # Real (on-disk) ploidy, NOT `ploidy` above: under unphased_union,
-            # `ploidy` is folded to 1 (see Dataset.n_variants), but
-            # _allele_bytes_sum/genotypes group by the STORED genotypes shape
-            # (always the real ploidy, unphased_union-agnostic). Reshaping
-            # with the folded `ploidy` mis-groups those results (wrong
-            # element count -> ValueError) instead of summing every real
-            # haplotype's contribution into one per-instance total, which is
-            # what unphased_union's un-deduped union semantics require either
-            # way (see the "variants" branch above for the same fix).
-            real_ploidy = haps_obj.stored_ploidy
+            # `ploidy` here is the OUTPUT ploidy axis (folded to 1 under
+            # unphased_union; see Dataset.n_variants), used only for the
+            # per-group offset and dummy-fill accounting below. The payload
+            # measures come from the reconstructor, already summed over the
+            # stored ploidy.
+            ploidy = self.n_variants(regions, samples).shape[-1]
 
-            # Svar2Haps: self.n_variants/self.genotypes/self.variants are
-            # permanently-empty SVAR1-shaped placeholders for this
-            # reconstructor (see Svar2Haps.from_path) -- svar2 reconstructs
-            # read-bound straight from the on-disk store, never populating
-            # them. Re-derive n_vars_total/ref_span/alt_alleles from the SAME
-            # per-instance decode _reconstruct_variant_windows uses, instead of
-            # those placeholders (issue #315). ref="allele" is unreachable
-            # here for Svar2Haps -- with_seqs already rejects it (its
-            # .variants.ref is always None) -- so ref="window" (the ilen-span
-            # branch below) is the only case that needs covering.
-            from ._svar2_haps import Svar2Haps
-
-            if isinstance(haps_obj, Svar2Haps):
-                # NB: not widened by self.jitter (unlike the reference/track
-                # branches) -- the Svar2Haps read-bound decode guards jitter>0
-                # (raises NotImplementedError, "right-clip"; see _svar2_haps.py
-                # and its jitter_guard tests), so this branch only runs at
-                # jitter=0 and the raw region is the exact decode window. If that
-                # guard is lifted, widen by self.jitter here to keep est an
-                # upper bound.
-                regions_arr = self._full_regions[r_idx]
-                n_vars_total, ref_span, alt_alleles = haps_obj.measure_variant_payload(
-                    ds_idx, regions_arr
-                )
-            elif opt.ref == "allele":
-                # alt bytes are always stored on disk (unlike ref); exact sum
-                # reused by both alt="window" (flank5 . alt . flank3) and
-                # alt="allele" (bare alt), same primitive the "variants" branch
-                # uses for alt/ref.
-                alt_alleles = (
-                    haps_obj._allele_bytes_sum(ds_idx, "alt")
-                    .reshape(-1, real_ploidy)
-                    .sum(-1)
-                )
-                # bare REF allele bytes. with_seqs('variant-windows', ...)
-                # already rejects ref="allele" when self.variants.ref is
-                # None, so _allele_bytes_sum is safe to call here.
-                ref_span = (
-                    haps_obj._allele_bytes_sum(ds_idx, "ref")
-                    .reshape(-1, real_ploidy)
-                    .sum(-1)
-                )
-            else:
-                # alt bytes are always stored on disk (unlike ref); exact sum
-                # reused by both alt="window" (flank5 . alt . flank3) and
-                # alt="allele" (bare alt), same primitive the "variants" branch
-                # uses for alt/ref.
-                alt_alleles = (
-                    haps_obj._allele_bytes_sum(ds_idx, "alt")
-                    .reshape(-1, real_ploidy)
-                    .sum(-1)
-                )
-                # ref="window" reads [start-L, end+L) from the *reference
-                # genome*, not the stored REF allele -- which may not even be
-                # present (e.g. an ALT-only Haps, like get_dummy_dataset()).
-                # Its span is derivable exactly from ilen alone: for
-                # normalized bi-allelic records len(REF) - len(ALT) == -ilen,
-                # i.e. span = 1 + max(-ilen, 0), so this doesn't need REF
-                # storage at all.
-                r_idx_grp, s_idx_grp = np.unravel_index(
-                    ds_idx, haps_obj.genotypes.shape[:2]
-                )
-                genos = haps_obj.genotypes[r_idx_grp, s_idx_grp].to_packed()
-                v_idxs = genos.data
-                grp_offsets = np.asarray(genos.offsets, np.int64)
-                if haps_obj.min_af is not None or haps_obj.max_af is not None:
-                    geno_afs = haps_obj.variants.info["AF"][v_idxs]
-                    keep = np.full(len(v_idxs), True, np.bool_)
-                    if haps_obj.min_af is not None:
-                        keep &= geno_afs >= haps_obj.min_af
-                    if haps_obj.max_af is not None:
-                        keep &= geno_afs <= haps_obj.max_af
-                    v_idxs = v_idxs[keep]
-                    keep_csum = np.concatenate(
-                        [
-                            [np.int64(0)],
-                            np.cumsum(keep.astype(np.int64), dtype=np.int64),
-                        ]
-                    )
-                    grp_offsets = keep_csum[grp_offsets]
-                ilen_sel = np.asarray(haps_obj.variants.ilen)[v_idxs].astype(np.int64)
-                span = 1 + np.maximum(-ilen_sel, 0)
-                span_csum = np.concatenate(
-                    [[np.int64(0)], np.cumsum(span, dtype=np.int64)]
-                )
-                ref_span = (
-                    (span_csum[grp_offsets[1:]] - span_csum[grp_offsets[:-1]])
-                    .reshape(-1, real_ploidy)
-                    .sum(-1)
-                )
+            # NB: regions_arr is NOT widened by self.jitter -- see the
+            # "variants" branch above for why.
+            regions_arr = self._full_regions[r_idx]
+            n_vars_total, ref_span, alt_alleles = haps_obj.measure_variant_payload(
+                ds_idx, regions_arr
+            )
+            if opt.ref == "allele":
+                # ref="allele" emits the bare stored REF allele, not the
+                # ref="window" reference-genome span measure_variant_payload
+                # returns. with_seqs('variant-windows', ...) already rejects
+                # ref="allele" on a backend without REF bytes, so this is safe.
+                ref_span = haps_obj.ref_allele_bytes(ds_idx, regions_arr)
             # token count per present window slot: window slots add 2L flank
             # tokens per variant; bare allele slots do not.
             ref_tokens = (
@@ -1765,12 +1614,12 @@ class Dataset:
             # dummy-variant fill (see the "variants" branch above for the
             # full rationale): a group with 0 *post-filter* variants still
             # gets one dummy window/allele entry per window slot when
-            # dummy_variant is active. n_vars_flat is a *raw on-disk* count,
-            # not post-AF-filter, so it cannot safely identify which groups
-            # the flat builder will actually dummy-fill under min_af/max_af.
-            # Conservatively charge every one of the `ploidy` groups/instance
-            # instead of only the raw-empty ones -- a provable upper bound
-            # under any AF-filter config, at the cost of a modest over-count
+            # dummy_variant is active. n_vars_total is summed over the stored
+            # ploidy, so it cannot identify which groups the flat builder will
+            # actually dummy-fill. Conservatively charge every one of the
+            # `ploidy` groups/instance instead of only the empty ones -- a
+            # provable upper bound under any config, at the cost of a modest
+            # over-count
             # (only incurred when dummy_variant is opted in). Window slots
             # (opt.*="window") get a full 2L-flanked dummy window;
             # bare-allele slots (opt.*="allele") get just the dummy allele's
@@ -2138,107 +1987,6 @@ class Dataset:
         # would not survive a spawn.
         with parallel_policy(self.parallel):
             return getitem(view, idx)
-
-
-def _lazy_load_dosages(dataset: Dataset, haps: Haps) -> Haps:
-    """Open the dosages memmap for a Haps that didn't request them at open time.
-
-    Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns
-    a new ``Haps`` with ``dosages`` populated (does NOT mutate the input).
-    """
-    import json as _json
-
-    from genoray._types import DOSAGE_TYPE
-
-    from ._svar_link import _resolve_svar
-    from ._write import Metadata
-
-    path = haps.path
-    svar_meta_path = path / "genotypes" / "svar_meta.json"
-    if not svar_meta_path.exists():
-        raise ValueError(
-            "Dosage requested but this dataset is not SVAR-backed; no dosages.npy possible."
-        )
-
-    with open(svar_meta_path) as f:
-        svar_meta = _json.load(f)
-    shape = tuple(svar_meta["shape"])
-    dtype = np.dtype(svar_meta["dtype"])
-
-    offset_path = path / "genotypes" / "offsets.npy"
-
-    # Resolve the SVAR directory the same way Haps.from_path did. Dataset does
-    # not retain Metadata, so re-read metadata.json from disk.
-    meta = Metadata.model_validate_json((path / "metadata.json").read_text())
-    svar_link = meta.svar_link
-    if svar_link is not None:
-        svar_path = _resolve_svar(path, svar_link, None)
-    else:
-        legacy_link = path / "genotypes" / "link.svar"
-        svar_path = legacy_link.resolve()
-
-    dosage_path = svar_path / "dosages.npy"
-    if not dosage_path.exists():
-        raise ValueError(
-            f"Dosage requested but {dosage_path} does not exist. "
-            f"Check the SVAR was built with dosages."
-        )
-
-    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
-    dosages_mm = np.memmap(dosage_path, dtype=DOSAGE_TYPE, mode="r")
-    rag_shape = (*shape[1:], None)
-    dosages = Ragged.from_offsets(dosages_mm, rag_shape, offsets.reshape(2, -1))
-    return replace(haps, dosages=dosages)
-
-
-def _lazy_load_custom_fields(
-    dataset: Dataset,
-    haps: Haps,
-    new_fields: dict[str, np.dtype],
-) -> Haps:
-    """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into ``haps.var_field_data`` for fields that were not loaded at open time.
-
-    ``new_fields`` maps field name → numpy dtype (already confirmed present in
-    the SVAR metadata). Returns a new ``Haps`` with updated ``var_field_data``.
-    """
-    import json as _json
-
-    path = haps.path
-    svar_meta_path = path / "genotypes" / "svar_meta.json"
-    if not svar_meta_path.exists():
-        raise ValueError(
-            "Custom FORMAT fields requested but this dataset is not SVAR-backed."
-        )
-
-    with open(svar_meta_path) as f:
-        svar_meta = _json.load(f)
-    shape = tuple(svar_meta["shape"])
-    dtype = np.dtype(svar_meta["dtype"])
-
-    offset_path = path / "genotypes" / "offsets.npy"
-
-    # The resolved SVAR directory is already embedded in haps.variants.path
-    # (which was set to <svar_path>/index.arrow by Haps.from_path, respecting any
-    # svar_override). Using .parent avoids re-resolving from metadata and correctly
-    # handles the svar_override case that the legacy link.svar branch would miss.
-    svar_path = haps.variants.path.parent
-
-    offsets = np.memmap(offset_path, shape=shape, dtype=dtype, mode="r")
-    rag_shape = (*shape[1:], None)
-
-    updated_var_field_data = dict(haps.var_field_data)
-    for name, ftype in new_fields.items():
-        field_path = svar_path / f"{name}.npy"
-        if not field_path.exists():
-            raise ValueError(
-                f"Custom FORMAT field '{name}' registered in SVAR metadata but "
-                f"{field_path} does not exist."
-            )
-        field_mm = np.memmap(field_path, dtype=ftype, mode="r")
-        updated_var_field_data[name] = Ragged.from_offsets(
-            field_mm, rag_shape, offsets.reshape(2, -1)
-        )
-    return replace(haps, var_field_data=updated_var_field_data)
 
 
 SEQ = TypeVar("SEQ", NDArray[np.bytes_], AnnotatedHaps, RaggedVariants)
