@@ -1044,7 +1044,7 @@ def test_svar2_variant_windows_unphased_union(
         :, :
     ]
     nd = np.asarray(w2_diploid.ref_window.var_offsets)
-    P = int(ds2._seqs.genotypes.shape[-2])
+    P = int(ds2._seqs.stored_ploidy)
     # Folded per-row counts == sum of the P per-hap counts (rows q*P+p are contiguous).
     diploid_counts = np.diff(nd).reshape(-1, P).sum(1)
     union_counts = np.diff(nu)

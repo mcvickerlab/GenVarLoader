@@ -28,7 +28,8 @@ class _CountingGather:
         self._contigs = contigs
         self.calls = 0
         self._gather_memo = None
-        self.genotypes = type("_G", (), {"shape": (n_regions, n_samples, 2)})()
+        self.n_regions = n_regions
+        self.n_samples = n_samples
 
     _gathered_groups = Svar2Haps._gathered_groups
     _contig_groups = Svar2Haps._contig_groups

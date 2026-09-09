@@ -1,18 +1,23 @@
-"""Haplotype reconstructor + supporting value objects.
+"""Haplotype reconstructor role + the SVAR1 implementation of it.
 
 Houses:
 
-- :class:`_Variants` — internal variant-storage struct.
+- :class:`Haps` — the haplotype-reconstructor *role*: what every backend must
+  answer, and nothing about how any of them stores genotypes.
+- :class:`Svar1Haps` — the SVAR1 implementation: reconstructs haplotype bytes
+  (and optionally per-nucleotide annotations or :class:`RaggedVariants`) from
+  sparse per-region genotypes plus an in-memory variant table. The read-bound
+  sibling is :class:`Svar2Haps` in ``_svar2_haps.py``.
+- :class:`_Variants` — internal variant-storage struct, SVAR1-only.
 - :class:`ReconstructionRequest` — per-batch prep state passed to the kernel-
-  facing reconstruction methods on :class:`Haps`.
-- :class:`Haps` — reconstructs haplotype bytes (and optionally per-nucleotide
-  annotations or :class:`RaggedVariants`) from sparse genotypes.
+  facing reconstruction methods on :class:`Svar1Haps`.
 """
 
 from __future__ import annotations
 
 import json
 import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
@@ -66,14 +71,14 @@ class ReconstructionRequest:
     Describes *what* to reconstruct: which variants apply for each
     ``(region, sample, ploid)`` triple, what shifts to apply, where to write,
     and (optionally) how to splice the output. Produced by
-    :meth:`Haps._prepare_request`; consumed by
-    :meth:`Haps._reconstruct_haplotypes` and
-    :meth:`Haps._reconstruct_annotated_haplotypes`.
+    :meth:`Svar1Haps._prepare_request`; consumed by
+    :meth:`Svar1Haps._reconstruct_haplotypes` and
+    :meth:`Svar1Haps._reconstruct_annotated_haplotypes`.
 
     Decoupled from region-major iteration: a caller (e.g. a future
     variant-major reconstructor) can build a :class:`ReconstructionRequest`
     directly and invoke the kernel-facing methods without going through
-    :meth:`Haps.get_haps_and_shifts`.
+    :meth:`Svar1Haps.get_haps_and_shifts`.
     """
 
     geno_offset_idx: NDArray[np.intp]
@@ -239,7 +244,7 @@ class _HapsFfiStatic:
     """FFI-ready, contiguous, correctly-typed sub-linear arrays consumed by the fused kernels.
 
     Grows only with the variant/reference count (sub-linear in
-    samples), so it is cached for the lifetime of the Haps reconstructor.
+    samples), so it is cached for the lifetime of the Svar1Haps reconstructor.
     """
 
     v_starts: NDArray[np.int32]
@@ -250,32 +255,49 @@ class _HapsFfiStatic:
     ref_offsets: "NDArray[np.int64] | None"
 
 
-@dataclass(slots=True)
-class Haps(Reconstructor[_H]):
+@dataclass(kw_only=True, slots=True)
+class Haps(Reconstructor[_H], ABC):
+    """The haplotype-reconstructor *role*: what every backend must answer.
+
+    Holds only what is true of any haplotype reconstructor -- where the dataset
+    lives, what it is being asked to produce, and which settings shape the
+    output. How the genotypes are stored, and how a haplotype is decoded from
+    them, belongs to the implementations: :class:`Svar1Haps` reads a sparse
+    per-region genotype array plus an in-memory variant table, while
+    :class:`Svar2Haps` decodes read-bound from a ``.svar2`` store and has
+    neither.
+
+    Splitting the two is what keeps a caller from reading storage internals off
+    whatever reconstructor it was handed and silently getting the wrong answer
+    on the other backend (see
+    docs/superpowers/specs/2026-09-08-haps-role-split-design.md). Everything a
+    caller outside this module needs is declared abstract below; anything it
+    cannot get from this class it is not entitled to.
+
+    Fields are keyword-only so implementations can add required fields of their
+    own without having to give them defaults just to follow the role's
+    defaulted ones.
+    """
+
     path: Path
     """The path to the GVL dataset."""
     reference: Reference | None
     """The reference genome. This is kept in memory."""
-    variants: _Variants
-    """The variant sites in the dataset. This is kept in memory."""
-    genotypes: Ragged[V_IDX_TYPE]
-    """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
-    dosages: Ragged[DOSAGE_TYPE] | None
     kind: type[_H]
+    """What to reconstruct: sequences, annotated haplotypes, or variants."""
     filter: Literal["exonic"] | None
-    n_variants: NDArray[np.int32] = field(init=False)
-    """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
+    """Restrict applied variants to those overlapping the query's exons."""
     min_af: float | None
     """The minimum allele frequency to keep."""
     max_af: float | None
     """The maximum allele frequency to keep."""
-    var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
-    var_field_data: dict[str, Ragged] = field(default_factory=dict)
-    """Custom per-call (Number=G) FORMAT fields requested via ``var_fields``,
-    memmapped on the genotype offsets. Parallel to ``dosages``. See issue #231."""
-    dummy_variant: "DummyVariant | None" = None
+    n_variants: NDArray[np.int32] = field(init=False)
+    """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
     available_var_fields: list[str] = field(init=False)
-    _ffi_static: "_HapsFfiStatic | None" = field(default=None, init=False)
+    """Every variant field this dataset could serve, whether or not it is loaded."""
+    var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
+    """The variant fields to emit for ``kind=RaggedVariants``."""
+    dummy_variant: "DummyVariant | None" = None
     flank_length: int | None = None
     """Number of reference flank bases on each side for flank/window tokenization. ``0``/``None`` disables."""
     token_lut: NDArray | None = None
@@ -297,6 +319,259 @@ class Haps(Reconstructor[_H]):
     (union of called ALTs per region/sample) for variant/variant-windows output. Phase is
     discarded; suited to unphased somatic calls. Set via ``with_settings(unphased_union=True)``.
     See issue #222."""
+
+    # ---- backend-agnostic query surface ----
+    #
+    # These describe the dataset, not the storage layout, so every caller in
+    # ``_impl.py`` / ``_reconstruct.py`` can ask a ``Haps`` about it without
+    # reaching into one backend's fields. Each member exists because some
+    # caller was already doing exactly that.
+
+    @property
+    @abstractmethod
+    def stored_ploidy(self) -> int:
+        """Ploidy as laid out on disk, ignoring any ``unphased_union`` folding.
+
+        Distinct from :attr:`Dataset.ploidy`, which reports ``1`` under
+        ``unphased_union``. Grouping that is keyed on the stored layout must use
+        this.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def has_ref_alleles(self) -> bool:
+        """Whether REF allele bytes are available (needed by ``ref='allele'``)."""
+        ...
+
+    @property
+    @abstractmethod
+    def has_dosages(self) -> bool:
+        """Whether per-call dosages can be emitted for ``var_fields=['dosage']``."""
+        ...
+
+    @abstractmethod
+    def var_field_dtype(self, field: str) -> np.dtype:
+        """The numpy dtype of per-variant *scalar* field ``field``.
+
+        Args:
+            field: A scalar variant field: ``"start"``, ``"ilen"``, ``"dosage"``,
+                or the name of a numeric INFO / per-call FORMAT field.
+
+        Returns:
+            The field's numpy dtype.
+
+        Raises:
+            KeyError: If ``field`` is unknown, or is one of the variable-length
+                allele fields ``"alt"``/``"ref"``, which have no scalar dtype --
+                callers size those from their actual byte payload instead.
+        """
+        ...
+
+    @abstractmethod
+    def measure_variant_payload(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]:
+        """Per-instance variant count, ref-window span, and ALT-allele byte sum.
+
+        The single counting entry point behind
+        ``Dataset._output_bytes_per_instance``'s ``"variants"`` and
+        ``"variant-windows"`` branches, so those branches never have to know
+        which backend they are sizing.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(len(idx), 3)`` array of ``(contig_id, start, end)``.
+
+        Returns:
+            ``(n_vars_total, ref_span_sum, alt_bytes_sum)``, each shape
+            ``(len(idx),)`` int64 and summed over ploidy.
+        """
+        ...
+
+    @abstractmethod
+    def ref_allele_bytes(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> NDArray[np.int64]:
+        """Per-instance sum of bare REF allele byte lengths.
+
+        Distinct from :meth:`measure_variant_payload`'s ``ref_span_sum``, which
+        measures the ``ref="window"`` reference-genome span. Only callable when
+        :attr:`has_ref_alleles` is true; callers must gate on it.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(len(idx), 3)`` array of ``(contig_id, start, end)``.
+
+        Returns:
+            Shape ``(len(idx),)`` int64, summed over ploidy.
+        """
+        ...
+
+    @abstractmethod
+    def prepare_var_fields(self, var_fields: list[str]) -> "Haps[_H]":
+        """Record ``var_fields``, loading whatever storage they need.
+
+        Callers validate membership in ``available_var_fields`` first.
+
+        Args:
+            var_fields: The variant fields the dataset should emit.
+
+        Returns:
+            A new reconstructor with ``var_fields`` set and its backing storage
+            loaded.
+        """
+        ...
+
+    @abstractmethod
+    def _haplotype_ilens(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        deterministic: bool,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.integer] | None = None,
+    ) -> NDArray[np.int32]:
+        """``(B, P)`` per-haplotype length deltas vs the reference. ``idx`` must be 1D."""
+        ...
+
+    @abstractmethod
+    def haplotype_lengths_for_plan(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+    ) -> NDArray[np.int32]:
+        """``(B, P)`` per-query haplotype lengths, without running the full reconstruction.
+
+        Used by the spliced path to size buffers and build a ``SplicePlan``
+        before the kernel is invoked.
+        """
+        ...
+
+    @abstractmethod
+    def get_haps_and_shifts(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        output_length: Literal["ragged", "variable"] | int,
+        rng: np.random.Generator,
+        deterministic: bool,
+        splice_plan: SplicePlan | None = None,
+        to_rc: "NDArray[np.bool_] | None" = None,
+    ) -> tuple[
+        _H,
+        NDArray[np.intp],
+        NDArray[np.int32],
+        NDArray[np.int32],
+        NDArray[np.int32],
+        NDArray[np.bool_] | None,
+        NDArray[np.int64] | None,
+    ]:
+        """Reconstruct the batch and return it with the per-batch state tracks need.
+
+        Returns:
+            ``(out, geno_offset_idx, shifts, diffs, hap_lengths, keep,
+            keep_offsets)``.
+        """
+        ...
+
+    # ---- haplotype-realigned tracks ----
+    #
+    # ``HapsTracks.__call__`` runs one body for every backend and reaches the
+    # backend only through these two members.
+
+    def check_track_realign_support(
+        self,
+        output_length: Literal["ragged", "variable"] | int,
+        splice_plan: SplicePlan | None,
+        to_rc: NDArray[np.bool_] | None,
+        ragged_tracks: bool,
+    ) -> None:
+        """Reject request shapes this backend cannot realign tracks for.
+
+        The base implementation rejects only what no backend can serve;
+        override to add further limits.
+
+        Args:
+            output_length: The requested output length.
+            splice_plan: The requested splice plan, if any.
+            to_rc: Per-query reverse-complement mask, if any.
+            ragged_tracks: Whether the tracks are being realigned at all
+                (False means the caller returns stored intervals untouched, so
+                realign-only limits do not apply).
+
+        Raises:
+            NotImplementedError: If this backend cannot serve the request.
+        """
+        del output_length, to_rc, ragged_tracks
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
+                "supported."
+            )
+
+    @abstractmethod
+    def track_realigner(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        shifts: NDArray[np.int32],
+        geno_idx: NDArray[np.integer],
+        track_lengths: NDArray[np.integer],
+        out_offsets: NDArray[np.integer],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.integer] | None,
+        to_rc: NDArray[np.bool_] | None,
+        base_seed: int,
+    ) -> TrackRealigner:
+        """Prepare the per-batch state for filling realigned track blocks.
+
+        Args:
+            idx: Flat ``(region, sample)`` dataset indices for the batch.
+            regions: ``(b, 3)`` contig/start/end of each query.
+            shifts: ``(b, p)`` per-haplotype jitter shifts.
+            geno_idx: ``(b, p)`` indices into the sparse genotype offsets.
+            track_lengths: ``(b,)`` reference span each track block is read over.
+            out_offsets: ``(b*p+1,)`` per-haplotype offsets into one track's block.
+            keep: Optional per-variant keep mask (``filter='exonic'``).
+            keep_offsets: Offsets into ``keep``.
+            to_rc: Per-query reverse-complement mask, if any.
+            base_seed: Seed for seed-dependent insertion fills.
+
+        Returns:
+            A realigner whose ``fill`` writes one track at a time.
+        """
+        ...
+
+    def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
+        """A copy of this reconstructor producing ``kind`` instead."""
+        if kind != RaggedVariants and self.reference is None:
+            raise ValueError(
+                f"Cannot return {kind.__name__}: no reference genome was provided."
+            )
+        return cast(Haps[_NewH], replace(self, kind=kind))
+
+
+@dataclass(kw_only=True, slots=True)
+class Svar1Haps(Haps[_H]):
+    """The SVAR1 haplotype reconstructor: sparse per-region genotypes + a variant table.
+
+    Genotypes are stored once per ``(region, sample, ploid)`` as a ragged array
+    of variant indices into an in-memory :class:`_Variants` table, so every
+    query is a gather over arrays that are already grouped the way the query
+    asks for them. :class:`Svar2Haps` is the read-bound sibling; the role they
+    share is :class:`Haps`.
+    """
+
+    variants: _Variants
+    """The variant sites in the dataset. This is kept in memory."""
+    genotypes: Ragged[V_IDX_TYPE]
+    """Shape: (regions, samples, ploidy). The genotypes in the dataset. This is memory mapped."""
+    dosages: Ragged[DOSAGE_TYPE] | None
+    var_field_data: dict[str, Ragged] = field(default_factory=dict)
+    """Custom per-call (Number=G) FORMAT fields requested via ``var_fields``,
+    memmapped on the genotype offsets. Parallel to ``dosages``. See issue #231."""
+    _ffi_static: "_HapsFfiStatic | None" = field(default=None, init=False)
 
     def __post_init__(self):
         self.n_variants = self.genotypes.lengths
@@ -330,13 +605,7 @@ class Haps(Reconstructor[_H]):
                 + "Doing this automatically is not yet supported."
             )
 
-    # ---- backend-agnostic query surface ----
-    #
-    # These describe the dataset, not the storage layout, so every caller in
-    # ``_impl.py`` / ``_reconstruct.py`` can ask a ``Haps`` about it without
-    # reaching into SVAR1-specific fields (``genotypes``, ``variants``). Each
-    # member exists because some caller was already doing exactly that. See
-    # docs/superpowers/specs/2026-09-08-haps-role-split-design.md.
+    # ---- backend-agnostic query surface (see Haps) ----
 
     @property
     def stored_ploidy(self) -> int:
@@ -434,7 +703,7 @@ class Haps(Reconstructor[_H]):
 
     @classmethod
     def from_path(
-        cls: type[Haps[RaggedVariants]],
+        cls: type[Svar1Haps[RaggedVariants]],
         path: Path,
         reference: Reference | None,
         regions: NDArray[np.int32],
@@ -447,7 +716,7 @@ class Haps(Reconstructor[_H]):
         max_af: float | None = None,
         filter: Literal["exonic"] | None = None,
         var_fields: list[str] | None = None,
-    ) -> Haps[RaggedVariants]:
+    ) -> Svar1Haps[RaggedVariants]:
         # Default var_fields for loading. var_fields=None means "use the default
         # set" — we resolve it here so we know exactly which info columns to load.
         if var_fields is None:
@@ -637,13 +906,6 @@ class Haps(Reconstructor[_H]):
         )
         hap_lengths = lengths[:, None] + diffs
         return hap_lengths.astype(np.int32, copy=False)
-
-    def to_kind(self, kind: type[_NewH]) -> Haps[_NewH]:
-        if kind != RaggedVariants and self.reference is None:
-            raise ValueError(
-                f"Cannot return {kind.__name__}: no reference genome was provided."
-            )
-        return cast(Haps[_NewH], replace(self, kind=kind))
 
     def __call__(
         self,
@@ -986,7 +1248,7 @@ class Haps(Reconstructor[_H]):
             self._allele_bytes_sum(idx, "ref").reshape(-1, self.stored_ploidy).sum(-1)
         )
 
-    def prepare_var_fields(self, var_fields: list[str]) -> "Haps[_H]":
+    def prepare_var_fields(self, var_fields: list[str]) -> "Svar1Haps[_H]":
         """Record ``var_fields``, loading whatever storage they need.
 
         SVAR1 keeps its INFO columns, dosages and custom FORMAT fields in
@@ -1029,37 +1291,6 @@ class Haps(Reconstructor[_H]):
         return replace(haps, var_fields=var_fields)
 
     # ---- haplotype-realigned tracks ----
-    #
-    # ``HapsTracks.__call__`` runs one body for every backend and reaches the
-    # backend only through these two members. See
-    # docs/superpowers/specs/2026-09-08-haps-role-split-design.md.
-
-    def check_track_realign_support(
-        self,
-        output_length: Literal["ragged", "variable"] | int,
-        splice_plan: SplicePlan | None,
-        to_rc: NDArray[np.bool_] | None,
-        ragged_tracks: bool,
-    ) -> None:
-        """Reject request shapes this backend cannot realign tracks for.
-
-        Args:
-            output_length: The requested output length.
-            splice_plan: The requested splice plan, if any.
-            to_rc: Per-query reverse-complement mask, if any.
-            ragged_tracks: Whether the tracks are being realigned at all
-                (False means the caller returns stored intervals untouched, so
-                realign-only limits do not apply).
-
-        Raises:
-            NotImplementedError: If this backend cannot serve the request.
-        """
-        del output_length, to_rc, ragged_tracks
-        if splice_plan is not None:
-            raise NotImplementedError(
-                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
-                "supported."
-            )
 
     def track_realigner(
         self,
@@ -1431,7 +1662,7 @@ class _Svar1TrackRealigner:
     track instead of once per batch was measurably wasteful.
     """
 
-    haps: "Haps"
+    haps: "Svar1Haps"
     regions: NDArray[np.int32]
     shifts: NDArray[np.int32]
     geno_offset_idx: NDArray[np.int64]
@@ -1485,11 +1716,11 @@ class _Svar1TrackRealigner:
         )
 
 
-def _lazy_load_dosages(haps: Haps) -> Haps:
-    """Open the dosages memmap for a Haps that didn't request them at open time.
+def _lazy_load_dosages(haps: Svar1Haps) -> Svar1Haps:
+    """Open the dosages memmap for a Svar1Haps that didn't request them at open time.
 
-    Reuses the same path-resolution logic that ``Haps.from_path`` used. Returns
-    a new ``Haps`` with ``dosages`` populated (does NOT mutate the input).
+    Reuses the same path-resolution logic that ``Svar1Haps.from_path`` used. Returns
+    a new ``Svar1Haps`` with ``dosages`` populated (does NOT mutate the input).
     """
     import json as _json
 
@@ -1512,7 +1743,7 @@ def _lazy_load_dosages(haps: Haps) -> Haps:
 
     offset_path = path / "genotypes" / "offsets.npy"
 
-    # Resolve the SVAR directory the same way Haps.from_path did. Dataset does
+    # Resolve the SVAR directory the same way Svar1Haps.from_path did. Dataset does
     # not retain Metadata, so re-read metadata.json from disk.
     meta = Metadata.model_validate_json((path / "metadata.json").read_text())
     svar_link = meta.svar_link
@@ -1537,13 +1768,13 @@ def _lazy_load_dosages(haps: Haps) -> Haps:
 
 
 def _lazy_load_custom_fields(
-    haps: Haps,
+    haps: Svar1Haps,
     new_fields: dict[str, np.dtype],
-) -> Haps:
+) -> Svar1Haps:
     """Memmap custom FORMAT fields (Number=G, stored as <name>.npy) into ``haps.var_field_data`` for fields that were not loaded at open time.
 
     ``new_fields`` maps field name → numpy dtype (already confirmed present in
-    the SVAR metadata). Returns a new ``Haps`` with updated ``var_field_data``.
+    the SVAR metadata). Returns a new ``Svar1Haps`` with updated ``var_field_data``.
     """
     import json as _json
 
@@ -1562,7 +1793,7 @@ def _lazy_load_custom_fields(
     offset_path = path / "genotypes" / "offsets.npy"
 
     # The resolved SVAR directory is already embedded in haps.variants.path
-    # (which was set to <svar_path>/index.arrow by Haps.from_path, respecting any
+    # (which was set to <svar_path>/index.arrow by Svar1Haps.from_path, respecting any
     # svar_override). Using .parent avoids re-resolving from metadata and correctly
     # handles the svar_override case that the legacy link.svar branch would miss.
     svar_path = haps.variants.path.parent

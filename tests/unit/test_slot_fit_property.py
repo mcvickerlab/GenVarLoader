@@ -15,7 +15,10 @@ from genvarloader._slot_overhead import slot_overhead_bytes
 def _views(ds):
     DNA = sp.alphabets.DNA
     for ref, alt in [("window", "window"), ("window", "allele"), ("allele", "allele")]:
-        if ref == "allele" and getattr(ds._seqs.variants, "ref", None) is None:
+        # Ask the reconstructor, not its storage: SVAR2 has no variant table to
+        # reach into, and the whole point of the role split is that this
+        # question has one backend-agnostic answer.
+        if ref == "allele" and not ds._seqs.has_ref_alleles:
             continue
         for uu in (True, False):
             for L in (8, 128):

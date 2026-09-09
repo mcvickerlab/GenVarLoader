@@ -325,7 +325,7 @@ def test_get_variants_flat_fills_empty_groups():
 
     NOTE: snap_dataset fixture is NOT visible from tests/unit/dataset/ (it lives
     in tests/dataset/conftest.py, a sibling not a parent). Per plan fallback,
-    this test builds a minimal synthetic Haps with controlled empty groups.
+    this test builds a minimal synthetic Svar1Haps with controlled empty groups.
     Full integration coverage is deferred to Task 5.
     """
     from dataclasses import replace
@@ -335,7 +335,7 @@ def test_get_variants_flat_fills_empty_groups():
     from seqpro.rag import Ragged
 
     from genvarloader._dataset._flat_variants import DummyVariant, get_variants_flat
-    from genvarloader._dataset._haps import Haps, _Variants
+    from genvarloader._dataset._haps import Svar1Haps, _Variants
     from genvarloader._dataset._rag_variants import RaggedVariants
     from genvarloader._variants._records import RaggedAlleles
 
@@ -363,7 +363,7 @@ def test_get_variants_flat_fills_empty_groups():
     offsets = np.array([0, 1, 1, 3, 3], np.int64)
     genotypes = Ragged.from_offsets(v_idxs, (2, 2, 1, None), offsets)
 
-    haps = Haps(
+    haps = Svar1Haps(
         path=Path("dummy"),
         reference=None,
         variants=variants,

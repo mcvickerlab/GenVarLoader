@@ -11,7 +11,7 @@ from natsort import natsorted
 from ._dataset._impl import RaggedDataset
 from ._dataset._indexing import DatasetIndexer, SpliceIndexer
 from ._dataset._intervals import tracks_to_intervals
-from ._dataset._reconstruct import Haps, HapsTracks, Tracks, TrackType, _Variants
+from ._dataset._reconstruct import HapsTracks, Svar1Haps, Tracks, TrackType, _Variants
 from ._dataset._reference import Reference
 from ._dataset._splice import SpliceMap
 from ._dataset._utils import bed_to_regions
@@ -110,7 +110,7 @@ def get_dummy_dataset(spliced: bool = False):
         offsets=np.arange(0, 4 * 4 + 1, dtype=np.int64),  # every entry has 1 variant
     )
 
-    dummy_haps = Haps(
+    dummy_haps = Svar1Haps(
         path=Path("dummy"),
         reference=dummy_ref,
         variants=dummy_vars,

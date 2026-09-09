@@ -648,8 +648,8 @@ def test_svar2_output_bytes_per_instance_with_store_field(
     sizing path, ``_torch.py``'s ``_resolve_buffered_inputs`` ->
     ``get_dataloader(mode=...)``) must not crash when an INFO/FORMAT store
     field is requested. Before the fix, its ``else`` branch always did
-    ``haps_obj.variants.info[f].dtype`` -- but ``Svar2Haps.variants`` is the
-    dummy placeholder with ``info={}``, so any store field name raised
+    ``haps_obj.variants.info[f].dtype`` -- an SVAR1-only lookup that ``Svar2Haps``
+    answered from an empty placeholder, so any store field name raised
     ``KeyError`` there, turning a previously-working path into a crash.
     """
     import genoray
@@ -683,9 +683,8 @@ def test_svar2_output_bytes_per_instance_variant_windows_with_store_field(
     for the "variant-windows" output kind.
 
     The "variants" branch's ``else`` clause (INFO/store field dtype lookup)
-    was already guarded for ``Svar2Haps`` (whose ``.variants.info`` is an
-    empty placeholder -- store field dtypes live on ``.store_fields``
-    instead). The final-review pass found that the newer "variant-windows"
+    was already guarded for ``Svar2Haps`` (which has no variant table at all --
+    store field dtypes live on ``.store_fields`` instead). The final-review pass found that the newer "variant-windows"
     branch's scalar-field loop and its ``dummy_variant`` sub-branch did the
     SAME unguarded ``haps_obj.variants.info[f].dtype`` lookup with no such
     guard, so requesting a store field (e.g. "AF"/"NS"/"DP", all legal via

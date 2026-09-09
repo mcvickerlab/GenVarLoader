@@ -20,7 +20,7 @@ from loguru import logger
 from numpy.typing import NDArray
 
 from ._indexing import DatasetIndexer
-from ._reconstruct import Haps, Ref, Tracks, _build_reconstructor
+from ._reconstruct import Haps, Ref, Svar1Haps, Tracks, _build_reconstructor
 from ._reference import Reference
 from ._utils import bed_to_regions
 from ._validate import validate_dataset
@@ -204,7 +204,7 @@ class OpenRequest:
                     var_fields=self.var_fields,
                 )
             else:
-                seqs = Haps.from_path(
+                seqs = Svar1Haps.from_path(
                     path=self.path,
                     reference=reference,
                     regions=regions,

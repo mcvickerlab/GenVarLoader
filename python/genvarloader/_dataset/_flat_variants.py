@@ -33,7 +33,7 @@ from ..genvarloader import rc_alleles as _rc_alleles_rust_kernel
 from ._genotypes import _as_starts_stops
 
 if TYPE_CHECKING:
-    from ._haps import Haps
+    from ._haps import Svar1Haps
 
 
 @dataclass(frozen=True)
@@ -867,9 +867,9 @@ def _rc_alleles_rust(byte_data, seq_offsets, var_offsets, to_rc_row):
 
 
 def get_variants_flat(
-    haps: "Haps", idx: NDArray[np.integer], regions=None
+    haps: "Svar1Haps", idx: NDArray[np.integer], regions=None
 ) -> "_FlatVariants | _FlatVariantWindows":
-    """Flat-buffer analog of :meth:`Haps._get_variants`: builds a :class:`_FlatVariants` on the pure-numpy hot path.
+    """Flat-buffer analog of :meth:`Svar1Haps._get_variants`: builds a :class:`_FlatVariants` on the pure-numpy hot path.
 
     Re-wrapping the result via :meth:`_FlatVariants.to_ragged` is byte-identical
     to the :class:`RaggedVariants` produced by ``_get_variants``.
