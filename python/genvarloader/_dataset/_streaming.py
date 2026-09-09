@@ -208,7 +208,8 @@ class StreamingDataset:
 
     Two ways to construct:
 
-    - Public API: ``StreamingDataset(regions, reference=..., variants=<path>)``.
+    - Public API: ``StreamingDataset(regions, reference=..., variants=<path>,
+      tracks=...)``. At least one of ``variants`` or ``tracks`` is required.
       ``variants`` is classified by path suffix, mirroring :func:`gvl.write`'s
       classification (``_write.py``): a ``.svar`` directory (a genoray
       ``SparseVar``/SVAR1 store), a ``.svar2`` directory (a genoray
@@ -216,6 +217,15 @@ class StreamingDataset:
       supported. ``jitter>0`` (a per-region reproducible read-window
       translation) is supported with the default ``"engine"`` prefetch
       strategy -- see :meth:`to_iter`'s docstring for the rng contract.
+      ``tracks`` (an :class:`~genvarloader._types.IntervalTrack`, e.g.
+      :class:`~genvarloader.BigWigs` or :class:`~genvarloader.Table`, or a
+      sequence of them) is optional and composes with ``variants``: supplied
+      alone, the dataset is tracks-only (no ``reference``/``variants`` needed,
+      no ploidy axis, and :meth:`with_seqs` raises); supplied alongside
+      ``variants``, both sources are attached to the same dataset. When
+      ``variants`` is omitted, ``contigs``/``samples`` are derived from the
+      tracks' own intersection instead of a variant source (mirroring
+      :func:`gvl.write`'s sample-intersection rule).
     - Internal/test-oriented: ``StreamingDataset(regions, contigs=..., n_samples=...,
       ploidy=..., _reconstruct_window=...)`` injects a reconstruction callback
       directly, bypassing variant-source classification. Used by
@@ -434,6 +444,11 @@ class StreamingDataset:
                 contigs = sorted(
                     set.intersection(*(set(t.contigs) for t in _track_list))
                 )
+                if not contigs:
+                    raise ValueError(
+                        "Tracks share no contigs; a tracks-only StreamingDataset"
+                        " needs at least one contig common to every track."
+                    )
             if samples is None:
                 samples = sorted(
                     set.intersection(*(set(t.samples) for t in _track_list))
@@ -1505,7 +1520,10 @@ class StreamingDataset:
                 (``.svar2``) backend (not yet wired; see the SVAR1/VCF/PGEN
                 engines).
             ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
-                supplied for any other ``kind``.
+                supplied for any other ``kind``. Also raised if this
+                ``StreamingDataset`` has no variant source at all (tracks-only
+                construction, i.e. ``variants=`` was never supplied) --
+                ``with_seqs`` has nothing to reconstruct from.
         """
         if self._backend is None and self._reconstruct_window is None:
             # Tracks-only: no variant source to reconstruct from (never true of

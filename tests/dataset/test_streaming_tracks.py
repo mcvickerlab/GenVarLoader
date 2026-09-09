@@ -190,33 +190,95 @@ def test_with_seqs_on_tracks_only_raises(streaming_tracks_fixture):
         sds.with_seqs("haplotypes")
 
 
+def test_tracks_only_samples_are_track_intersection(streaming_tracks_fixture):
+    """Section 8 "strict superset" row: sample identity is the INTERSECTION
+
+    across every track, not the union or either track's raw list.
+    `bigwigs_superset` deliberately carries one extra sample
+    (`zz_extra_sample`) that `table` does not; with two tracks passed, only
+    a real intersection (not a union, and not "just the first track's
+    samples") produces the right answer, so this is the coverage a
+    single-track test cannot provide.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=[f.bigwigs_superset, f.table])
+    assert sds.samples == sorted(f.samples)
+    assert "zz_extra_sample" not in sds.samples
+
+
+def _plan_seq(sds) -> list[tuple[int, int]]:
+    """Flatten `_plan()` into the same per-cell `(bed_row, sample_idx)`
+
+    sequence `to_iter()` emits (see `_iter_batches`'s `flat_r`/`flat_s`
+    construction: `np.repeat(sort_order[r_idx], n_s)` /
+    `np.tile(s_idx, len(r_idx))`, i.e. r outer, s inner).
+    """
+    seq = []
+    for r_idx, s_idx in sds._plan():
+        for r in r_idx:
+            for s in s_idx:
+                seq.append((int(sds._sort_order[r]), int(s)))
+    return seq
+
+
+def _to_iter_seq(sds) -> list[tuple[int, int]]:
+    seq = []
+    for _data, r_idx, s_idx in sds.to_iter(batch_size=1, return_indices=True):
+        seq.extend(zip(map(int, r_idx), map(int, s_idx)))
+    return seq
+
+
 def test_mixed_iteration_order_samples_drives_to_iter_end_to_end(
     streaming_tracks_fixture,
 ):
     """Close the Task 4 carry-forward gap: `iteration_order="samples"` must be
 
     exercised through the real drive (`_iter_batches`/`to_iter`), not only
-    through `_plan()`. Task 4 could only test `_plan()` directly because
-    `"auto"` never resolved to `"samples"` (the `has_tracks` placeholder was
-    always `False`); now that a real source mix can request it explicitly
-    (independent of `"auto"` resolution), drive the SVAR1 engine end-to-end
-    under sample-major order and confirm the emitted cell SET is still the
-    full cartesian product, forcing both axes to chunk so the two orders'
-    visit sequences actually differ.
+    through `_plan()`. A cell-SET check alone cannot distinguish "samples"
+    from "regions" -- both orders visit the same set by construction
+    (`test_both_orders_visit_the_same_windows`, Task 4) -- so this asserts
+    on the emitted SEQUENCE: each order's real `to_iter()` output must match
+    what `_plan()` alone predicts for that SAME order (proving the real
+    engine drive genuinely honors `_iteration_order`, not just `_plan()` in
+    isolation or a drive that silently ignores it), and the two orders'
+    sequences must differ from each other while visiting the identical cell
+    set. Both axes are forced to chunk (`_window_samples`=`_window_regions`=1`)
+    so the two orders are guaranteed to diverge in sequence (mirrors
+    `test_orders_differ_in_sequence_when_samples_chunk`, Task 4).
     """
     f = streaming_tracks_fixture
-    sds = gvl.StreamingDataset(
-        f.bed,
-        reference=f.reference_path,
-        variants=f.svar_path,
-        tracks=f.bigwigs,
-        iteration_order="samples",
-    )
-    assert sds._iteration_order == "samples"
-    object.__setattr__(sds, "_window_samples", 1)
-    object.__setattr__(sds, "_window_regions", 1)
-    n_regions, n_samples = sds.shape
-    seen = set()
-    for _data, r_idx, s_idx in sds.to_iter(batch_size=1, return_indices=True):
-        seen.update(zip(map(int, r_idx), map(int, s_idx)))
-    assert seen == {(r, s) for r in range(n_regions) for s in range(n_samples)}
+
+    def _make(order):
+        sds = gvl.StreamingDataset(
+            f.bed,
+            reference=f.reference_path,
+            variants=f.svar_path,
+            tracks=f.bigwigs,
+            iteration_order=order,
+        )
+        object.__setattr__(sds, "_window_samples", 1)
+        object.__setattr__(sds, "_window_regions", 1)
+        return sds
+
+    samples_sds = _make("samples")
+    regions_sds = _make("regions")
+    assert samples_sds._iteration_order == "samples"
+    assert regions_sds._iteration_order == "regions"
+
+    samples_actual = _to_iter_seq(samples_sds)
+    regions_actual = _to_iter_seq(regions_sds)
+
+    # The real to_iter() drive matches what _plan() predicts for its OWN
+    # order -- the drive isn't silently reordering or ignoring the plan.
+    assert samples_actual == _plan_seq(samples_sds)
+    assert regions_actual == _plan_seq(regions_sds)
+
+    # Both orders visit the same SET of cells...
+    n_regions, n_samples = samples_sds.shape
+    full = {(r, s) for r in range(n_regions) for s in range(n_samples)}
+    assert set(samples_actual) == set(regions_actual) == full
+
+    # ...but the real drive's emitted SEQUENCE genuinely differs by order --
+    # the assertion a cell-set-only check (or an ignored `_iteration_order`)
+    # would fail to catch.
+    assert samples_actual != regions_actual
