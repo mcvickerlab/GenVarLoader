@@ -248,14 +248,28 @@ avoid — and is deferred with its own issue.
 ### 3.3 Guards mirrored from `_build_reconstructor`
 
 `with_seqs` accepts `"variants"` and `"variant-windows"` (`_streaming.py:1368-70`), so
-these combinations are reachable and must raise the written path's exact `ValueError`s
-(`_reconstruct.py:522-546`):
+these combinations are reachable. Where the written path rejects one, streaming must
+raise its exact `ValueError`; where the written path *serves* one that streaming has
+not wired, streaming raises `NotImplementedError` and says so.
 
-| Combination | Written behaviour |
-|---|---|
-| `with_seqs("variant-windows")` + tracks + `realign_tracks=True` | `ValueError`, `_reconstruct.py:538-543` |
-| `with_seqs("variants")` + tracks + `realign_tracks=True` | `ValueError`, same message shape |
-| interval-kind tracks + `realign_tracks=True` | `ValueError`, `_reconstruct.py:527-533` |
+| Combination | Written behaviour | Streaming |
+|---|---|---|
+| `with_seqs("variant-windows")` + tracks + `realign_tracks=True` | `ValueError`, `_reconstruct.py:538-543` | same `ValueError` |
+| `with_seqs("variant-windows")` + tracks + `realign_tracks=False` | supported (`SeqsTracks`) | `NotImplementedError` (unwired) |
+| `with_seqs("variants")` + tracks, either `realign_tracks` | supported (`HapsTracks` / `SeqsTracks`) | `NotImplementedError` (unwired) |
+| `with_seqs("annotated")` + tracks, either `realign_tracks` | supported | `NotImplementedError` (unwired) |
+| interval-kind tracks + `realign_tracks=True` | `ValueError`, `_reconstruct.py:527-533` | unreachable in v1 (no `kind=` option; see below) |
+
+> **Correction (Task 8, verified against the code).** This table's first draft claimed
+> `with_seqs("variants")` + tracks + `realign_tracks=True` raises a `ValueError` "of the
+> same message shape" as the `variant-windows` guard. **It does not.** `_build_reconstructor`
+> guards only `"variant-windows"` (`_reconstruct.py:537-544`); the `"variants"` case falls
+> through to `return HapsTracks(haps=s, tracks=t)` and succeeds. Confirmed empirically
+> against a real written `gvl.Dataset` (both `with_seqs("variants")[r, s]` and
+> `with_seqs("annotated")[r, s]` return output with tracks active), and corroborated by
+> `Dataset.with_insertion_fill`'s own allow-list (`_impl.py:872`), which includes
+> `"variants"`. Streaming therefore raises `NotImplementedError` for these — inventing a
+> `ValueError` would misrepresent a written-path rejection that does not exist.
 
 v1 emits only float (`RaggedTracks`) output; a `kind="intervals"` streaming option is
 deferred (§9), so the third row is a construction-time rejection.
