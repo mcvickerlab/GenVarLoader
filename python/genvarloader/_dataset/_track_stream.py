@@ -147,11 +147,29 @@ class _TrackBackend:
 
         out: list[RaggedIntervals] = []
         for track in self._tracks:
-            counts = track.count_intervals(contig, starts, ends, sample=names)
+            # Clamp to the track's OWN contig length. `ends` may have been
+            # extended past the region end to read ahead for deletions (issue
+            # #279 spec section 3.2), and that extension can run off the contig.
+            # Clamping MATCHES the written path rather than diverging from it:
+            # `gvl.write` clamps `gvl_bed` at write time, so a written dataset
+            # has no interval data past the contig end either. Done per track,
+            # not once per window, because two tracks may disagree about a
+            # contig's length and each must be queried within its own bounds.
+            t_contig = normalize_contig_name(contig, track.contigs)
+            if t_contig is None:  # pragma: no cover - validated in __init__
+                raise AssertionError(
+                    f"track {track.name!r} lost contig {contig!r} after"
+                    " construction-time validation"
+                )
+            t_ends = np.minimum(ends, np.int32(track.contigs[t_contig]))
+            # A region starting at or past the contig end would otherwise
+            # produce an inverted query; keep the interval empty instead.
+            t_ends = np.ascontiguousarray(np.maximum(t_ends, starts), np.int32)
+            counts = track.count_intervals(contig, starts, t_ends, sample=names)
             offsets = lengths_to_offsets(np.asarray(counts).ravel())
             out.append(
                 track._intervals_from_offsets(
-                    contig, starts, ends, offsets, sample=names
+                    contig, starts, t_ends, offsets, sample=names
                 )
             )
         return out

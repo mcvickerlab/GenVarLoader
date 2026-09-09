@@ -338,7 +338,10 @@ def _realigned_tracks_from_intervals(
     (`repeat(out_lengths, "b p -> b t p")`), so the claimed layout and the
     physical layout only agree when `batch == 1` -- the only way the written
     path's `Dataset[r, s]` oracle ever reaches it (see `_tracks_from_intervals`,
-    which fixes the same defect for the un-realigned case). Streaming yields
+    which fixes the same defect for the un-realigned case). That written-path
+    defect is runtime-verified and filed as issue #371 -- batched
+    `Dataset[r_arr, s_arr]` attaches tracks to the wrong rows whenever
+    `n_tracks > 1`; do not "fix" streaming to match it. Streaming yields
     real batches, so this reorders the track-major buffer into `(b, t, p)`
     order before labelling it, generalizing `_tracks_from_intervals`'s 2-D
     `(t, b) -> (b, t)` transpose to the 3-D `(t, b, p) -> (b, t, p)` case.
@@ -409,6 +412,13 @@ def _realigned_tracks_from_intervals(
 
     geno_offset_idx = np.ascontiguousarray(geno_offset_idx, np.int64)
     geno_offsets = np.ascontiguousarray(geno_offsets, np.int64)
+    # All-zero shifts is correct ONLY because streaming never sets
+    # `deterministic=False`: the written path draws nonzero shifts exclusively
+    # when a fixed output length is combined with non-deterministic sampling
+    # (`_haps.py:740-742`), and `to_iter`'s docstring records `deterministic` as
+    # having no observable effect here. Wiring `deterministic=False` without
+    # also wiring these shifts would silently produce wrong bytes, so change
+    # both together or neither.
     shifts = np.zeros((batch, ploidy), np.int32)
     offset_idxs = np.ascontiguousarray(offset_idxs, np.int64)
 
@@ -1652,20 +1662,24 @@ class StreamingDataset:
                                         ],
                                         axis=1,
                                     ).astype(np.int32)
-                                    # Any deterministic seed works: every
-                                    # insertion-fill strategy exercised by
-                                    # parity tests (Repeat5p,
-                                    # Repeat5pNormalized) ignores it; only
-                                    # `FlankSample` draws from it, and
-                                    # streaming's rng contract for tracks is
-                                    # not byte-parity-gated on that strategy.
-                                    _seed_r = flat_r[lo:hi].astype(np.uint64)
-                                    _seed_s = flat_s[lo:hi].astype(np.uint64)
-                                    base_seed = int(
-                                        np.bitwise_xor.reduce(
-                                            (_seed_r << np.uint64(32)) ^ _seed_s
-                                        )
-                                    )
+                                    # The written path's own formula, verbatim:
+                                    # xor-reduce of the dataset-global ravel
+                                    # index (`_reconstruct.py:216-218`). Only
+                                    # `FlankSample` reads this seed -- every
+                                    # strategy the parity tests exercise
+                                    # (Repeat5p, Repeat5pNormalized) ignores it
+                                    # -- but matching the formula costs nothing
+                                    # and removes a gratuitous divergence. Exact
+                                    # `FlankSample` parity remains unattainable
+                                    # in ANY batched path, written or streaming,
+                                    # because the kernel also mixes in the
+                                    # batch-local query index
+                                    # (`src/tracks/mod.rs:583-590`) and the
+                                    # `Dataset[r, s]` oracle always has query 0.
+                                    _idx = flat_r[lo:hi].astype(np.uint64) * np.uint64(
+                                        self.n_samples
+                                    ) + flat_s[lo:hi].astype(np.uint64)
+                                    base_seed = int(np.bitwise_xor.reduce(_idx))
                                     out = _realigned_tracks_from_intervals(
                                         track_w.itvs,
                                         track_w.names,
@@ -1729,6 +1743,20 @@ class StreamingDataset:
                 # bounds through without a backend signature change. This experimental,
                 # non-default toggle (issue #283 A-vs-C measurement) is out of scope
                 # for that change; fail fast rather than silently ignoring jitter.
+                # Tracks are wired into the "engine" drive only; this branch
+                # yields haplotypes and would drop them entirely -- silently
+                # wrong output, the failure mode every other guard here exists
+                # to prevent. Unreachable through the public API
+                # (`_prefetch_strategy` is backend-derived), but the A-vs-C
+                # bench harness sets it via `object.__setattr__`.
+                if self._track_backend is not None:
+                    raise NotImplementedError(
+                        "StreamingDataset tracks= is only supported with the "
+                        'default "engine" prefetch strategy; the experimental '
+                        '"readahead" toggle has no track path and would yield '
+                        "haplotypes alone. Do not set tracks= with "
+                        '_prefetch_strategy="readahead".'
+                    )
                 if self._jitter > 0:
                     raise NotImplementedError(
                         "StreamingDataset read-time jitter (jitter>0) is only "
@@ -1969,6 +1997,18 @@ class StreamingDataset:
         Yields:
             ``(data, region_idxs, sample_idxs)`` when ``return_indices`` is ``True``,
             otherwise ``data`` alone.
+
+        **Tracks** (``tracks=``): when tracks are active, ``data`` is the tracks
+        ALONE -- never a ``(haplotypes, tracks)`` pair, even when a variant source
+        and a reference are both present. This differs deliberately from written
+        ``gvl.Dataset[r, s]``, which returns both halves. With variants and the
+        default ``realign_tracks=True`` the tracks are re-aligned to haplotype
+        coordinates and carry a ploidy axis, shape
+        ``(batch, n_tracks, ploidy, None)``; with ``realign_tracks=False`` they
+        stay in reference coordinates and drop it, ``(batch, n_tracks, None)``;
+        without variants the shape is ``(batch, n_tracks, None)``. The track axis
+        is ordered by track NAME (never ``tracks=`` argument order) and is never
+        squeezed -- a single track still yields a length-1 axis.
 
         **Read-time jitter** (``jitter>0``, set via ``with_settings``):
         When ``jitter>0``, each region's read window is translated by an integer
@@ -2280,18 +2320,35 @@ class StreamingDataset:
             A new :class:`StreamingDataset` with the strategy set.
 
         Raises:
-            ValueError: If ``fill`` is a mapping whose keys don't exactly match
-                the dataset's track names.
+            ValueError: If the dataset has no tracks, if ``realign_tracks`` is
+                ``False`` (the strategy would have no effect), or if ``fill`` is
+                a mapping whose keys don't exactly match the track names.
         """
         from ._insertion_fill import InsertionFill
 
         tb = self._track_backend
-        names = list(tb.names) if tb is not None else []
+        # Spec section 3.1: raise the written path's `ValueError`s
+        # (`_impl.py:872-889`) rather than silently accepting a setting that
+        # cannot change any byte -- the same fail-fast contract the
+        # `var_fields` and `min_af`/`max_af` guards in this file enforce.
+        if tb is None:
+            raise ValueError(
+                "with_insertion_fill requires tracks; there are none on this"
+                " StreamingDataset. Pass tracks= at construction first."
+            )
+        if not self._realign_tracks:
+            raise ValueError(
+                "with_insertion_fill has no effect when realign_tracks=False"
+                " (insertion fill only applies while re-aligning tracks to"
+                " haplotype coordinates). Use"
+                " with_settings(realign_tracks=True) first, or drop the call."
+            )
+        names = list(tb.names)
         if isinstance(fill, InsertionFill):
             resolved = {name: fill for name in names}
         else:
             fill_names = set(fill)
-            if tb is not None and fill_names != set(names):
+            if fill_names != set(names):
                 missing = set(names) - fill_names
                 extra = fill_names - set(names)
                 raise ValueError(

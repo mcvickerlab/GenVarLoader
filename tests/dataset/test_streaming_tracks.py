@@ -655,3 +655,31 @@ def test_mixed_tracks_non_svar1_raises(streaming_case):
     )
     with pytest.raises(NotImplementedError, match="SVAR1"):
         next(iter(sds.to_iter(batch_size=1)))
+
+
+def test_insertion_fill_without_tracks_raises(streaming_tracks_fixture):
+    """Spec §3.1: `with_insertion_fill` on a track-less dataset is an error.
+
+    The written path (`_impl.py:872-889`) rejects this; streaming must too.
+    Silently returning a dataset with an empty fill map is the "accepts a
+    setting that cannot change any byte" failure mode the rest of this class
+    guards against.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, reference=f.reference_path, variants=f.svar_path)
+    with pytest.raises(ValueError, match="requires tracks"):
+        sds.with_insertion_fill(gvl.Repeat5pNormalized())
+
+
+def test_insertion_fill_without_realign_raises(streaming_tracks_fixture):
+    """Spec §3.1: insertion fill has no effect when `realign_tracks=False`.
+
+    Insertion fill only applies while re-aligning tracks to haplotype
+    coordinates, so accepting it with re-alignment off would silently no-op.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(realign_tracks=False)
+    with pytest.raises(ValueError, match="no effect when realign_tracks=False"):
+        sds.with_insertion_fill(gvl.Repeat5pNormalized())
