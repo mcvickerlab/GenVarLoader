@@ -357,3 +357,67 @@ def test_tracks_only_superset_matches_by_name(streaming_tracks_fixture):
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+@pytest.mark.parametrize("length", [5, 20])
+def test_tracks_only_with_len_matches_written(streaming_tracks_fixture, length):
+    """`with_len(L)` must agree with the written path cell-for-cell.
+
+    Covers the fixed-`output_length` branch of the tracks-only drive, which the
+    ragged-default tests never reach. Two lengths on purpose: one SHORTER than
+    the regions (exercising truncation) and one EQUAL to them (the boundary).
+
+    A length LONGER than the region is deliberately not tested: the written
+    path refuses it outright (`ValueError: Jitter-expanded output length ...`)
+    because this fixture writes with `extend_to_length=False, max_jitter=None`
+    and so holds no padding to serve it from. There is therefore no oracle to
+    compare against, and no divergence to detect.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=[f.table, f.bigwigs]).with_len(length)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs(None)
+        .with_settings(realign_tracks=False)
+        .with_len(length)
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            streamed = np.asarray(data[i])
+            assert streamed.shape[-1] == length, "with_len must fix the last axis"
+            np.testing.assert_array_equal(streamed, np.asarray(written[r, s]))
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+def test_read_window_rejects_empty_regions(streaming_tracks_fixture):
+    """The empty-`r_idx` guard raises a clear error, not an opaque IndexError.
+
+    `_plan()` never yields an empty window, so this is only reachable by calling
+    `read_window` directly -- which is exactly why it needs its own test rather
+    than riding along on the parity tests.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    tb = sds._track_backend
+    assert tb is not None
+    with pytest.raises(ValueError, match="r_idx is empty"):
+        tb.read_window(np.empty(0, np.intp), np.array([0], np.intp))
+
+
+def test_tracks_only_rejects_jitter(streaming_tracks_fixture):
+    """Jitter on a tracks-only dataset fails fast instead of reading unjittered.
+
+    There is no variant engine to derive translated bounds from, and
+    `read_window`'s contract requires the caller to supply them, so silently
+    reading the un-translated bounds would emit wrong data.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs).with_settings(jitter=1)
+    with pytest.raises(NotImplementedError, match="jitter"):
+        next(iter(sds.to_iter(batch_size=1)))

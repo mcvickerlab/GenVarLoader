@@ -229,10 +229,10 @@ def _tracks_from_intervals(
     Args:
         per_track: One `RaggedIntervals` per track, name-sorted, each flattened
             to the WHOLE window's `(row,)` cells -- not pre-sliced to the batch.
-            Slicing a `RaggedIntervals` by row range yields 2-D start/stop
-            offset pairs rather than the 1-D cumulative offsets the kernel
-            needs, so the batch is selected via `offset_idxs` instead, exactly
-            as the written path selects rows with `o_idx`.
+            The batch is selected with `offset_idxs`, which is the mechanism
+            `_call_float32` itself uses (its `o_idx` indexes the un-sliced
+            interval array), and which avoids a redundant reshape-and-slice per
+            batch.
         offset_idxs: `(batch,)` int64 row indices into `per_track`, selecting
             this batch's cells out of the window.
         starts: `(batch,)` int32 query starts, one per row.
@@ -858,6 +858,18 @@ class StreamingDataset:
         if self._backend is None and self._track_backend is not None:
             # Tracks-only: no variant engine, so drive the plan directly. The
             # window is the read granularity; batches slice it.
+            if self._jitter > 0:
+                # `read_window`'s contract is that jittered reads must be given
+                # the SAME translated bounds the variant engine got. There is no
+                # variant engine here to derive them from, so fail fast rather
+                # than silently reading unjittered bounds -- the same choice the
+                # SVAR2 and non-"engine"-prefetch guards make in this file.
+                raise NotImplementedError(
+                    "Read-time jitter (jitter>0) is not yet supported for"
+                    " tracks-only StreamingDatasets: there is no variant engine"
+                    " to derive translated region bounds from. Use jitter=0, or"
+                    " supply `variants=` as well."
+                )
             tb = self._track_backend
             for r_idx, s_idx in self._plan():
                 per_track = tb.read_window(r_idx, s_idx)
@@ -874,12 +886,11 @@ class StreamingDataset:
                 # arange. `output_length` is applied here when it is an int.
                 if isinstance(self._output_length, int):
                     lengths = np.full(len(lengths), self._output_length, np.int64)
-                # Flatten to `(row, None)` ONCE per window. Do NOT slice these
-                # per batch: slicing a `RaggedIntervals` by row range returns
-                # 2-D start/stop offset pairs, not the 1-D cumulative offsets
-                # `intervals_to_tracks` requires. Select the batch's rows with
-                # `offset_idxs` instead -- the same mechanism the written path
-                # uses (`_tracks.py`'s `o_idx`).
+                # Flatten to `(row, None)` ONCE per window, then select each
+                # batch's rows with `offset_idxs` rather than re-slicing the
+                # intervals. This is the mechanism the written path uses
+                # (`_tracks.py`'s `o_idx` indexes the un-sliced array) and it
+                # keeps the per-batch work to one kernel call per track.
                 flat_itvs = [itvs.reshape((n_rows, None)) for itvs in per_track]  # type: ignore[bad-argument-type]  # RaggedIntervals.reshape's hint doesn't literally permit None in the tuple
                 for lo in range(0, n_rows, batch_size):
                     hi = min(lo + batch_size, n_rows)
