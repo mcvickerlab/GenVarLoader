@@ -4,7 +4,7 @@ import gzip
 import shutil
 import subprocess
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 
 import typer
 from loguru import logger
@@ -22,6 +22,14 @@ ZENODO_BCF_URL = "https://zenodo.org/records/20132907/files/1kgp.thin.bcf"
 ZENODO_CSI_URL = "https://zenodo.org/records/20132907/files/1kgp.thin.bcf.csi"
 ZENODO_BCF_MD5 = "md5:3bdfed585e4a6b2a51c49d1d7dc7124f"
 ZENODO_CSI_MD5 = "md5:8f190a43294404ca320b45a05851d56a"
+
+# Zenodo intermittently 504s or stalls mid-transfer. Every CI job fetches this
+# file, so a degraded window used to turn all of them red at once; see issue
+# #370. CI also caches the download (.github/workflows/test.yaml), which makes
+# these retries the cold-cache path rather than the common one.
+ZENODO_ATTEMPTS = 5
+ZENODO_TIMEOUT_S = 120
+ZENODO_BACKOFF_S = 5
 
 # Minimal hg38 reference: just chr21 + chr22 (the only contigs the 1kg slow
 # tier touches). Built from UCSC single-chromosome FASTAs so the 1kg tests can
@@ -54,11 +62,53 @@ def run_shell(
 
 
 def fetch_zenodo(url: str, known_hash: str, fname: str) -> Path:
+    """Download one pinned Zenodo file, retrying through transient outages.
+
+    Returns immediately when the file is already present and matches
+    ``known_hash`` -- which is what makes the CI cache of
+    ``tests/data/1kg/source.bcf*`` effective.
+
+    Args:
+        url: Zenodo file URL.
+        known_hash: Pinned ``md5:...`` hash; pooch verifies against it.
+        fname: Destination filename under :data:`ONE_KG_DIR`.
+
+    Returns:
+        Path to the downloaded (or already-cached) file.
+
+    Raises:
+        RuntimeError: If every attempt fails.
+    """
     import pooch
 
-    return Path(
-        pooch.retrieve(url, known_hash=known_hash, fname=fname, path=ONE_KG_DIR)
-    )
+    downloader = pooch.HTTPDownloader(timeout=ZENODO_TIMEOUT_S)
+    last_err: Exception | None = None
+    for attempt in range(1, ZENODO_ATTEMPTS + 1):
+        try:
+            return Path(
+                pooch.retrieve(
+                    url,
+                    known_hash=known_hash,
+                    fname=fname,
+                    path=ONE_KG_DIR,
+                    downloader=downloader,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 -- retry any transport failure
+            last_err = e
+            if attempt == ZENODO_ATTEMPTS:
+                break
+            delay = ZENODO_BACKOFF_S * 2 ** (attempt - 1)
+            logger.warning(
+                f"Zenodo fetch of {fname} failed"
+                f" (attempt {attempt}/{ZENODO_ATTEMPTS}): {e}."
+                f" Retrying in {delay}s."
+            )
+            sleep(delay)
+    raise RuntimeError(
+        f"Could not fetch {url} after {ZENODO_ATTEMPTS} attempts."
+        " Zenodo may be degraded; see issue #370."
+    ) from last_err
 
 
 def provision_minimal_hg38() -> Path:

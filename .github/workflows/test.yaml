@@ -38,6 +38,19 @@ jobs:
           # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
           # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
           key: hg38-chr21chr22-c979ca1e-05f9d97d
+      - name: Cache 1kg source BCF
+        uses: actions/cache@v4
+        with:
+          # Only the raw Zenodo downloads, not the whole 1kg directory: the
+          # derived artifacts alongside them (normalized BCF, PGEN, SVAR,
+          # written datasets) are rebuilt from this source by
+          # generate_1kg_ground_truth.py and must not be restored from a key
+          # that only tracks the source's hashes.
+          path: |
+            tests/data/1kg/source.bcf
+            tests/data/1kg/source.bcf.csi
+          # Keyed on the pinned Zenodo md5s; bump if those change.
+          key: 1kg-source-bcf-3bdfed58-8f190a43
       - name: Test
         run: pixi run -e ${{ matrix.environment }} test
 
@@ -64,6 +77,19 @@ jobs:
           # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
           # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
           key: hg38-chr21chr22-c979ca1e-05f9d97d
+      - name: Cache 1kg source BCF
+        uses: actions/cache@v4
+        with:
+          # Only the raw Zenodo downloads, not the whole 1kg directory: the
+          # derived artifacts alongside them (normalized BCF, PGEN, SVAR,
+          # written datasets) are rebuilt from this source by
+          # generate_1kg_ground_truth.py and must not be restored from a key
+          # that only tracks the source's hashes.
+          path: |
+            tests/data/1kg/source.bcf
+            tests/data/1kg/source.bcf.csi
+          # Keyed on the pinned Zenodo md5s; bump if those change.
+          key: 1kg-source-bcf-3bdfed58-8f190a43
       - name: Run pytest with polars join order perturbed
         run: pixi run -e py312 test-join-audit
 
@@ -90,6 +116,19 @@ jobs:
           # tests/data/generate_1kg_ground_truth.py::provision_minimal_hg38.
           # Keyed on the pinned UCSC chr21/chr22 sha256s; bump if those change.
           key: hg38-chr21chr22-c979ca1e-05f9d97d
+      - name: Cache 1kg source BCF
+        uses: actions/cache@v4
+        with:
+          # Only the raw Zenodo downloads, not the whole 1kg directory: the
+          # derived artifacts alongside them (normalized BCF, PGEN, SVAR,
+          # written datasets) are rebuilt from this source by
+          # generate_1kg_ground_truth.py and must not be restored from a key
+          # that only tracks the source's hashes.
+          path: |
+            tests/data/1kg/source.bcf
+            tests/data/1kg/source.bcf.csi
+          # Keyed on the pinned Zenodo md5s; bump if those change.
+          key: 1kg-source-bcf-3bdfed58-8f190a43
       - name: Run pytest with coverage
         run: pixi run -e py312 test-cov
       - name: Upload HTML coverage report
