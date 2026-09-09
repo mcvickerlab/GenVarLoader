@@ -282,3 +282,78 @@ def test_mixed_iteration_order_samples_drives_to_iter_end_to_end(
     # the assertion a cell-set-only check (or an ignored `_iteration_order`)
     # would fail to catch.
     assert samples_actual != regions_actual
+
+
+def test_tracks_only_parity(streaming_tracks_fixture):
+    """Tracks WITHOUT variants: intervals_to_tracks, no realignment."""
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=[f.table, f.bigwigs])
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs(None)
+        .with_settings(realign_tracks=False)
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            streamed = data[i]
+            expected = written[r, s]
+            assert streamed.shape[0] == 2, "track axis is never squeezed"
+            np.testing.assert_array_equal(np.asarray(streamed), np.asarray(expected))
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+def test_single_track_keeps_its_axis(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    data, _r, _s = next(iter(sds.to_iter(batch_size=1, return_indices=True)))
+    assert data[0].shape[0] == 1, "one track must still be (1, ...), not squeezed"
+
+
+def test_tracks_only_superset_matches_by_name(streaming_tracks_fixture):
+    """Arms the positional-sample-matching trap.
+
+    `bigwigs_superset` has an extra sample (`zz_extra_sample`) inserted
+    BEFORE the dataset's real samples in dict-insertion order. If the
+    tracks-only drive ever matched samples by position instead of by name,
+    every real sample's values would silently shift by one. Restrict the
+    written side to just `alpha` (`bigwigs_superset` only carries that
+    track) so the comparison is apples-to-apples.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs_superset)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs(None)
+        .with_settings(realign_tracks=False)
+        .with_tracks("alpha")
+    )
+
+    # The streaming side legitimately carries the superset's OWN samples --
+    # a single track's "intersection" is itself -- so it has one more sample
+    # than the written dataset, and at a different position. Translate through
+    # names, never positions: that is precisely the property under test.
+    written_pos = {name: i for i, name in enumerate(written.samples)}
+    assert "zz_extra_sample" in sds.samples, (
+        "the superset's extra sample must survive tracks-only construction"
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            name = sds.samples[s]
+            if name not in written_pos:
+                continue
+            streamed = data[i]
+            expected = written[r, written_pos[name]]
+            np.testing.assert_array_equal(np.asarray(streamed), np.asarray(expected))
+            seen.add((r, written_pos[name]))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }

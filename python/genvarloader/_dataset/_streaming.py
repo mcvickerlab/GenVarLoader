@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     import torch.utils.data as td
     import genoray
 
+    from .._ragged import RaggedIntervals, RaggedTracks
     from .._types import IntervalTrack
     from ._flat_variants import VarWindowOpt
     from ._track_stream import _TrackBackend
@@ -200,6 +201,82 @@ def _declared_info_numeric_dtypes(vcf: "genoray.VCF") -> dict[str, bool]:
         # Flag/String/Character: not numeric, excluded (matches
         # `_Variants.available_info_fields`'s `v.is_numeric()` filter).
     return out
+
+
+def _tracks_from_intervals(
+    per_track: "list[RaggedIntervals]",
+    offset_idxs: NDArray[np.int64],
+    starts: NDArray[np.int32],
+    lengths: NDArray[np.int64],
+) -> "RaggedTracks":
+    """Rasterize one batch's intervals into a `(batch, n_tracks, None)` Ragged.
+
+    Mirrors `Tracks._call_float32`'s rasterization (`_tracks.py:388-419`): each
+    track fills its own contiguous `n_per_track` block with a single vectorized
+    `intervals_to_tracks` call. The per-cell VALUES are what byte-parity is
+    defined over, and those come from the kernel calls -- do not change them.
+
+    It deliberately does NOT copy that function's final assembly step. The
+    written path builds a track-major buffer but labels it with
+    `lengths_to_offsets(repeat(lengths, "b -> b t"))`, whose flattened cumsum
+    is `(b, t)`-ordered. Track-major `(t, b)` and interleaved `(b, t)` agree
+    only when `batch == 1`, which is the only way the written path is ever
+    reached in the parity oracle (`Dataset[r, s]` indexes one cell). Streaming
+    yields real batches, so this reorders the track-major buffer into `(b, t)`
+    order before labelling it. Copying the written assembly verbatim here
+    produced track `t`'s row `b+1` where row `b`'s track `t+1` belonged.
+
+    Args:
+        per_track: One `RaggedIntervals` per track, name-sorted, each flattened
+            to the WHOLE window's `(row,)` cells -- not pre-sliced to the batch.
+            Slicing a `RaggedIntervals` by row range yields 2-D start/stop
+            offset pairs rather than the 1-D cumulative offsets the kernel
+            needs, so the batch is selected via `offset_idxs` instead, exactly
+            as the written path selects rows with `o_idx`.
+        offset_idxs: `(batch,)` int64 row indices into `per_track`, selecting
+            this batch's cells out of the window.
+        starts: `(batch,)` int32 query starts, one per row.
+        lengths: `(batch,)` int64 output length, one per row.
+
+    Returns:
+        A `RaggedTracks` of shape `(batch, n_tracks, None)`.
+    """
+    from .._ragged import RaggedTracks
+    from .._utils import lengths_to_offsets
+    from ._intervals import intervals_to_tracks
+    from ._svar2_haps import _ragged_arange_gather
+
+    n_tracks = len(per_track)
+    batch = len(lengths)
+    ofsts_per_t = lengths_to_offsets(lengths)
+    n_per_track = int(ofsts_per_t[-1])
+    out = np.empty(n_tracks * n_per_track, np.float32)
+
+    for t, itvs in enumerate(per_track):
+        intervals_to_tracks(
+            offset_idxs=offset_idxs,
+            starts=starts,
+            itv_starts=itvs.starts.data,
+            itv_ends=itvs.ends.data,
+            itv_values=itvs.values.data,
+            itv_offsets=itvs.starts.offsets,
+            out=out[t * n_per_track : (t + 1) * n_per_track],
+            out_offsets=ofsts_per_t,
+        )
+
+    # `out` is now TRACK-major: block `t` holds every row of track `t`, so its
+    # flat row order is `(t, b)`. A `(b, t, None)` Ragged indexes element
+    # `b * n_tracks + t`, i.e. `(b, t)` order. Those two coincide only when
+    # `batch == 1`, which is why the written path (whose oracle is indexed one
+    # cell at a time) never surfaces the difference -- see the module note in
+    # `_tracks_from_intervals`'s docstring. Reorder once, vectorized.
+    tm_offsets = lengths_to_offsets(np.tile(np.asarray(lengths), n_tracks))
+    k = np.arange(batch * n_tracks)
+    perm = (k % n_tracks) * batch + (k // n_tracks)
+    data, out_offsets = _ragged_arange_gather(out, tm_offsets, perm)
+
+    result = Ragged.from_offsets(data, (batch, n_tracks, None), out_offsets)  # type: ignore[bad-argument-type, no-matching-overload]  # shape tuple carries an explicit None for the ragged axis
+    return cast(RaggedTracks, result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,6 +855,43 @@ class StreamingDataset:
         injected `_reconstruct_window` path (tests) reconstructs the whole window and
         slices -- memory-unbounded, but only ever used with tiny fixtures.
         """
+        if self._backend is None and self._track_backend is not None:
+            # Tracks-only: no variant engine, so drive the plan directly. The
+            # window is the read granularity; batches slice it.
+            tb = self._track_backend
+            for r_idx, s_idx in self._plan():
+                per_track = tb.read_window(r_idx, s_idx)
+                n_s = len(s_idx)
+                flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                flat_s = np.tile(np.asarray(s_idx, np.intp), len(r_idx))
+                n_rows = len(flat_r)
+                starts = self._regions[r_idx, 1]
+                ends = self._regions[r_idx, 2]
+                flat_starts = np.repeat(starts, n_s).astype(np.int32)
+                lengths = np.repeat(ends - starts, n_s).astype(np.int64)
+                # Flatten (region, sample) -> row ONCE per window, so each
+                # batch is a contiguous row slice and offset_idxs is a plain
+                # arange. `output_length` is applied here when it is an int.
+                if isinstance(self._output_length, int):
+                    lengths = np.full(len(lengths), self._output_length, np.int64)
+                # Flatten to `(row, None)` ONCE per window. Do NOT slice these
+                # per batch: slicing a `RaggedIntervals` by row range returns
+                # 2-D start/stop offset pairs, not the 1-D cumulative offsets
+                # `intervals_to_tracks` requires. Select the batch's rows with
+                # `offset_idxs` instead -- the same mechanism the written path
+                # uses (`_tracks.py`'s `o_idx`).
+                flat_itvs = [itvs.reshape((n_rows, None)) for itvs in per_track]  # type: ignore[bad-argument-type]  # RaggedIntervals.reshape's hint doesn't literally permit None in the tuple
+                for lo in range(0, n_rows, batch_size):
+                    hi = min(lo + batch_size, n_rows)
+                    out = _tracks_from_intervals(
+                        flat_itvs,
+                        np.arange(lo, hi, dtype=np.int64),
+                        flat_starts[lo:hi],
+                        lengths[lo:hi],
+                    )
+                    yield out, flat_r[lo:hi], flat_s[lo:hi]
+            return
+
         if self._backend is not None:
             # Resolve the effective fixed/ragged length ONCE: -1 = ragged (per-hap
             # actual length, the pre-Wave-A default), >=0 = fixed (issue #277

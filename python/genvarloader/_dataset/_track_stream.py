@@ -8,7 +8,8 @@ concrete class.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -116,6 +117,12 @@ class _TrackBackend:
         """
         r_idx = np.asarray(r_idx, dtype=np.intp)
         s_idx = np.asarray(s_idx, dtype=np.intp)
+
+        if r_idx.size == 0:
+            raise ValueError(
+                "_TrackBackend.read_window: r_idx is empty; there is no region to"
+                " determine the contig from."
+            )
 
         contig_idxs = self._regions[r_idx, 0]
         contig_idx = int(contig_idxs[0])
