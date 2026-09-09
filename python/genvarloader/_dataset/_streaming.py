@@ -532,6 +532,14 @@ class StreamingDataset:
             term scales with cohort size, so peak memory is bounded by
             ``max_mem`` (offsets) + ``batch_size`` (output), independent of the number
             of samples in the dataset.
+        iteration_order: ``"auto"`` (default), ``"regions"``, or ``"samples"`` --
+            see :meth:`to_iter` for the cartesian sweep this controls. It is a
+            no-op whenever the sample axis fits in one read-window chunk, which
+            is the default for any cohort under ~8.4M samples at
+            ``max_mem="512MB"`` -- the sample loop then runs exactly once and
+            both orders emit the identical plan. Check
+            :attr:`iteration_order_is_active` to see whether this setting is
+            actually doing anything for a given dataset/``max_mem`` combination.
     """
 
     # (n_regions, 4) sorted: (contig_idx, start, end, strand). Only cols 0-2 are
@@ -883,6 +891,21 @@ class StreamingDataset:
     @property
     def shape(self) -> tuple[int, int]:
         return (len(self._regions), self.n_samples)
+
+    @property
+    def iteration_order_is_active(self) -> bool:
+        """Whether `iteration_order` actually changes the visit order.
+
+        `iteration_order` only matters when the sample axis is chunked. The
+        chunk size is derived from `max_mem`, and at the default
+        `max_mem="512MB"` it holds the entire sample axis for any cohort below
+        roughly 8.4 million -- so the sample loop runs once and both orders emit
+        the identical plan.
+
+        Returns:
+            `True` when `_window_samples < n_samples`, so the two orders differ.
+        """
+        return self._window_samples < self.shape[1]
 
     @property
     def samples(self) -> list[str]:
@@ -2016,6 +2039,13 @@ class StreamingDataset:
         Iteration is a fixed cartesian sweep of BED regions x samples in a
         data-layout-optimal order (region-major for variants). There is no random
         access and no ad-hoc query: ``sds[r, s]`` raises :class:`TypeError`.
+        ``iteration_order`` (set at construction) picks between region-major and
+        sample-major sweeps, but it only changes anything when the sample axis
+        is chunked across more than one read window -- which does not happen at
+        the default ``max_mem="512MB"`` for any realistic cohort, so the sample
+        loop runs once and both orders emit the identical plan. Check
+        :attr:`iteration_order_is_active` before relying on it to change
+        observed behavior.
 
         Args:
             batch_size: Number of ``(region, sample)`` cells per yielded batch.

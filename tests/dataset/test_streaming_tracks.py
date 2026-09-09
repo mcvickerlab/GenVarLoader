@@ -906,3 +906,15 @@ def test_realign_false_with_len_matches_written(streaming_tracks_fixture):
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+def test_iteration_order_reports_whether_it_is_active(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    # Default max_mem keeps the whole sample axis in one chunk.
+    assert sds._window_samples == len(f.samples)
+    assert sds.iteration_order_is_active is False
+
+    small = gvl.StreamingDataset(f.bed, tracks=f.bigwigs, max_mem="1KB")
+    assert small._window_samples < len(f.samples)
+    assert small.iteration_order_is_active is True
