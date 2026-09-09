@@ -585,6 +585,36 @@ class Svar2Haps(Haps[_H]):
             diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), ploidy)
         return diffs
 
+    def _haplotype_ilens(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.integer],
+        deterministic: bool,
+        keep: NDArray[np.bool_] | None = None,
+        keep_offsets: NDArray[np.integer] | None = None,
+    ) -> NDArray[np.int32]:
+        """SVAR2 per-haplotype length deltas. Backs ``Dataset.haplotype_lengths``.
+
+        Must be overridden: the base :class:`Haps` implementation reads
+        ``self.genotypes``/``self.variants``, which are permanently-empty
+        SVAR1-shaped placeholders for this reconstructor, so inheriting it
+        silently yields all-zero deltas -- i.e. ``haplotype_lengths()`` reporting
+        the unadjusted reference span, and ``_output_bytes_per_instance``
+        under-sizing the ``"haplotypes"``/``"annotated"`` slots (the sibling of
+        the ``"variants"``/``"variant-windows"`` defect in #315).
+
+        ``keep``/``keep_offsets`` carry the SVAR1 exonic *pre*-filter's output.
+        The read-bound kernel applies the exonic filter itself (it is handed
+        ``self.filter == "exonic"``), so a caller-supplied mask has no meaning
+        here; reject it rather than ignore it.
+        """
+        if keep is not None or keep_offsets is not None:
+            raise NotImplementedError(
+                "Svar2Haps._haplotype_ilens does not accept a caller-supplied keep"
+                " mask: the read-bound kernel applies the exonic filter itself."
+            )
+        return self._haplotype_diffs(idx, np.asarray(regions, np.int32))
+
     def get_haps_and_shifts(
         self,
         idx: NDArray[np.integer],
