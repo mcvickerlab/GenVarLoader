@@ -263,6 +263,8 @@ class StreamingDataset:
     _window_regions: int = 64
     _window_samples: int = 1
     _max_mem_bytes: int = 512 * 1024 * 1024
+    # Resolved iteration order; NEVER "auto" after __init__. See `_plan`.
+    _iteration_order: str = "regions"
     # The split read/generate backend (real SVAR1 path). When set, _iter_batches
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
@@ -315,6 +317,7 @@ class StreamingDataset:
         jitter: int = 0,
         max_mem: str | int = "512MB",
         contigs: list[str] | None = None,
+        iteration_order: Literal["auto", "regions", "samples"] = "auto",
         n_samples: int | None = None,
         ploidy: int | None = None,
         samples: list[str] | None = None,
@@ -494,6 +497,23 @@ class StreamingDataset:
                 1, min(SUPERBATCH_TARGET_ROWS, max_mem_bytes // max(1, bytes_per_row))
             )
 
+        if iteration_order not in ("auto", "regions", "samples"):
+            raise ValueError(
+                "iteration_order must be one of 'auto', 'regions', 'samples';"
+                f" got {iteration_order!r}."
+            )
+        if iteration_order == "auto":
+            # Keyed off the SOURCE MIX, never per-class micro-properties.
+            # Tracks-only -> samples, because BigWigs holds one file per sample.
+            # Mixed -> regions, the roadmap's decision (non-optimal for the
+            # track axis; `iteration_order="samples"` is the escape hatch).
+            has_tracks = False  # Task 5 wires tracks in here.
+            has_variants = _backend_obj is not None
+            resolved = "samples" if (has_tracks and not has_variants) else "regions"
+        else:
+            resolved = iteration_order
+        object.__setattr__(self, "_iteration_order", resolved)
+
     @property
     def shape(self) -> tuple[int, int]:
         return (len(self._regions), self.n_samples)
@@ -566,10 +586,14 @@ class StreamingDataset:
     def _plan(self) -> Iterator[tuple[NDArray[np.intp], NDArray[np.intp]]]:
         """Yield one WINDOW per step: `(region_idxs, sample_chunk)`.
 
-        Cartesian and single-contig. Both the region axis (`_window_regions`) and
-        the sample axis (`_window_samples`) are chunked so the offsets buffer stays
-        within `max_mem` regardless of cohort size. NOT pairwise: the traversal is a
-        fixed cartesian sweep and the window is the read granularity.
+        Cartesian and single-contig. The contig-run loop is outermost in BOTH
+        iteration orders: it is required by the single-contig Rust invariant,
+        and it is what lets `RustTable`'s per-contig tree cache hold.
+
+        `iteration_order` only changes the VISIT ORDER, never the window set.
+        It is also a no-op whenever `_window_samples == n_samples` (the default
+        for any cohort under ~8.4M at `max_mem="512MB"`), because the sample
+        loop then runs exactly once.
         """
         n_regions, n_samples = self.shape
         if n_regions == 0:
@@ -578,13 +602,32 @@ class StreamingDataset:
         run_bounds = np.flatnonzero(np.diff(contig_idxs)) + 1
         run_starts = np.concatenate(([0], run_bounds))
         run_ends = np.concatenate((run_bounds, [n_regions]))
+        sample_major = self._iteration_order == "samples"
         for r_lo, r_hi in zip(run_starts, run_ends):
-            for w_lo in range(int(r_lo), int(r_hi), self._window_regions):
-                w_hi = min(w_lo + self._window_regions, int(r_hi))
-                r_idx = np.arange(w_lo, w_hi, dtype=np.intp)
-                for s_lo in range(0, n_samples, self._window_samples):
-                    s_hi = min(s_lo + self._window_samples, n_samples)
-                    yield r_idx, np.arange(s_lo, s_hi, dtype=np.intp)
+            # Materialize each region window's index array ONCE and re-yield the
+            # same object per sample chunk. `_iter_batches` stores these in
+            # `plan_jobs`, so allocating inside the inner loop would multiply
+            # job residency by n_sample_chunks.
+            windows = [
+                np.arange(
+                    w_lo, min(w_lo + self._window_regions, int(r_hi)), dtype=np.intp
+                )
+                for w_lo in range(int(r_lo), int(r_hi), self._window_regions)
+            ]
+            chunks = [
+                np.arange(
+                    s_lo, min(s_lo + self._window_samples, n_samples), dtype=np.intp
+                )
+                for s_lo in range(0, n_samples, self._window_samples)
+            ]
+            if sample_major:
+                for s in chunks:
+                    for w in windows:
+                        yield w, s
+            else:
+                for w in windows:
+                    for s in chunks:
+                        yield w, s
 
     def _rng_gen(self) -> np.random.Generator:
         """Build the one `Generator` for this `to_iter` call's jitter draws.
