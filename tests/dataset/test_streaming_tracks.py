@@ -519,6 +519,94 @@ def test_mixed_parity_with_indels(streaming_tracks_fixture):
     }
 
 
+@pytest.mark.parametrize(
+    ("window_samples", "window_regions", "order"),
+    [
+        (1, 1, "regions"),
+        (1, 64, "regions"),
+        (3, 1, "regions"),
+        # The one cell of the matrix `test_mixed_iteration_order_samples_
+        # drives_to_iter_end_to_end` leaves untested: it compares index
+        # SEQUENCES under "samples", never VALUES.
+        (1, 1, "samples"),
+    ],
+)
+def test_mixed_parity_under_forced_windowing(
+    streaming_tracks_fixture, window_samples, window_regions, order
+):
+    """Mixed parity with the sample axis chunked and >1 region window.
+
+    Every other mixed parity test in this file runs with the default sizing,
+    where the whole fixture fits in ONE window -- so the window-local re-basing
+    of `geno_offset_idx`/`offset_idxs` and the sample-major `_plan()` swap are
+    never actually exercised against the byte oracle. Forcing the two window
+    sizes small is the only way to reach them at this fixture's scale:
+    `_window_samples` is derived from a memory budget the fixture can never
+    exhaust, and `_window_regions` defaults to 64 (> the fixture's region
+    count).
+
+    `_window_samples`/`_window_regions` are set with `object.__setattr__`
+    because `StreamingDataset` is a frozen dataclass and neither is part of the
+    public `with_*` surface -- the same escape hatch the `_plan()` tests in this
+    file already use.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar_path,
+        tracks=[f.table, f.bigwigs],
+        iteration_order=order,
+    )
+    object.__setattr__(sds, "_window_samples", window_samples)
+    object.__setattr__(sds, "_window_regions", window_regions)
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        assert data.shape[1] == 2, f"track axis {data.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+@pytest.mark.parametrize("order", ["regions", "samples"])
+def test_tracks_only_parity_under_forced_windowing(streaming_tracks_fixture, order):
+    """Tracks-only parity with both window axes forced to one.
+
+    Same gap as `test_mixed_parity_under_forced_windowing`, on the drive that
+    has no variant engine: `test_tracks_only_parity` runs single-window, so
+    the per-window flatten-and-coerce plus the `offset_idxs` batch selection
+    are only ever seen with one window. See that test for why
+    `object.__setattr__` is used here.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, tracks=[f.table, f.bigwigs], iteration_order=order
+    )
+    object.__setattr__(sds, "_window_samples", 1)
+    object.__setattr__(sds, "_window_regions", 1)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs(None)
+        .with_settings(realign_tracks=False)
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            _assert_cell_equal(data[i], written[r, s], ctx=f"cell (r={r}, s={s}): ")
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
 def test_fixed_output_length_parity(streaming_tracks_fixture):
     """``with_len(L)`` parity as well as ``with_len("ragged")``.
 
@@ -728,6 +816,22 @@ def test_insertion_fill_without_realign_raises(streaming_tracks_fixture):
         f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
     ).with_settings(realign_tracks=False)
     with pytest.raises(ValueError, match="no effect when realign_tracks=False"):
+        sds.with_insertion_fill(gvl.Repeat5pNormalized())
+
+
+def test_insertion_fill_without_variants_raises(streaming_tracks_fixture):
+    """Final-review Important 2: a tracks-only dataset is the THIRD no-op case.
+
+    `_realign_tracks` is still `True` by default on a tracks-only dataset, and
+    it does have tracks, so both pre-existing guards pass -- but
+    `_insertion_fill` is read only in the MIXED realigned branch of
+    `_iter_batches`, which the tracks-only drive never reaches. Accepting the
+    call there would silently change nothing, the exact failure mode the other
+    two guards exist to prevent.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    with pytest.raises(ValueError, match="tracks-only"):
         sds.with_insertion_fill(gvl.Repeat5pNormalized())
 
 
