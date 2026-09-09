@@ -261,53 +261,67 @@ class StreamingTracksFixture:
     contigs_list: list[str]
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def streaming_tracks_fixture(
     tmp_path_factory, svar1_multicontig_fixture
 ) -> StreamingTracksFixture:
-    """SVAR1 variants + two interval tracks, written with parity-safe flags."""
+    """SVAR1 variants + two interval tracks, written with parity-safe flags.
+
+    Scope is ``module``, not ``session``: it depends on the module-scoped
+    ``svar1_multicontig_fixture`` and pytest forbids the wider scope.
+    """
     import pyBigWig
 
     import genvarloader as gvl
 
     base = svar1_multicontig_fixture
     tmp_dir = tmp_path_factory.mktemp("streaming_tracks")
-    samples = list(base.samples)
 
-    bed = pl.read_ipc(base.bed) if str(base.bed).endswith(".arrow") else None
-    # Use the fixture's own bed; it is already multi-contig and unsorted, which
-    # is what makes the index-translation assertions meaningful.
-    bed_path = base.bed
+    # `Svar1MultiContigFixture` has fields svar_path / reference_path /
+    # contigs / bed / dataset_path. `bed` is ALREADY a pl.DataFrame (do not
+    # call read_bedlike on it), and there is NO `samples` field -- take the
+    # sample names from the written dataset so they match its public order.
+    bed = base.bed
+    samples = list(gvl.Dataset.open(base.dataset_path).samples)
 
-    regions = gvl.read_bedlike(bed_path)
+    # Contig sizes come from the reference .fai, NOT from the bed. Both
+    # contigs are only 40 bp; padding past the reference length would make
+    # the bigwig header disagree with the reference.
+    fai = pl.read_csv(
+        str(base.reference_path) + ".fai",
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "length", "offset", "linebases", "linewidth"],
+    )
     contig_sizes = [
-        (c, int(regions.filter(pl.col("chrom") == c)["chromEnd"].max()) + 1_000)
-        for c in regions["chrom"].unique(maintain_order=True).to_list()
+        (r["chrom"], int(r["length"]))
+        for r in fai.iter_rows(named=True)
+        if r["chrom"] in set(bed["chrom"].to_list())
     ]
 
     # --- track "alpha": one bigwig per sample -------------------------------
+    # bigwig entries must be SORTED and NON-OVERLAPPING. The bed's regions are
+    # 20 bp sliding windows at starts 0,4,...,20, so they overlap heavily --
+    # emitting intervals per region would produce an invalid file that
+    # `addEntries` rejects. Instead tile each contig with disjoint 10 bp bins,
+    # which still covers every region.
+    BIN = 10
     bw_paths: dict[str, str] = {}
     for i, sample in enumerate(samples):
         p = tmp_dir / f"{sample}.alpha.bw"
         with pyBigWig.open(str(p), "w") as bw:
             bw.addHeader(contig_sizes, maxZooms=0)
             chroms, starts, ends, values = [], [], [], []
-            for row in regions.iter_rows(named=True):
-                # Two intervals per region with distinct, sample-dependent
-                # values so a wrong sample or a wrong region is visible.
-                lo, hi = int(row["chromStart"]), int(row["chromEnd"])
-                mid = (lo + hi) // 2
-                chroms += [row["chrom"], row["chrom"]]
-                starts += [lo, mid]
-                ends += [mid, hi]
-                values += [float(i + 1), float(i + 1) + 0.5]
-            order = np.lexsort((starts, chroms))
-            bw.addEntries(
-                [chroms[k] for k in order],
-                [starts[k] for k in order],
-                ends=[ends[k] for k in order],
-                values=[values[k] for k in order],
-            )
+            for contig, size in contig_sizes:
+                for b, lo in enumerate(range(0, size, BIN)):
+                    hi = min(lo + BIN, size)
+                    chroms.append(contig)
+                    starts.append(lo)
+                    ends.append(hi)
+                    # Distinct per (sample, contig, bin) so a wrong sample, a
+                    # wrong contig, or an off-by-one bin is visible in values.
+                    values.append(float(10 * (i + 1) + b) + (0.5 if contig != contig_sizes[0][0] else 0.0))
+            bw.addEntries(chroms, starts, ends=ends, values=values)
         bw_paths[sample] = str(p)
     alpha = gvl.BigWigs("alpha", bw_paths)
 
@@ -318,24 +332,27 @@ def streaming_tracks_fixture(
     alpha_superset = gvl.BigWigs("alpha", superset_paths)
 
     # --- track "zeta": a long-form Table ------------------------------------
+    # Same disjoint binning, different values, so the two tracks are never
+    # confusable with each other.
     rows = []
     for i, sample in enumerate(samples):
-        for row in regions.iter_rows(named=True):
-            rows.append(
-                {
-                    "sample_id": sample,
-                    "chrom": row["chrom"],
-                    "start": int(row["chromStart"]),
-                    "end": int(row["chromEnd"]),
-                    "value": float(100 * (i + 1)),
-                }
-            )
+        for contig, size in contig_sizes:
+            for b, lo in enumerate(range(0, size, BIN)):
+                rows.append(
+                    {
+                        "sample_id": sample,
+                        "chrom": contig,
+                        "start": lo,
+                        "end": min(lo + BIN, size),
+                        "value": float(100 * (i + 1) + b),
+                    }
+                )
     zeta = gvl.Table("zeta", pl.DataFrame(rows))
 
     out = tmp_dir / "tracks.gvl"
     gvl.write(
         path=out,
-        bed=bed_path,
+        bed=bed,
         variants=base.svar_path,
         # NON-alphabetical on purpose: the written track axis must still be
         # [alpha, zeta] because Tracks.from_path sorts (_tracks.py:283).
@@ -346,7 +363,7 @@ def streaming_tracks_fixture(
     )
 
     return StreamingTracksFixture(
-        bed=bed_path,
+        bed=bed,
         reference_path=base.reference_path,
         svar_path=base.svar_path,
         dataset_path=out,
@@ -354,11 +371,13 @@ def streaming_tracks_fixture(
         table=zeta,
         bigwigs_superset=alpha_superset,
         samples=samples,
-        contigs_list=gvl.Dataset.open(out, reference=base.reference_path).contigs,
+        contigs_list=list(base.contigs),
     )
 ```
 
-The BED must contain at least one region overlapping a **deletion** in the SVAR1 fixture, or Task 7's re-alignment path is never exercised — the whole point of #279. If `svar1_multicontig_fixture`'s variants are SNP-only, add an indel to it (or build a small dedicated variant source here) rather than shipping a fixture that silently tests the trivial case. Verify by asserting at least one cell's re-aligned track length differs from its region length.
+`bed` is a `pl.DataFrame` on the fixture, so tests pass it straight to `gvl.StreamingDataset(f.bed, ...)` — never `gvl.read_bedlike(f.bed)`. Where a test needs region bounds, use `f.bed` directly.
+
+Indel coverage is already satisfied: `_SVAR1_MC_VCF` carries insertions (`chr1:7 C→CAT`, `chr2:9 T→TGG`) **and** a deletion (`chr1:12 GTA→G`) across 3 samples, and the bed's 20 bp windows at starts 0-20 overlap all of them. Task 7's re-alignment path is therefore genuinely exercised. Assert it: at least one cell's re-aligned track length must differ from its region length, or the test is silently checking the trivial case.
 
 If `svar1_multicontig_fixture` does not expose `samples` / `reference_path` / `svar_path` / `bed` under those exact names, read its dataclass at `tests/dataset/conftest.py:122` and use its real field names — do not guess.
 
@@ -429,10 +448,23 @@ from genvarloader._dataset._track_stream import _TrackBackend
 
 
 def _backend(f, tracks):
-    from genvarloader._dataset._streaming import bed_to_regions
+    """Build a `_TrackBackend` over the fixture's regions.
 
-    regions, _sort_order = bed_to_regions(gvl.read_bedlike(f.bed), f.contigs_list)
-    return _TrackBackend(tracks, regions, f.contigs_list, f.samples)
+    Take `_regions` off a constructed `StreamingDataset` rather than calling
+    `bed_to_regions` directly: that helper is
+    `bed_to_regions(bed: pl.DataFrame, contig_norm: ContigNormalizer)` and
+    returns ONE `(n_regions, 4)` array, not a `(regions, sort_order)` pair,
+    so hand-rolling the call means also hand-rolling a `ContigNormalizer`.
+    Reading the attribute keeps the test honest about what production builds.
+
+    Uses the VARIANTS-only constructor, which already works today. Do not use
+    `tracks=` here: that argument does not exist until Task 5, and this task
+    must be testable on its own.
+    """
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    )
+    return _TrackBackend(tracks, sds._regions, list(sds.contigs), list(sds.samples))
 
 
 def test_names_are_sorted_not_argument_order(streaming_tracks_fixture):
@@ -449,12 +481,15 @@ def test_duplicate_track_names_raise(streaming_tracks_fixture):
 
 def test_missing_sample_raises(streaming_tracks_fixture):
     f = streaming_tracks_fixture
-    from genvarloader._dataset._streaming import bed_to_regions
-
-    regions, _ = bed_to_regions(gvl.read_bedlike(f.bed), f.contigs_list)
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path
+    )
     with pytest.raises(ValueError, match="not present"):
         _TrackBackend(
-            [f.bigwigs], regions, f.contigs_list, [*f.samples, "no_such_sample"]
+            [f.bigwigs],
+            sds._regions,
+            list(sds.contigs),
+            [*f.samples, "no_such_sample"],
         )
 
 
@@ -467,7 +502,7 @@ def test_read_window_shape(streaming_tracks_fixture):
     assert itvs.shape[:2] == (len(r_idx), len(s_idx))
 ```
 
-`f.contigs_list` does not exist yet — add a `contigs_list: list[str]` field to `StreamingTracksFixture` in Task 2 holding the dataset's contig order, or derive it in the test from `gvl.Dataset.open(f.dataset_path).contigs`. Pick one and be consistent.
+`f.contigs_list` is provided by Task 2's fixture (`list(base.contigs)`), and `f.bed` is a `pl.DataFrame` — pass it to `StreamingDataset` directly, never through `read_bedlike`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -903,7 +938,7 @@ Relates to #279"
 def test_tracks_only_constructs(streaming_tracks_fixture):
     f = streaming_tracks_fixture
     sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
-    assert sds.shape == (len(gvl.read_bedlike(f.bed)), len(f.samples))
+    assert sds.shape == (len(f.bed), len(f.samples))
     assert sds.samples == sorted(f.samples)
 
 
