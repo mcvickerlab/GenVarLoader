@@ -1434,10 +1434,13 @@ def streaming_tracks_fixture(
 
     # --- track "zeta": a long-form Table ------------------------------------
     # Same disjoint binning, different values, so the two tracks are never
-    # confusable with each other.
+    # confusable with each other. The `1000 * c_idx` term is what makes the
+    # value distinct per (sample, contig, bin): without it, (sample, chr1, b)
+    # and (sample, chr2, b) collide and a Table-path bug that reads the RIGHT
+    # sample and bin from the WRONG contig is invisible to a value check.
     rows = []
     for i, sample in enumerate(samples):
-        for contig, size in contig_sizes:
+        for c_idx, (contig, size) in enumerate(contig_sizes):
             for b, lo in enumerate(range(0, size, BIN)):
                 rows.append(
                     {
@@ -1445,7 +1448,7 @@ def streaming_tracks_fixture(
                         "chrom": contig,
                         "start": lo,
                         "end": min(lo + BIN, size),
-                        "value": float(100 * (i + 1) + b),
+                        "value": float(1000 * c_idx + 100 * (i + 1) + b),
                     }
                 )
     zeta = gvl.Table("zeta", pl.DataFrame(rows))
