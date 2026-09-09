@@ -31,11 +31,15 @@ from seqpro.rag import OFFSET_TYPE, Ragged
 from typing_extensions import assert_never
 
 from .._flat import _Flat, _FlatAnnotatedHaps
-from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
+from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs
 from ._flat_variants import _FlatVariantWindows, VarWindowOpt
 from .._utils import lengths_to_offsets
 from .._variants._records import RaggedAlleles
+
+# Fused tracks entry: intervals -> scratch -> realign, one FFI crossing.
+# Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
 from ..genvarloader import (
+    intervals_and_realign_track_fused as intervals_and_realign_track_fused,
     reconstruct_annotated_haplotypes_fused as reconstruct_annotated_haplotypes_fused,
     reconstruct_annotated_haplotypes_spliced_fused as reconstruct_annotated_haplotypes_spliced_fused,
     reconstruct_haplotypes_fused as reconstruct_haplotypes_fused,
@@ -48,7 +52,7 @@ from ._genotypes import (
 )
 from .._threads import should_parallelize
 from ._utils import _ffi_array
-from ._protocol import Reconstructor
+from ._protocol import Reconstructor, TrackRealigner
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
 from ._splice import SplicePlan
@@ -348,6 +352,16 @@ class Haps(Reconstructor[_H]):
     def has_ref_alleles(self) -> bool:
         """Whether REF allele bytes are available (needed by ``ref='allele'``)."""
         return self.variants.ref is not None
+
+    @property
+    def has_dosages(self) -> bool:
+        """Whether per-call dosages can be emitted for ``var_fields=['dosage']``.
+
+        SVAR1 memmaps ``dosages`` only when the dataset was written with them, so
+        this is a storage question the memory estimate has to ask before charging
+        for a dosage column.
+        """
+        return self.dosages is not None
 
     def var_field_dtype(self, field: str) -> np.dtype:
         """The numpy dtype of per-variant *scalar* field ``field``.
@@ -1014,6 +1028,95 @@ class Haps(Reconstructor[_H]):
             haps = _lazy_load_custom_fields(haps, new_custom_fields)
         return replace(haps, var_fields=var_fields)
 
+    # ---- haplotype-realigned tracks ----
+    #
+    # ``HapsTracks.__call__`` runs one body for every backend and reaches the
+    # backend only through these two members. See
+    # docs/superpowers/specs/2026-09-08-haps-role-split-design.md.
+
+    def check_track_realign_support(
+        self,
+        output_length: Literal["ragged", "variable"] | int,
+        splice_plan: SplicePlan | None,
+        to_rc: NDArray[np.bool_] | None,
+        ragged_tracks: bool,
+    ) -> None:
+        """Reject request shapes this backend cannot realign tracks for.
+
+        Args:
+            output_length: The requested output length.
+            splice_plan: The requested splice plan, if any.
+            to_rc: Per-query reverse-complement mask, if any.
+            ragged_tracks: Whether the tracks are being realigned at all
+                (False means the caller returns stored intervals untouched, so
+                realign-only limits do not apply).
+
+        Raises:
+            NotImplementedError: If this backend cannot serve the request.
+        """
+        del output_length, to_rc, ragged_tracks
+        if splice_plan is not None:
+            raise NotImplementedError(
+                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
+                "supported."
+            )
+
+    def track_realigner(
+        self,
+        idx: NDArray[np.integer],
+        regions: NDArray[np.int32],
+        shifts: NDArray[np.int32],
+        geno_idx: NDArray[np.integer],
+        track_lengths: NDArray[np.integer],
+        out_offsets: NDArray[np.integer],
+        keep: NDArray[np.bool_] | None,
+        keep_offsets: NDArray[np.integer] | None,
+        to_rc: NDArray[np.bool_] | None,
+        base_seed: int,
+    ) -> TrackRealigner:
+        """Prepare the per-batch state for filling realigned track blocks.
+
+        Args:
+            idx: Flat ``(region, sample)`` dataset indices for the batch.
+            regions: ``(b, 3)`` contig/start/end of each query.
+            shifts: ``(b, p)`` per-haplotype jitter shifts.
+            geno_idx: ``(b, p)`` indices into the sparse genotype offsets.
+            track_lengths: ``(b,)`` reference span each track block is read over.
+            out_offsets: ``(b*p+1,)`` per-haplotype offsets into one track's block.
+            keep: Optional per-variant keep mask (``filter='exonic'``).
+            keep_offsets: Offsets into ``keep``.
+            to_rc: Per-query reverse-complement mask, if any.
+            base_seed: Seed for seed-dependent insertion fills.
+
+        Returns:
+            A realigner whose ``fill`` writes one track at a time.
+        """
+        del idx  # SVAR1 addresses each track by ``o_idx`` alone
+        return _Svar1TrackRealigner(
+            haps=self,
+            regions=np.ascontiguousarray(regions, np.int32),
+            shifts=np.ascontiguousarray(shifts, np.int32),
+            geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
+            # Materialized once per batch rather than once per track: it is
+            # (2, regions*samples*ploidy). Dataset-scoped in principle, but
+            # caching it on the reconstructor would pin a per-sample-scale
+            # array for the dataset's lifetime.
+            geno_offsets=_as_starts_stops(self.genotypes.offsets),
+            out_offsets=np.ascontiguousarray(out_offsets, np.int64),
+            track_offsets=np.ascontiguousarray(
+                lengths_to_offsets(track_lengths), np.int64
+            ),
+            keep=None if keep is None else np.ascontiguousarray(keep, np.bool_),
+            keep_offsets=None
+            if keep_offsets is None
+            else np.ascontiguousarray(keep_offsets, np.int64),
+            # Expand per-query to_rc to per-(query, hap) for the track kernel.
+            to_rc=None
+            if to_rc is None
+            else np.ascontiguousarray(np.repeat(to_rc, geno_idx.shape[-1]), np.bool_),
+            base_seed=base_seed,
+        )
+
     def _reconstruct_haplotypes(
         self,
         req: ReconstructionRequest,
@@ -1315,6 +1418,70 @@ class Haps(Reconstructor[_H]):
             permuted_regions,
             keep_perm,
             keep_offsets_perm,
+        )
+
+
+@dataclass(slots=True)
+class _Svar1TrackRealigner:
+    """SVAR1 :class:`TrackRealigner`: one fused FFI crossing per track.
+
+    Every array here is FFI-ready, so the per-track :meth:`fill` does no
+    conversion work that does not depend on the track. ``geno_offsets`` in
+    particular is ``(2, regions*samples*ploidy)``; materializing it once per
+    track instead of once per batch was measurably wasteful.
+    """
+
+    haps: "Haps"
+    regions: NDArray[np.int32]
+    shifts: NDArray[np.int32]
+    geno_offset_idx: NDArray[np.int64]
+    geno_offsets: NDArray[np.int64]
+    out_offsets: NDArray[np.int64]
+    track_offsets: NDArray[np.int64]
+    keep: NDArray[np.bool_] | None
+    keep_offsets: NDArray[np.int64] | None
+    to_rc: NDArray[np.bool_] | None
+    base_seed: int
+
+    def fill(
+        self,
+        out: NDArray[np.float32],
+        o_idx: NDArray[np.integer],
+        intervals: RaggedIntervals,
+        params: NDArray[np.float64],
+        strategy_id: int,
+    ) -> None:
+        """Fill one track's block via the fused intervals->realign kernel.
+
+        Replaces the unfused ``np.empty`` scratch + ``intervals_to_tracks`` +
+        ``shift_and_realign_tracks_sparse`` sequence with a single FFI crossing
+        that writes in place into ``out`` (a contiguous slice of the caller's
+        pre-allocated buffer, so no ``ascontiguousarray`` is needed for it).
+        """
+        stat = self.haps.ffi_static
+        intervals_and_realign_track_fused(
+            out=out,
+            out_offsets=self.out_offsets,
+            regions=self.regions,
+            shifts=self.shifts,
+            geno_offset_idx=self.geno_offset_idx,
+            geno_v_idxs=_ffi_array(self.haps.genotypes.data, np.int32, "geno_v_idxs"),
+            geno_offsets=self.geno_offsets,
+            v_starts=stat.v_starts,
+            ilens=stat.ilens,
+            offset_idxs=np.ascontiguousarray(o_idx, np.int64),
+            itv_starts=_ffi_array(intervals.starts.data, np.int32, "itv_starts"),
+            itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
+            itv_values=_ffi_array(intervals.values.data, np.float32, "itv_values"),
+            itv_offsets=_ffi_array(intervals.starts.offsets, np.int64, "itv_offsets"),
+            track_offsets=self.track_offsets,
+            params=np.ascontiguousarray(params, np.float64),
+            strategy_id=int(strategy_id),
+            base_seed=int(self.base_seed),
+            keep=self.keep,
+            keep_offsets=self.keep_offsets,
+            to_rc=self.to_rc,
+            parallel=should_parallelize(int(self.out_offsets[-1]) * 4),
         )
 
 

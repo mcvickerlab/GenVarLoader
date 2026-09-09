@@ -23,7 +23,6 @@ from typing_extensions import assert_never
 from .._flat import _Flat
 from .._ragged import RaggedAnnotatedHaps, RaggedIntervals, RaggedSeqs, RaggedTracks
 from .._utils import lengths_to_offsets
-from ._genotypes import _as_starts_stops
 from ._haps import _H, Haps, ReconstructionRequest, _NewH, _Variants
 from ._insertion_fill import Repeat5p
 from ._insertion_fill import lower as _lower_insertion_fills
@@ -38,14 +37,6 @@ from ._tracks import (
     TrackType,
     _NewT,
 )  # noqa: F401
-from ._utils import _ffi_array
-from .._threads import should_parallelize
-
-# Fused tracks entry: intervals → scratch → realign, one FFI crossing.
-# Imported at module level so the spy in test_fused_tracks_parity can monkeypatch it.
-from ..genvarloader import (
-    intervals_and_realign_track_fused as intervals_and_realign_track_fused,
-)
 
 
 # Re-exports for back-compat (callers historically imported these from
@@ -142,29 +133,22 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
         flat: bool = False,
         to_rc: "NDArray[np.bool_] | None" = None,
     ) -> tuple[_H, _T]:
-        # SVAR2 read path: route to the split materialize→realign
-        # kernel. The isinstance guard keeps the SVAR1 body below byte-unchanged.
-        from ._svar2_haps import Svar2Haps
+        """Haplotypes plus their haplotype-realigned tracks, ``(b, t, p, ~l)``.
 
-        if isinstance(self.haps, Svar2Haps):
-            return self._call_svar2(
-                idx,
-                r_idx,
-                regions,
-                output_length,
-                jitter,
-                rng,
-                deterministic,
-                splice_plan,
-                flat,
-                to_rc,
-            )
+        One body for every haplotype backend. The two things that differ --
+        which request shapes a backend can serve, and how one track's realigned
+        block is produced -- are asked of the reconstructor via
+        :meth:`Haps.check_track_realign_support` and
+        :meth:`Haps.track_realigner`.
+        """
+        ragged_tracks = issubclass(self.tracks.kind, RaggedTracks)
+        self.haps.check_track_realign_support(
+            output_length=output_length,
+            splice_plan=splice_plan,
+            to_rc=to_rc,
+            ragged_tracks=ragged_tracks,
+        )
 
-        if splice_plan is not None:
-            raise NotImplementedError(
-                "Splicing of haplotypes + tracks (shape (b, t, p, ~l)) is not "
-                "supported."
-            )
         lengths = regions[:, 2] - regions[:, 1]
 
         # ragged (b p l), (b p), (b p), (b*p*v), (b*p+1), (b p)
@@ -179,7 +163,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             )
         )
 
-        if issubclass(self.tracks.kind, RaggedTracks):
+        if ragged_tracks:
             if isinstance(output_length, int):
                 # (b p)
                 out_lengths = np.full_like(hap_lengths, output_length)
@@ -192,8 +176,6 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
 
             # (b*p+1)
             out_ofsts_per_t = lengths_to_offsets(out_lengths)
-            # (b+1)
-            track_ofsts_per_t = lengths_to_offsets(track_lengths)
             n_per_track: int = out_ofsts_per_t[-1]
             # ragged (b t p l)
             out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
@@ -212,6 +194,12 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             # from the full idx array so different batches produce different
             # fills; same input always produces the same fill. Uses the full
             # uint64 range.
+            #
+            # Seed-dependent fills stay byte-identical across backends even
+            # though the readbound path realigns per contig group where
+            # `k / ploidy` is contig-LOCAL: that path passes the group's global
+            # row indices into the FFI and the kernel seeds with those. Fixed in
+            # issue #267.
             if deterministic:
                 base_seed = np.uint64(
                     np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
@@ -221,223 +209,36 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
                     rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
                 )
 
-            # Pre-compute (2, n) geno_offsets once for the fused Rust path
-            # (avoids re-computing _as_starts_stops n_tracks times).
-            _geno_offsets_2d = _as_starts_stops(self.haps.genotypes.offsets)
+            # Everything the realign kernels need that does not vary per track,
+            # prepared once (see TrackRealigner).
+            realigner = self.haps.track_realigner(
+                idx=idx,
+                regions=regions,
+                shifts=shifts,
+                geno_idx=geno_idx,
+                track_lengths=track_lengths,
+                out_offsets=out_ofsts_per_t,
+                keep=keep,
+                keep_offsets=keep_offsets,
+                to_rc=to_rc,
+                base_seed=int(base_seed),
+            )
 
             for track_ofst, (name, tracktype) in enumerate(
                 self.tracks.active_tracks.items()
             ):
-                intervals = self.tracks.intervals[name]
-
                 if tracktype is TrackType.SAMPLE:
                     o_idx = idx
                 else:
                     o_idx = r_idx
 
-                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-
-                # Fused path (Rust): one FFI crossing, no Python-side
-                # intermediate buffer.  Replaces:
-                #   _tracks = np.empty(...)                (audit T2)
-                #   intervals_to_tracks(...)               (FFI crossing #3)
-                #   shift_and_realign_tracks_sparse(...)   (FFI crossing #4)
-                #
-                # _out is a contiguous f32 slice of the pre-allocated `out`
-                # buffer (np.empty, step=1).  No ascontiguousarray needed for
-                # `out`; the fused entry writes in-place into its buffer.
-                # Expand per-query to_rc to per-(query, hap) for the track kernel.
-                # out_ofsts_per_t is (b*p+1); ploidy = geno_idx.shape[-1].
-                _ploidy = geno_idx.shape[-1]
-                _to_rc_hap = (
-                    None
-                    if to_rc is None
-                    else np.ascontiguousarray(np.repeat(to_rc, _ploidy), np.bool_)
-                )
-                intervals_and_realign_track_fused(
-                    out=_out,
-                    out_offsets=np.ascontiguousarray(out_ofsts_per_t, np.int64),
-                    regions=np.ascontiguousarray(regions, np.int32),
-                    shifts=np.ascontiguousarray(shifts, np.int32),
-                    geno_offset_idx=np.ascontiguousarray(geno_idx, np.int64),
-                    geno_v_idxs=_ffi_array(
-                        self.haps.genotypes.data, np.int32, "geno_v_idxs"
-                    ),
-                    geno_offsets=_geno_offsets_2d,
-                    v_starts=self.haps.ffi_static.v_starts,
-                    ilens=self.haps.ffi_static.ilens,
-                    offset_idxs=np.ascontiguousarray(o_idx, np.int64),
-                    itv_starts=_ffi_array(
-                        intervals.starts.data, np.int32, "itv_starts"
-                    ),
-                    itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
-                    itv_values=_ffi_array(
-                        intervals.values.data, np.float32, "itv_values"
-                    ),
-                    itv_offsets=_ffi_array(
-                        intervals.starts.offsets, np.int64, "itv_offsets"
-                    ),
-                    track_offsets=np.ascontiguousarray(track_ofsts_per_t, np.int64),
-                    params=np.ascontiguousarray(strat_params[track_ofst], np.float64),
-                    strategy_id=int(strat_ids[track_ofst]),
-                    base_seed=int(base_seed),
-                    keep=None if keep is None else np.ascontiguousarray(keep, np.bool_),
-                    keep_offsets=None
-                    if keep_offsets is None
-                    else np.ascontiguousarray(keep_offsets, np.int64),
-                    to_rc=_to_rc_hap,
-                    parallel=should_parallelize(int(out_ofsts_per_t[-1]) * 4),
-                )
-
-            out_shape = (
-                len(idx),
-                len(self.tracks.active_tracks),
-                self.haps.stored_ploidy,
-                None,
-            )
-
-            # flat (b t p l)
-            tracks = _Flat.from_offsets(out, out_shape, out_offsets)
-
-        else:
-            tracks = self.tracks._call_intervals(idx)
-
-        tracks = cast(_T, tracks)
-
-        return haps, tracks
-
-    def _call_svar2(
-        self,
-        idx: NDArray[np.integer],  # (b)
-        r_idx: NDArray[np.integer],  # (b)
-        regions: NDArray[np.int32],  # (b 3)
-        output_length: Literal["ragged", "variable"] | int,
-        jitter: int,
-        rng: np.random.Generator,
-        deterministic: bool,
-        splice_plan: SplicePlan | None = None,
-        flat: bool = False,
-        to_rc: "NDArray[np.bool_] | None" = None,
-    ) -> tuple[_H, _T]:
-        """SVAR2 haplotype-realigned tracks (see :class:`Svar2Haps`).
-
-        Produces the SAME ``(b, t, p, ~l)`` ``_Flat`` layout the SVAR1
-        :meth:`__call__` above produces — the per-track ``_out`` slices are filled
-        byte-identically, only the interval→realign step is SPLIT into the two
-        standalone SVAR2 kernels (``intervals_to_tracks`` +
-        ``shift_and_realign_tracks_from_svar2_readbound``) instead of the fused
-        SVAR1 kernel. Haps come from the shared ``get_haps_and_shifts`` 7-tuple.
-        """
-        from ._svar2_haps import Svar2Haps
-
-        haps_recon = cast(Svar2Haps, self.haps)
-
-        if splice_plan is not None:
-            raise NotImplementedError(
-                "Splicing of haplotypes + tracks is not supported for svar2 "
-                "datasets yet."
-            )
-        # Annotated haps are out of scope for svar2 (matches Svar2Haps.__call__).
-        # HapsTracks routes here BEFORE Svar2Haps's own annotated guard, and
-        # get_haps_and_shifts returns plain Ragged[S1] regardless of kind, so
-        # without this an annotated view would silently yield non-annotated haps.
-        if issubclass(self.haps.kind, RaggedAnnotatedHaps):
-            raise NotImplementedError(
-                "svar2 datasets do not support with_seqs('annotated') with tracks yet."
-            )
-        # The realign kernel has no in-kernel reverse-complement.
-        if to_rc is not None and bool(np.asarray(to_rc).any()):
-            raise NotImplementedError(
-                "In-kernel reverse-complement is not supported for svar2 "
-                "haplotype-realigned tracks."
-            )
-
-        lengths = regions[:, 2] - regions[:, 1]
-
-        # ragged (b p l), (b p), (b p), (b p), (b p), None, None
-        haps, _geno_idx, shifts, diffs, hap_lengths, _keep, _keep_offsets = (
-            haps_recon.get_haps_and_shifts(
-                idx=idx,
-                regions=regions,
-                output_length=output_length,
-                rng=rng,
-                deterministic=deterministic,
-                to_rc=to_rc,
-            )
-        )
-
-        if issubclass(self.tracks.kind, RaggedTracks):
-            # The readbound track kernel always sizes each hap to ref_len + diff
-            # (no output_length override), so a fixed-length request cannot be
-            # honored byte-identically. Guard rather than silently mis-size.
-            if isinstance(output_length, int):
-                raise NotImplementedError(
-                    "Fixed-length (int output_length) haplotype-realigned tracks "
-                    "are not supported for svar2 datasets yet; use ragged/variable "
-                    "output."
-                )
-            # (b p) — ragged output: hap output length == hap_lengths.
-            out_lengths = hap_lengths
-            # (b) = lengths (b) + max deletion length across ploidy (b p) -> (b)
-            track_lengths = lengths - diffs.clip(max=0).min(1)
-
-            # (b*p+1)
-            out_ofsts_per_t = lengths_to_offsets(out_lengths)
-            n_per_track: int = out_ofsts_per_t[-1]
-            # ragged (b t p l)
-            out = np.empty(len(self.tracks.active_tracks) * n_per_track, np.float32)
-            out_lens = repeat(
-                out_lengths, "b p -> b t p", t=len(self.tracks.active_tracks)
-            )
-            out_offsets = lengths_to_offsets(out_lens)
-
-            # Lower per-track strategies into numba-friendly arrays.
-            strat_list = [
-                self.tracks.insertion_fill.get(name, Repeat5p())
-                for name in self.tracks.active_tracks
-            ]
-            strat_ids, strat_params = _lower_insertion_fills(strat_list)
-
-            # Seed-dependent (FlankSample) fills stay byte-identical to the single
-            # fused SVAR1 call across a multi-contig batch: SVAR1 realigns the
-            # whole batch in ONE call, so the fill hash `hash4(base_seed, query,
-            # hap, out_idx+i)` uses the GLOBAL row `query`. `_call_svar2` calls the
-            # readbound kernel once PER CONTIG GROUP where `k / ploidy` is
-            # contig-LOCAL, so `realign_track_block` passes the group's global row
-            # indices into the FFI (`global_query`) and the kernel seeds with those
-            # instead of the local index. `base_seed` already matches (both derive
-            # from the full idx). Fixed in issue #267.
-            # Base seed identical to the SVAR1 path (idx-xor when deterministic).
-            if deterministic:
-                base_seed = np.uint64(
-                    np.bitwise_xor.reduce(idx.astype(np.uint64, copy=False))
-                )
-            else:
-                base_seed = np.uint64(
-                    rng.integers(0, np.iinfo(np.uint64).max, dtype=np.uint64)
-                )
-
-            for track_ofst, (name, tracktype) in enumerate(
-                self.tracks.active_tracks.items()
-            ):
-                intervals = self.tracks.intervals[name]
-                o_idx = idx if tracktype is TrackType.SAMPLE else r_idx
-
-                _out = out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track]
-                block_data, _block_off = haps_recon.realign_track_block(
-                    idx=idx,
+                realigner.fill(
+                    out=out[track_ofst * n_per_track : (track_ofst + 1) * n_per_track],
                     o_idx=o_idx,
-                    regions=regions,
-                    shifts=shifts,
-                    track_lengths=track_lengths,
-                    intervals=intervals,
-                    params=np.ascontiguousarray(strat_params[track_ofst], np.float64),
+                    intervals=self.tracks.intervals[name],
+                    params=strat_params[track_ofst],
                     strategy_id=int(strat_ids[track_ofst]),
-                    base_seed=int(base_seed),
                 )
-                # block_data is (b, P) C-ordered with per-hap lengths == hap_lengths,
-                # so its offsets equal out_ofsts_per_t; copy into the track slice.
-                _out[:] = block_data
 
             out_shape = (
                 len(idx),
@@ -453,6 +254,7 @@ class HapsTracks(Reconstructor[tuple[_H, _T]]):
             tracks = self.tracks._call_intervals(idx)
 
         tracks = cast(_T, tracks)
+
         return cast(_H, haps), tracks
 
 

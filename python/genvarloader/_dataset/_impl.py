@@ -1439,7 +1439,7 @@ class Dataset:
                 elif f == "ilen":
                     total += n_vars_total * haps_obj.var_field_dtype("ilen").itemsize
                 elif f == "dosage":
-                    if haps_obj.dosages is None:
+                    if not haps_obj.has_dosages:
                         continue
                     dosage_dtype = haps_obj.var_field_dtype("dosage")
                     total += n_vars_total * dosage_dtype.itemsize
@@ -1507,7 +1507,7 @@ class Dataset:
                             n_dummy_groups * haps_obj.var_field_dtype("ilen").itemsize
                         )
                     elif f == "dosage":
-                        if haps_obj.dosages is None:
+                        if not haps_obj.has_dosages:
                             continue
                         total += (
                             n_dummy_groups * haps_obj.var_field_dtype("dosage").itemsize
@@ -1587,7 +1587,7 @@ class Dataset:
                 if f == "ilen":
                     total += n_vars_total * haps_obj.var_field_dtype("ilen").itemsize
                 elif f == "dosage":
-                    if haps_obj.dosages is None:
+                    if not haps_obj.has_dosages:
                         continue
                     total += n_vars_total * haps_obj.var_field_dtype("dosage").itemsize
                 else:
@@ -1646,7 +1646,7 @@ class Dataset:
                             n_dummy_groups * haps_obj.var_field_dtype("ilen").itemsize
                         )
                     elif f == "dosage":
-                        if haps_obj.dosages is None:
+                        if not haps_obj.has_dosages:
                             continue
                         total += (
                             n_dummy_groups * haps_obj.var_field_dtype("dosage").itemsize

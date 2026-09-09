@@ -367,7 +367,7 @@ def test_svar2_tracks_match_svar1(
 
     Both datasets are written from the SAME VCF + SAME BigWig track; at read the
     SVAR1 backend realigns via the fused kernel and the SVAR2 backend
-    (``Svar2Haps`` + ``HapsTracks._call_svar2``) realigns via the split
+    (``Svar2Haps.realign_track_block``) realigns via the split
     ``intervals_to_tracks`` + ``shift_and_realign_tracks_from_svar2_readbound``
     path. deterministic=True + max_jitter=0 => shifts=0, so parity is exact.
     """
@@ -413,7 +413,7 @@ def test_svar2_tracks_match_svar1_multicontig(
     tmp_path, svar_fixture2, svar2_fixture2, _src2
 ):
     """Realigned tracks byte-identical to SVAR1 across a TWO-contig, out-of-order
-    bed -- exercises ``_call_svar2``'s contig-group split + inverse row-perm
+    bed -- exercises ``realign_track_block``'s contig-group split + inverse row-perm
     stitching for the track path (single-contig fast path bypassed)."""
     import pyBigWig
 
@@ -482,7 +482,7 @@ def test_svar2_flanksample_multicontig_matches_svar1(
 ):
     """FlankSample (seed-dependent fill) + MULTI-contig is byte-identical to SVAR1.
 
-    ``_call_svar2`` realigns per contig group, so ``k / ploidy`` is a contig-LOCAL
+    ``realign_track_block`` realigns per contig group, so ``k / ploidy`` is a contig-LOCAL
     query index; SVAR1 realigns the whole batch in one fused call and seeds the
     FlankSample fill hash with the GLOBAL row. Issue #267 makes the read-bound
     path pass each group's global row indices (``global_query``) into the FFI so
