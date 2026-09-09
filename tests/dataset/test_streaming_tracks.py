@@ -9,6 +9,7 @@ parity test (Tasks 5-8) depends on that ordering.
 from __future__ import annotations
 
 import numpy as np
+import polars as pl
 import pytest
 
 import genvarloader as gvl
@@ -420,4 +421,237 @@ def test_tracks_only_rejects_jitter(streaming_tracks_fixture):
     f = streaming_tracks_fixture
     sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs).with_settings(jitter=1)
     with pytest.raises(NotImplementedError, match="jitter"):
+        next(iter(sds.to_iter(batch_size=1)))
+
+
+# --- Issue #279 Task 7: mixed SVAR1 variants + re-aligned tracks -----------
+
+
+def _assert_cell_equal(streamed, expected, ctx=""):
+    """Assert one ``(region, sample)`` cell is byte-identical to the oracle.
+
+    Compares a streamed cell against ``Dataset[r, s]``'s tracks half through
+    the Ragged's own ``shape`` / ``lengths`` / packed values, NOT by indexing
+    down to leaves. Two accessor traps make the obvious spelling wrong:
+
+    1. Chained integer indexing (``cell[t][h]``) does NOT return a sub-Ragged.
+       seqpro CONCATENATES the indexed group, so ``cell[0]`` on a
+       ``(t, p, None)`` Ragged yields one flat array holding BOTH haplotypes
+       and ``cell[0][0]`` collapses to a 0-d scalar -- comparing a scalar
+       against an 18-element array and reporting a value diff for what is
+       really a bad accessor.
+    2. ``.data`` on a cell sliced out of a batch is the WHOLE batch's backing
+       buffer, not the cell's slice of it, so its length is the batch total
+       (80) rather than the cell's (38) even when ``.lengths`` already agrees.
+       ``.to_packed()`` trims it to just this cell's values.
+
+    ``with_len(L)`` returns a dense ndarray rather than a Ragged, so handle
+    that shape-only case separately instead of demanding a ``.lengths``.
+
+    The ragged assertions are ordered so the most diagnostic one fails first,
+    matching the spec's three required parity axes:
+
+    1. ``shape[:-1]`` -- rank plus the track and ploidy sizes. A spurious
+       squeeze or a missing ploidy axis fails HERE, as a shape error, rather
+       than silently broadcasting into a value diff.
+    2. ``lengths`` -- per-(track, hap) output length. A mismatch is the
+       signature of the extend_to_length span bug and must fail loudly and
+       separately from a value diff.
+    3. packed values -- the flat values in ``(track, ploidy)`` order. This is
+       the byte oracle, and comparing the FLAT buffer is what makes the
+       assertion sensitive to the ``(t, b, p)`` vs ``(b, t, p)`` assembly
+       ordering: a mis-ordered buffer has identical shape and identical
+       lengths, and differs only here.
+    """
+    if not hasattr(streamed, "lengths") or not hasattr(expected, "lengths"):
+        # `with_len(L)` yields dense arrays on both sides; shape carries the
+        # track and ploidy axes directly, so one comparison covers everything.
+        s, e = np.asarray(streamed), np.asarray(expected)
+        assert s.shape == e.shape, f"{ctx}shape {s.shape} != oracle {e.shape}"
+        np.testing.assert_array_equal(s, e, err_msg=f"{ctx}track values differ")
+        return
+
+    s_shape, e_shape = streamed.shape[:-1], expected.shape[:-1]
+    assert s_shape == e_shape, f"{ctx}shape {s_shape} != oracle {e_shape}"
+    np.testing.assert_array_equal(
+        np.asarray(streamed.lengths),
+        np.asarray(expected.lengths),
+        err_msg=f"{ctx}per-(track, hap) lengths differ",
+    )
+    np.testing.assert_array_equal(
+        np.asarray(streamed.to_packed().data),
+        np.asarray(expected.to_packed().data),
+        err_msg=f"{ctx}track values differ",
+    )
+
+
+def test_mixed_parity_with_indels(streaming_tracks_fixture):
+    """Tracks re-aligned to haplotype coordinates -- the case #279 calls out.
+
+    Two tracks, passed NON-alphabetically (``[table, bigwigs]`` = ``[zeta,
+    alpha]``) so the name-sorted track-axis rule is actually under test: an
+    alphabetical fixture cannot distinguish "sorted by name" from "argument
+    order". Compared as a SET of cells, since streaming's iteration order
+    differs from the written dataset's index order by design.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar_path,
+        tracks=[f.table, f.bigwigs],
+    )
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        # The track axis must never be squeezed, and must carry BOTH tracks.
+        assert data.shape[1] == 2, f"track axis {data.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            # `written[r, s]` is a `(haps, tracks)` 2-tuple whenever seqs are
+            # active; streaming's mixed convention yields bare tracks, so only
+            # the tracks half of the oracle is comparable.
+            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            seen.add((r, s))
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+def test_fixed_output_length_parity(streaming_tracks_fixture):
+    """``with_len(L)`` parity as well as ``with_len("ragged")``.
+
+    Deviation from the brief (which used ``L = 64``): every region in
+    ``streaming_tracks_fixture`` is exactly 20bp and the fixture is written
+    with ``extend_to_length=False, max_jitter=None``, so the WRITTEN oracle's
+    own ``with_len`` guard rejects any ``L > 20`` before streaming is even
+    involved -- ``L = 64`` raises on ``written.with_len(L)`` itself, so no
+    oracle exists for it. Use a value comfortably under 20 instead. Task 6 hit
+    and settled the same limit for the tracks-only ``with_len`` test.
+    """
+    f = streaming_tracks_fixture
+    L = 12
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_len(L)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_tracks("alpha")
+        .with_len(L)
+    )
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    for i in range(len(r_idx)):
+        r, s = int(r_idx[i]), int(s_idx[i])
+        _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+
+
+def test_non_default_insertion_fill_parity(streaming_tracks_fixture):
+    """A non-default insertion fill, not just the default ``Repeat5p()``.
+
+    ``insertion_fill`` is a byte-level input to the fused kernel -- it selects
+    what a realigned track emits across an insertion -- so parity must hold for
+    a strategy other than the default.
+    """
+    f = streaming_tracks_fixture
+    # The exported strategies are InsertionFill, Repeat5p (the default) and
+    # Repeat5pNormalized; pick a non-default one.
+    fill = gvl.Repeat5pNormalized()
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_insertion_fill(fill)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_tracks("alpha")
+        .with_insertion_fill(fill)
+    )
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    for i in range(len(r_idx)):
+        r, s = int(r_idx[i]), int(s_idx[i])
+        _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+
+
+def test_track_with_superset_samples_parity(streaming_tracks_fixture):
+    """A track whose samples strictly contain the dataset's.
+
+    Extra track samples must be ignored, and the ones that remain must still be
+    matched by NAME -- a positional index would silently shift every sample.
+    ``written`` is narrowed to ``alpha`` because ``bigwigs_superset`` carries
+    only that track while the written dataset holds both.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar_path,
+        tracks=f.bigwigs_superset,
+    )
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_tracks(
+        "alpha"
+    )
+    # Translate through sample NAMES: `sds` has the superset's samples while
+    # `written` has fewer, so a positional index would run off the end (and,
+    # worse, silently compare the wrong sample where it did not).
+    written_pos = {name: i for i, name in enumerate(written.samples)}
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    for i in range(len(r_idx)):
+        name = sds.samples[int(s_idx[i])]
+        if name not in written_pos:
+            continue
+        r, w_s = int(r_idx[i]), written_pos[name]
+        _assert_cell_equal(
+            data[i], written[r, w_s][1], ctx=f"cell (r={r}, sample={name!r}): "
+        )
+
+
+def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
+    """``realign_tracks=False`` keeps reference coordinates, dropping ploidy.
+
+    Deviation from the brief: the written oracle keeps BOTH ``alpha`` and
+    ``zeta`` active (it is opened with no ``.with_tracks(...)`` narrowing)
+    while ``sds`` only requests ``tracks=f.bigwigs`` (``alpha`` alone), so the
+    raw arrays would be a 1-track streamed output against a 2-track written
+    one. Narrow ``written`` to ``alpha`` to match.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    ).with_settings(realign_tracks=False)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_tracks("alpha")
+        .with_settings(realign_tracks=False)
+    )
+    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=1, return_indices=True)))
+    r, s = int(r_idx[0]), int(s_idx[0])
+    expected = written[r, s][1]
+    # The point of the test: no ploidy axis on either side.
+    assert data[0].shape[:-1] == expected.shape[:-1]
+    _assert_cell_equal(data[0], expected, ctx=f"cell (r={r}, s={s}): ")
+
+
+def test_mixed_tracks_non_svar1_raises(streaming_case):
+    """Mixed variants+tracks is SVAR1-ONLY in v1.
+
+    Combining ``tracks=`` with a VCF (or PGEN/SVAR2) variant source must raise
+    ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks
+    or produce wrong output.
+    """
+    bed, reference, variants, _written = streaming_case("vcf")
+    table = gvl.Table(
+        "t",
+        pl.DataFrame(
+            {
+                "sample_id": ["s0", "s1", "s2"],
+                "chrom": ["chr1", "chr1", "chr1"],
+                "start": [0, 0, 0],
+                "end": [10, 10, 10],
+                "value": [1.0, 2.0, 3.0],
+            }
+        ),
+    )
+    sds = gvl.StreamingDataset(
+        bed, reference=reference, variants=variants, tracks=table
+    )
+    with pytest.raises(NotImplementedError, match="SVAR1"):
         next(iter(sds.to_iter(batch_size=1)))
