@@ -489,13 +489,45 @@ Two new methods configure track output, both mirroring their `Dataset` namesakes
   setting would have no effect) — same guard as `Dataset.with_insertion_fill`.
 
 **`iteration_order`** (`"auto" | "regions" | "samples"`, constructor arg) picks region-major vs
-sample-major sweeps, but it is a **no-op unless `max_mem` forces the sample axis to chunk** —
+sample-major sweeps. `"auto"` resolves at construction from the source mix:
+
+| Sources | `"auto"` resolves to | Why |
+|---|---|---|
+| variants only | `"regions"` | Variant stores are position-major; a region window is one contiguous span |
+| tracks only | `"samples"` | `BigWigs` holds one file per sample; sample-major walks a single file front-to-back |
+| variants + tracks | `"regions"` | Favours the variant axis — **deliberately non-optimal for the track axis** |
+
+For a mixed variants + tracks dataset, `"auto"` therefore optimises the variant side at the track
+side's expense. If track reads dominate your wall-clock, pass `iteration_order="samples"`
+explicitly — that is the intended escape hatch, not a workaround.
+
+Either way it is a **no-op unless `max_mem` forces the sample axis to chunk** —
 below that threshold both orders visit the identical plan. The threshold depends on how many
 tracks are attached (each track adds 768 B/cell to the `max_mem` budget), so don't compute it by
 hand — check the `iteration_order_is_active` property instead:
 
 ```python
 sds.iteration_order_is_active  # True iff iteration_order actually changes anything here
+```
+
+**Read-time jitter is not yet supported with tracks.** `with_settings(jitter=...)` raises
+`NotImplementedError` when combined with tracks, in both shapes it can take:
+
+- **tracks only** — there is no variant engine to derive jitter-translated region bounds from, so
+  a jittered read would silently use unjittered bounds.
+- **variants + tracks with `realign_tracks=True`** (the default) — the deletion-extension query
+  that sizes the track buffer would need the translated bounds too, and would otherwise
+  under-extend at a region boundary.
+
+Both fail fast rather than return wrong bytes. Use `jitter=0`, or
+`with_settings(realign_tracks=False)`, which skips the deletion-extension query entirely.
+
+```{note}
+Two different knobs are called "jitter" and both bear on parity. `with_settings(jitter=...)` is
+**read-time** jitter on a `StreamingDataset`; `gvl.write(..., max_jitter=...)` is a **write-time**
+parameter of the written dataset you compare against. Satisfying one says nothing about the other
+— a streaming dataset at `jitter=0` still fails the parity gate below if its oracle was written
+with `max_jitter>0`.
 ```
 
 **v1 parity is gated on `gvl.write(..., extend_to_length=False, max_jitter=None)`.** Streaming
