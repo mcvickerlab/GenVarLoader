@@ -50,32 +50,6 @@ if TORCH_AVAILABLE:
 _py_open = open
 
 
-def _info_field_dtype(haps_obj: Haps, f: str) -> np.dtype:
-    """Dtype of variant INFO/store field ``f``, used by ``_output_bytes_per_instance``.
-
-    ``Svar2Haps.variants`` is a dummy placeholder with an empty ``info`` dict;
-    its INFO/store field dtypes live on ``store_fields`` instead. Falls back
-    to ``variants.info[f].dtype`` for other ``Haps`` implementations (e.g.
-    ``Svar1``/VCF/PGEN-backed datasets), where ``variants.info`` is the real
-    on-disk INFO table.
-
-    Args:
-        haps_obj: The ``Haps`` reconstructor whose variant field dtype is
-            being looked up.
-        f: The variant field name (must not be one of the special-cased
-            scalar fields ``start``/``ilen``/``dosage``/``alt``/``ref``,
-            which are handled separately by callers).
-
-    Returns:
-        The numpy dtype of field ``f``.
-    """
-    from ._svar2_haps import Svar2Haps
-
-    if isinstance(haps_obj, Svar2Haps) and f in haps_obj.store_fields:
-        return haps_obj.store_fields[f].dtype
-    return haps_obj.variants.info[f].dtype
-
-
 @dataclass(slots=True, frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals.
@@ -756,7 +730,7 @@ class Dataset:
                     " with_seqs('variant-windows', VarWindowOpt(flank_length=...,"
                     " token_alphabet=..., unknown_token=...))."
                 )
-            if window_opt.ref == "allele" and self._seqs.variants.ref is None:
+            if window_opt.ref == "allele" and not self._seqs.has_ref_alleles:
                 raise ValueError(
                     "VarWindowOpt(ref='allele') needs REF alleles, but this dataset"
                     " has none. Use ref='window', or write the dataset with REF."
@@ -1058,7 +1032,7 @@ class Dataset:
         if isinstance(self._seqs, Haps):
             if self._seqs.unphased_union:
                 return 1
-            return self._seqs.genotypes.shape[-2]
+            return self._seqs.stored_ploidy
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -1315,7 +1289,7 @@ class Dataset:
         if out_reshape is not None:
             hap_lens = hap_lens.reshape(
                 *out_reshape,
-                self._seqs.genotypes.shape[-2],
+                self._seqs.stored_ploidy,
             )
 
         return hap_lens
@@ -1482,7 +1456,7 @@ class Dataset:
             # summing every real haplotype's contribution into one
             # per-instance total, which is what unphased_union's un-deduped
             # union semantics require either way.
-            real_ploidy = haps_obj.genotypes.shape[-2]
+            real_ploidy = haps_obj.stored_ploidy
 
             # Svar2Haps: self.n_variants (-> self.genotypes.lengths) and
             # _allele_bytes_sum (-> self.genotypes[...]/self.variants.alt) both
@@ -1514,16 +1488,16 @@ class Dataset:
             # "start: ALWAYS"), so charge it independent of var_fields
             # membership -- charging it only when "start" in var_fields
             # under-counts for e.g. the legal var_fields=["alt"].
-            total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+            total += n_vars_total * haps_obj.var_field_dtype("start").itemsize
             for f in var_fields:
                 if f == "start":
                     continue  # charged unconditionally above
                 elif f == "ilen":
-                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                    total += n_vars_total * haps_obj.var_field_dtype("ilen").itemsize
                 elif f == "dosage":
                     if haps_obj.dosages is None:
                         continue
-                    dosage_dtype = haps_obj.dosages.data.dtype
+                    dosage_dtype = haps_obj.var_field_dtype("dosage")
                     total += n_vars_total * dosage_dtype.itemsize
                 elif f in ("alt", "ref"):
                     if svar2_alt_bytes is not None:
@@ -1538,11 +1512,10 @@ class Dataset:
                         per_ploid = haps_obj._allele_bytes_sum(ds_idx, f)
                         total += per_ploid.reshape(-1, real_ploidy).sum(-1)
                 else:
-                    # INFO column: numeric, known dtype from on-disk schema.
-                    # _info_field_dtype guards Svar2Haps, whose .variants is a
-                    # dummy placeholder (info={}) -- store fields' dtypes live
-                    # in the store manifest instead.
-                    info_dtype = _info_field_dtype(haps_obj, f)
+                    # INFO column: numeric, known dtype -- from the on-disk
+                    # schema on SVAR1, from the store manifest on SVAR2.
+                    # var_field_dtype knows which; the caller does not care.
+                    info_dtype = haps_obj.var_field_dtype(f)
                     total += n_vars_total * info_dtype.itemsize
             # ride-along flank tokens (flat output only): 2L tokens per variant.
             if getattr(haps_obj, "flank_length", 0) and haps_obj.token_lut is not None:
@@ -1590,22 +1563,26 @@ class Dataset:
                 # (including "start") for each empty group -- so charge it
                 # once here, outside the var_fields loop, mirroring the
                 # real-variant charge above.
-                total += n_dummy_groups * haps_obj.variants.start.dtype.itemsize
+                total += n_dummy_groups * haps_obj.var_field_dtype("start").itemsize
                 for f in var_fields:
                     if f == "start":
                         continue  # charged unconditionally above
                     elif f == "ilen":
-                        total += n_dummy_groups * haps_obj.variants.ilen.dtype.itemsize
+                        total += (
+                            n_dummy_groups * haps_obj.var_field_dtype("ilen").itemsize
+                        )
                     elif f == "dosage":
                         if haps_obj.dosages is None:
                             continue
-                        total += n_dummy_groups * haps_obj.dosages.data.dtype.itemsize
+                        total += (
+                            n_dummy_groups * haps_obj.var_field_dtype("dosage").itemsize
+                        )
                     elif f == "alt":
                         total += n_dummy_groups * len(dummy.alt)
                     elif f == "ref":
                         total += n_dummy_groups * len(dummy.ref)
                     else:
-                        info_dtype = _info_field_dtype(haps_obj, f)
+                        info_dtype = haps_obj.var_field_dtype(f)
                         total += n_dummy_groups * info_dtype.itemsize
                 if (
                     getattr(haps_obj, "flank_length", 0)
@@ -1645,7 +1622,7 @@ class Dataset:
             # haplotype's contribution into one per-instance total, which is
             # what unphased_union's un-deduped union semantics require either
             # way (see the "variants" branch above for the same fix).
-            real_ploidy = haps_obj.genotypes.shape[-2]
+            real_ploidy = haps_obj.stored_ploidy
 
             # Svar2Haps: self.n_variants/self.genotypes/self.variants are
             # permanently-empty SVAR1-shaped placeholders for this
@@ -1754,22 +1731,21 @@ class Dataset:
             # get_variants_flat's "start: ALWAYS"), so charge it independent of
             # var_fields membership -- charging it only when "start" in
             # var_fields under-counts for e.g. the legal var_fields=["alt"].
-            total += n_vars_total * haps_obj.variants.start.dtype.itemsize
+            total += n_vars_total * haps_obj.var_field_dtype("start").itemsize
             for f in haps_obj.var_fields:
                 if f in ("alt", "ref", "start"):
                     continue  # "start" charged unconditionally above
                 if f == "ilen":
-                    total += n_vars_total * haps_obj.variants.ilen.dtype.itemsize
+                    total += n_vars_total * haps_obj.var_field_dtype("ilen").itemsize
                 elif f == "dosage":
                     if haps_obj.dosages is None:
                         continue
-                    total += n_vars_total * haps_obj.dosages.data.dtype.itemsize
+                    total += n_vars_total * haps_obj.var_field_dtype("dosage").itemsize
                 else:
-                    # INFO column: numeric, known dtype from on-disk schema.
-                    # _info_field_dtype guards Svar2Haps, whose .variants is a
-                    # dummy placeholder (info={}) -- store fields' dtypes live
-                    # in the store manifest instead.
-                    info_dtype = _info_field_dtype(haps_obj, f)
+                    # INFO column: numeric, known dtype -- from the on-disk
+                    # schema on SVAR1, from the store manifest on SVAR2.
+                    # var_field_dtype knows which; the caller does not care.
+                    info_dtype = haps_obj.var_field_dtype(f)
                     total += n_vars_total * info_dtype.itemsize
             if include_offsets:
                 # "start" always has its own outer-offsets array (it is
@@ -1812,18 +1788,22 @@ class Dataset:
                 # "start" dummy rows are filled unconditionally too (see the
                 # "variants" branch's dummy loop above for the same rationale)
                 # -- charge it once here, outside the var_fields loop.
-                total += n_dummy_groups * haps_obj.variants.start.dtype.itemsize
+                total += n_dummy_groups * haps_obj.var_field_dtype("start").itemsize
                 for f in haps_obj.var_fields:
                     if f in ("alt", "ref", "start"):
                         continue  # "start" charged unconditionally above
                     if f == "ilen":
-                        total += n_dummy_groups * haps_obj.variants.ilen.dtype.itemsize
+                        total += (
+                            n_dummy_groups * haps_obj.var_field_dtype("ilen").itemsize
+                        )
                     elif f == "dosage":
                         if haps_obj.dosages is None:
                             continue
-                        total += n_dummy_groups * haps_obj.dosages.data.dtype.itemsize
+                        total += (
+                            n_dummy_groups * haps_obj.var_field_dtype("dosage").itemsize
+                        )
                     else:
-                        info_dtype = _info_field_dtype(haps_obj, f)
+                        info_dtype = haps_obj.var_field_dtype(f)
                         total += n_dummy_groups * info_dtype.itemsize
                 if include_offsets:
                     # Only the window slots' inner (per-variant) offsets grow

@@ -218,6 +218,13 @@ class Svar2Haps(Haps[_H]):
     """The .svar2 store's contig names (used to open the store's ContigReaders)."""
     ds_contigs: list[str] = field(default_factory=list)
     """The dataset's contig names (``regions[:, 0]`` indexes into this)."""
+    ploidy: int = 2
+    """The store's ploidy, from the svar2 range cache's ``svar2_meta.json``.
+
+    Backs :attr:`stored_ploidy`. Held directly rather than read off a
+    ``genotypes`` array: svar2 has no per-region sparse genotype store, so the
+    inherited ``genotypes`` field is a placeholder here (see the class docstring).
+    """
     max_jitter: int = 0
     """The dataset's write-time max_jitter. When > 0 the cache's per-query ranges
     were computed over a max_jitter-padded window, which over-includes variants past
@@ -275,6 +282,38 @@ class Svar2Haps(Haps[_H]):
                 f" .svar2 store, whose contigs are {self.store_contigs}."
             )
         return contig
+
+    # ---- backend-agnostic query surface (see Haps) ----
+
+    @property
+    def stored_ploidy(self) -> int:
+        """Ploidy as laid out in the .svar2 store."""
+        return self.ploidy
+
+    @property
+    def has_ref_alleles(self) -> bool:
+        """SVAR2 never carries REF allele bytes (the decode is ALT-only)."""
+        return False
+
+    def var_field_dtype(self, field: str) -> np.dtype:
+        """The dtype of a scalar variant field, from the store manifest.
+
+        The base implementation reads ``self.variants``, which is a placeholder
+        here; the .svar2 store's INFO/FORMAT dtypes live in ``store_fields``, and
+        ``start``/``ilen`` are fixed by the read-bound decode kernel's output.
+        """
+        if field in ("alt", "ref"):
+            raise KeyError(
+                f"{field!r} is a variable-length allele field with no scalar dtype;"
+                " size it from its byte payload instead."
+            )
+        if field == "start":
+            return np.dtype(POS_TYPE)
+        if field == "ilen":
+            return np.dtype(np.int32)
+        if field in self.store_fields:
+            return self.store_fields[field].dtype
+        raise KeyError(f"unknown variant field {field!r}")
 
     # ---- construction ----
 
@@ -375,6 +414,7 @@ class Svar2Haps(Haps[_H]):
             cache=cache,
             store_contigs=list(sv.contigs),
             ds_contigs=list(contigs),
+            ploidy=P,
             max_jitter=max_jitter,
             store_fields=store_fields,
             var_fields=var_fields,
@@ -484,7 +524,7 @@ class Svar2Haps(Haps[_H]):
         """
         assert self.store is not None
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
 
         perm = np.asarray(splice_plan.permutation, np.intp)
@@ -564,7 +604,7 @@ class Svar2Haps(Haps[_H]):
     ) -> NDArray[np.int32]:
         """Return ``(query, ploidy)`` SVAR2 length deltas."""
         regions = np.asarray(regions, np.int32)
-        ploidy = int(self.genotypes.shape[-2])
+        ploidy = self.stored_ploidy
         diffs = np.empty((len(idx), ploidy), np.int32)
         for ci, qsel, gi in self._gathered_groups(idx, regions, ploidy):
             d = hap_diffs_from_svar2_readbound(
@@ -647,7 +687,7 @@ class Svar2Haps(Haps[_H]):
                 "get_haps_and_shifts expects splice_plan=None."
             )
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
         lengths = (regions[:, 2] - regions[:, 1]).astype(np.int64)
 
@@ -767,7 +807,7 @@ class Svar2Haps(Haps[_H]):
             )
         assert self.store is not None
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
 
         params_c = np.ascontiguousarray(params, np.float64)
@@ -911,7 +951,7 @@ class Svar2Haps(Haps[_H]):
               instance's variants.
         """
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
 
         n_vars_total = np.zeros(b, np.int64)
@@ -985,7 +1025,7 @@ class Svar2Haps(Haps[_H]):
                 bytes, and any requested INFO/FORMAT fields).
         """
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
         p_eff = 1 if self.unphased_union else P
 
@@ -1115,7 +1155,7 @@ class Svar2Haps(Haps[_H]):
         include_ilen = "ilen" in self.var_fields
 
         regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
+        P = self.stored_ploidy
         b = len(idx)
 
         p_eff = 1 if self.unphased_union else P
