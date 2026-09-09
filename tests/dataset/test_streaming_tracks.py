@@ -154,3 +154,69 @@ def test_return_indices_are_original_bed_rows(svar1_multicontig_fixture):
     for _data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
         seen.update(zip(map(int, r_idx), map(int, s_idx)))
     assert seen == {(r, s) for r in range(n_regions) for s in range(n_samples)}
+
+
+def test_tracks_only_constructs(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    assert sds.shape == (len(f.bed), len(f.samples))
+    assert sds.samples == sorted(f.samples)
+
+
+def test_tracks_only_auto_is_sample_major(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    assert sds._iteration_order == "samples"
+
+
+def test_mixed_auto_is_region_major(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar_path, tracks=f.bigwigs
+    )
+    assert sds._iteration_order == "regions"
+
+
+def test_no_sources_still_raises(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    with pytest.raises(ValueError, match="variants|tracks"):
+        gvl.StreamingDataset(f.bed)
+
+
+def test_with_seqs_on_tracks_only_raises(streaming_tracks_fixture):
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(f.bed, tracks=f.bigwigs)
+    with pytest.raises(ValueError, match="no variant source"):
+        sds.with_seqs("haplotypes")
+
+
+def test_mixed_iteration_order_samples_drives_to_iter_end_to_end(
+    streaming_tracks_fixture,
+):
+    """Close the Task 4 carry-forward gap: `iteration_order="samples"` must be
+
+    exercised through the real drive (`_iter_batches`/`to_iter`), not only
+    through `_plan()`. Task 4 could only test `_plan()` directly because
+    `"auto"` never resolved to `"samples"` (the `has_tracks` placeholder was
+    always `False`); now that a real source mix can request it explicitly
+    (independent of `"auto"` resolution), drive the SVAR1 engine end-to-end
+    under sample-major order and confirm the emitted cell SET is still the
+    full cartesian product, forcing both axes to chunk so the two orders'
+    visit sequences actually differ.
+    """
+    f = streaming_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar_path,
+        tracks=f.bigwigs,
+        iteration_order="samples",
+    )
+    assert sds._iteration_order == "samples"
+    object.__setattr__(sds, "_window_samples", 1)
+    object.__setattr__(sds, "_window_regions", 1)
+    n_regions, n_samples = sds.shape
+    seen = set()
+    for _data, r_idx, s_idx in sds.to_iter(batch_size=1, return_indices=True):
+        seen.update(zip(map(int, r_idx), map(int, s_idx)))
+    assert seen == {(r, s) for r in range(n_regions) for s in range(n_samples)}

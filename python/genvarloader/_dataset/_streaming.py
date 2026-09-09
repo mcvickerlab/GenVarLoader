@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal, cast
@@ -23,7 +23,9 @@ if TYPE_CHECKING:
     import torch.utils.data as td
     import genoray
 
+    from .._types import IntervalTrack
     from ._flat_variants import VarWindowOpt
+    from ._track_stream import _TrackBackend
 
 # Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
 # report a `with_seqs(...)` value back in error messages (`_iter_batches`'s
@@ -269,6 +271,10 @@ class StreamingDataset:
     # generates per batch (output bounded by batch_size). The injected
     # `_reconstruct_window` remains a whole-window TEST seam used when `_backend` is None.
     _backend: "_Svar1Backend | _Svar2Backend | _VcfBackend | _PgenBackend | None" = None
+    # Interval-track read backend (issue #279 Task 5), set whenever `tracks=`
+    # was supplied (variants-only, tracks-only, or mixed). `None` means no
+    # tracks were requested.
+    _track_backend: "_TrackBackend | None" = None
     # INTERNAL/EXPERIMENTAL (issue #283) -- not a public `__init__` kwarg, set only via
     # `object.__setattr__`. Selects which prefetch drive `_iter_batches` uses when
     # `_backend is not None`:
@@ -313,6 +319,7 @@ class StreamingDataset:
         regions,
         reference: str | Path | None = None,
         variants: str | Path | None = None,
+        tracks: "IntervalTrack | Sequence[IntervalTrack] | None" = None,
         *,
         jitter: int = 0,
         max_mem: str | int = "512MB",
@@ -324,6 +331,18 @@ class StreamingDataset:
         _reconstruct_window: Callable[[NDArray[np.intp], NDArray[np.intp]], object]
         | None = None,
     ):
+        # Normalize `tracks` into a flat list ONCE, before the variants/tracks
+        # classification below -- both the tracks-only branch and the
+        # post-regions `_TrackBackend` construction (further down) consume this
+        # list. A bare `IntervalTrack` (e.g. a single `BigWigs`) is wrapped;
+        # anything else Sequence-like (list/tuple, NOT str/bytes) is flattened.
+        if tracks is None:
+            _track_list: "list[IntervalTrack]" = []
+        elif isinstance(tracks, Sequence) and not isinstance(tracks, (str, bytes)):
+            _track_list = list(tracks)
+        else:
+            _track_list = [tracks]
+
         # Every construction path must define this: the injected-callback (test) path
         # leaves it None; the real `.svar` branch below sets it to the `_Svar1Backend`
         # instance.
@@ -404,11 +423,32 @@ class StreamingDataset:
                     f"variants={p} has an unrecognized file type; expected a "
                     "VCF, PGEN, or SparseVar (.svar) store."
                 )
+        elif _track_list:
+            # Tracks-only: no variant backend. `contigs`/`samples` are derived
+            # from the tracks' intersection instead, mirroring `gvl.write`'s
+            # sample-intersection rule (`_write.py:346-364`). There is no
+            # ploidy axis for track-only output -- `ploidy` is set to a
+            # placeholder that is never used to shape output (no haplotype
+            # reconstruction happens on this path).
+            if contigs is None:
+                contigs = sorted(
+                    set.intersection(*(set(t.contigs) for t in _track_list))
+                )
+            if samples is None:
+                samples = sorted(
+                    set.intersection(*(set(t.samples) for t in _track_list))
+                )
+                if not samples:
+                    raise ValueError(
+                        "Tracks share no samples; a tracks-only StreamingDataset"
+                        " needs at least one sample common to every track."
+                    )
+            n_samples = len(samples)
+            ploidy = 1  # placeholder; never used for output shaping
         else:
             raise ValueError(
-                "StreamingDataset(...) requires either `variants` (a path to a "
-                "VCF, PGEN, or SparseVar/.svar store, public API) or "
-                "`_reconstruct_window` (injected-callback, internal/test API)."
+                "StreamingDataset requires at least one source: `variants=`,"
+                " `tracks=`, or the internal `_reconstruct_window=`."
             )
 
         bed = regions if isinstance(regions, pl.DataFrame) else sp.bed.read(regions)
@@ -426,6 +466,14 @@ class StreamingDataset:
         object.__setattr__(self, "_reconstruct_window", _reconstruct_window)
         object.__setattr__(self, "_samples", list(samples))
         object.__setattr__(self, "_backend", _backend_obj)
+        _track_backend_obj = None
+        if _track_list:
+            from ._track_stream import _TrackBackend
+
+            _track_backend_obj = _TrackBackend(
+                _track_list, self._regions, list(self.contigs), list(self._samples)
+            )
+        object.__setattr__(self, "_track_backend", _track_backend_obj)
         # See the field's comment: internal/experimental, flipped only by the
         # cold-cache A-vs-C harness via `object.__setattr__`. Backend-derived so a
         # non-SVAR1 backend (e.g. `_Svar2Backend`, whose producer-thread engine ships
@@ -477,6 +525,15 @@ class StreamingDataset:
         # may declare a different per-cell resident-window cost (e.g. `_Svar2Backend`
         # caches vk_snp_range + vk_indel_range pairs instead), so defer to it when set.
         cell_bytes = getattr(_backend_obj, "_cell_bytes", int(ploidy) * 16)
+        if _track_backend_obj is not None:
+            # Each (region, sample) cell also materializes intervals for every
+            # track: start+end (i32) + value (f32) = 12 B per interval. Budget a
+            # conservative constant per cell per track until a measured
+            # estimate is available (follow-up) -- this is what lets
+            # `_window_samples` actually shrink under a tight `max_mem` when
+            # tracks are present (spec Sections 2.5, 4.4).
+            TRACK_BYTES_PER_CELL = 12 * 64
+            cell_bytes += TRACK_BYTES_PER_CELL * len(_track_backend_obj.names)
         max_cells = max(1, max_mem_bytes // (cell_bytes * n_slots))
         window_samples = max(1, min(int(n_samples), max_cells))
         region_target = 64  # measured read-amortization knee; see roadmap Plan 2.
@@ -507,7 +564,7 @@ class StreamingDataset:
             # Tracks-only -> samples, because BigWigs holds one file per sample.
             # Mixed -> regions, the roadmap's decision (non-optimal for the
             # track axis; `iteration_order="samples"` is the escape hatch).
-            has_tracks = False  # Task 5 wires tracks in here.
+            has_tracks = _track_backend_obj is not None
             has_variants = _backend_obj is not None
             resolved = "samples" if (has_tracks and not has_variants) else "regions"
         else:
@@ -1450,6 +1507,15 @@ class StreamingDataset:
             ValueError: ``opt`` was omitted for ``kind="variant-windows"``, or
                 supplied for any other ``kind``.
         """
+        if self._backend is None and self._reconstruct_window is None:
+            # Tracks-only: no variant source to reconstruct from (never true of
+            # the injected-callback test path, which sets `_reconstruct_window`
+            # even though it also has no `_backend`).
+            raise ValueError(
+                "with_seqs() requires a variant source; this StreamingDataset"
+                " has no variant source (tracks only), so it yields tracks"
+                " alone from to_iter()."
+            )
         kind_map = {
             "haplotypes": RaggedSeqs,
             "annotated": RaggedAnnotatedHaps,
