@@ -71,6 +71,7 @@ Create `scratch/diag_315_realcorpus.py`. It reproduces the reported config, conf
 """Pin the #315 estimate divergence against the real SVAR2 Hartwig corpus.
 Not committed under python/. Run: pixi run -e dev python scratch/diag_315_realcorpus.py
 """
+
 import sys
 import numpy as np
 import seqpro as sp
@@ -90,20 +91,28 @@ def make_view():
     # subset to the reported region count (all samples)
     ds = ds.subset_to(regions=slice(N_REGIONS))
     opt = gvl.VarWindowOpt(
-        flank_length=128, token_alphabet=DNA, unknown_token=len(DNA),
-        ref="window", alt="allele",
+        flank_length=128,
+        token_alphabet=DNA,
+        unknown_token=len(DNA),
+        ref="window",
+        alt="allele",
     )
     return (
-        ds.with_tracks(False).with_output_format("flat")
-          .with_seqs("variant-windows", opt)
-          .with_settings(unphased_union=True, jitter=0)
+        ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+        .with_settings(unphased_union=True, jitter=0)
     )
 
 
 def main() -> int:
     view = make_view()
-    print("reconstructor:", type(view._seqs).__name__,
-          "is Svar2Haps:", isinstance(view._seqs, Svar2Haps))
+    print(
+        "reconstructor:",
+        type(view._seqs).__name__,
+        "is Svar2Haps:",
+        isinstance(view._seqs, Svar2Haps),
+    )
     R, S = view.shape[:2]
     print(f"shape: {R} regions x {S} samples")
 
@@ -118,11 +127,16 @@ def main() -> int:
         arrays = list(chunk) if isinstance(chunk, tuple) else [chunk]
         buf = memoryview(bytearray(512 * 1024 * 1024))
         real = write_chunk(buf, arrays, n_instances=len(r)) - HEADER_RESERVED
-        est = int(np.asarray(
-            view._output_bytes_per_instance(r, s, include_offsets=True)).sum())
+        est = int(
+            np.asarray(
+                view._output_bytes_per_instance(r, s, include_offsets=True)
+            ).sum()
+        )
         ovh = slot_overhead_bytes(view)
-        print(f"N={len(r):>7}  est={est:>12}  overhead={ovh:>8}  real={real:>12}  "
-              f"est+ovh-real={est + ovh - real:>12}  per_inst_gap={(real - est) / len(r):.1f}")
+        print(
+            f"N={len(r):>7}  est={est:>12}  overhead={ovh:>8}  real={real:>12}  "
+            f"est+ovh-real={est + ovh - real:>12}  per_inst_gap={(real - est) / len(r):.1f}"
+        )
 
     # Decompose one region's estimate: n_vars_total vs emitted window count W.
     r = np.zeros(S, np.int64)
@@ -131,16 +145,21 @@ def main() -> int:
     n_vars = view.n_variants(r, s)
     n_vars_total = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64).sum(-1)
     chunk = view[r, s]
-    ref_slot = (chunk[0] if isinstance(chunk, tuple) else chunk)
+    ref_slot = chunk[0] if isinstance(chunk, tuple) else chunk
     # emitted window count W per instance = len(ref window seq_offsets) - 1, per instance
     print("sum n_vars_total (estimate M):", int(n_vars_total.sum()))
-    print("real_ploidy:", haps.genotypes.shape[-2],
-          "unphased_union:", view.unphased_union)
+    print(
+        "real_ploidy:", haps.genotypes.shape[-2], "unphased_union:", view.unphased_union
+    )
     # Dump the worst-under-counted instance for its record class.
     est_pi = np.asarray(view._output_bytes_per_instance(r, s, include_offsets=True))
-    worst = int(np.argmin(est_pi - 0))  # smallest estimate; refine vs per-instance real if needed
-    print("example instance (r=0, s=%d): est_bytes=%d n_vars_total=%d"
-          % (worst, int(est_pi[worst]), int(n_vars_total[worst])))
+    worst = int(
+        np.argmin(est_pi - 0)
+    )  # smallest estimate; refine vs per-instance real if needed
+    print(
+        "example instance (r=0, s=%d): est_bytes=%d n_vars_total=%d"
+        % (worst, int(est_pi[worst]), int(n_vars_total[worst]))
+    )
     return 0
 
 
@@ -211,6 +230,7 @@ def test_slot_fit_svar2_backend(phased_svar2_gvl, reference):
     coverage gap that let #315 through. The estimate must upper-bound the real
     serialized payload here too."""
     from genvarloader._dataset._svar2_haps import Svar2Haps
+
     ds = gvl.Dataset.open(phased_svar2_gvl, reference=reference)
     assert isinstance(ds._seqs, Svar2Haps), "fixture must open as Svar2Haps"
     for view in _views(ds):

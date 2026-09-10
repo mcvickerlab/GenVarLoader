@@ -35,9 +35,9 @@ divisibility:
 
 ```python
 if n % batch_size != 0:
-    raise ValueError(...)              # line 38-42
+    raise ValueError(...)  # line 38-42
 ...
-batch_totals = per_inst.reshape(-1, batch_size).sum(-1)   # line 50
+batch_totals = per_inst.reshape(-1, batch_size).sum(-1)  # line 50
 ```
 
 ### Bug 2 — default mode crashes on `drop_last=True`

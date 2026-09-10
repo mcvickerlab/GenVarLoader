@@ -345,10 +345,12 @@ def build_splice_plan(
         cell_lengths = np.repeat(pair_lengths.astype(np.int64), E)
     # cell_lengths length = n_pairs * E. group_offsets indexes the
     # *permuted_lengths* array at cell boundaries.
-    cell_starts = np.concatenate((
-        [0],
-        np.cumsum(cell_lengths, dtype=np.int64),
-    ))  # length n_pairs*E + 1
+    cell_starts = np.concatenate(
+        (
+            [0],
+            np.cumsum(cell_lengths, dtype=np.int64),
+        )
+    )  # length n_pairs*E + 1
     # group_offsets[i] = permuted_out_offsets[cell_starts[i]]
     group_offsets = permuted_out_offsets[cell_starts]
 
@@ -418,14 +420,16 @@ def test_ref_call_with_plan_matches_current_behavior(tmp_path, request):
 
     DDIR = Path(request.config.rootpath) / "tests" / "data"
     ref = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1", "chr1"],
-        "chromStart": [1000, 2000, 5000],
-        "chromEnd": [1010, 2010, 5010],
-        "strand": [1, 1, 1],
-        "transcript_id": ["T1", "T1", "T2"],
-        "exon_number": [1, 2, 1],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [1000, 2000, 5000],
+            "chromEnd": [1010, 2010, 5010],
+            "strand": [1, 1, 1],
+            "transcript_id": ["T1", "T1", "T2"],
+            "exon_number": [1, 2, 1],
+        }
+    )
 
     sp_ds = gvl.RefDataset(ref, bed, splice_info="transcript_id")
     new_path = sp_ds[:]  # exercises the production path once Task 3 lands.
@@ -433,10 +437,12 @@ def test_ref_call_with_plan_matches_current_behavior(tmp_path, request):
     # Legacy path replicated inline.
     plain = gvl.RefDataset(ref, bed)
     unsp = plain[:]
-    t1 = np.concatenate([
-        np.asarray(unsp[0], dtype="S1"),
-        np.asarray(unsp[1], dtype="S1"),
-    ])
+    t1 = np.concatenate(
+        [
+            np.asarray(unsp[0], dtype="S1"),
+            np.asarray(unsp[1], dtype="S1"),
+        ]
+    )
     t2 = np.asarray(unsp[2], dtype="S1")
 
     np.testing.assert_equal(np.asarray(new_path[0], dtype="S1").ravel(), t1)
@@ -458,12 +464,14 @@ def test_ref_call_with_plan_writes_grouped_layout(tmp_path, request):
 
     DDIR = Path(request.config.rootpath) / "tests" / "data"
     ref = gvl.Reference.from_path(DDIR / "fasta" / "hg38.fa.bgz", in_memory=False)
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1", "chr1"],
-        "chromStart": [1000, 2000, 5000],
-        "chromEnd": [1010, 2010, 5010],
-        "strand": [1, 1, 1],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [1000, 2000, 5000],
+            "chromEnd": [1010, 2010, 5010],
+            "strand": [1, 1, 1],
+        }
+    )
     plain = gvl.RefDataset(ref, bed).with_len("ragged")
     # Manually drive Ref.__call__ as RefDataset._getitem_spliced will:
     from genvarloader._dataset._utils import bed_to_regions
@@ -1513,8 +1521,7 @@ def test_spliced_tracks_round_trip(multi_exon_ds_path: Path):
     # invariant that the splice plan path produces sane buffers.
     try:
         ds = (
-            gvl.Dataset
-            .open(multi_exon_ds_path, ref_path)
+            gvl.Dataset.open(multi_exon_ds_path, ref_path)
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))
         )
@@ -1606,8 +1613,7 @@ def test_haptracks_splicing_raises(multi_exon_ds_path: Path):
     # If the fixture lacks tracks, skip.
     try:
         ds = (
-            gvl.Dataset
-            .open(multi_exon_ds_path, ref_path)
+            gvl.Dataset.open(multi_exon_ds_path, ref_path)
             .with_seqs("haplotypes")
             .with_tracks("dummy")
             .with_settings(splice_info=("transcript_id", "exon_number"))

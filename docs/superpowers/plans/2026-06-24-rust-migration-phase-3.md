@@ -209,6 +209,7 @@ def get_reference_inputs(draw):
     """Generate (regions, out_offsets, reference, ref_offsets, pad_char, parallel)
     with regions whose [start,end) windows may run off either contig edge."""
     import numpy as np
+
     n_contigs = draw(st.integers(1, 3))
     contig_lens = [draw(st.integers(1, 40)) for _ in range(n_contigs)]
     ref_offsets = np.concatenate([[0], np.cumsum(contig_lens)]).astype(np.int64)
@@ -249,7 +250,13 @@ pytestmark = pytest.mark.parity
 def test_get_reference_parity(inputs):
     regions, out_offsets, reference, ref_offsets, pad_char, parallel = inputs
     assert_kernel_parity(
-        "get_reference", regions, out_offsets, reference, ref_offsets, pad_char, parallel
+        "get_reference",
+        regions,
+        out_offsets,
+        reference,
+        ref_offsets,
+        pad_char,
+        parallel,
     )
 ```
 
@@ -362,13 +369,17 @@ from genvarloader import _genvarloader as _gvl_rust  # match existing import ali
 from genvarloader._dispatch import register, get
 
 
-def _get_reference_numba(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+def _get_reference_numba(
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel
+):
     out = np.empty(out_offsets[-1], np.uint8)
     kernel = _get_reference_par if parallel else _get_reference_ser
     return kernel(regions, out_offsets, reference, ref_offsets, pad_char, out)
 
 
-def _get_reference_rust(regions, out_offsets, reference, ref_offsets, pad_char, parallel):
+def _get_reference_rust(
+    regions, out_offsets, reference, ref_offsets, pad_char, parallel
+):
     return _gvl_rust.get_reference(
         np.ascontiguousarray(regions, np.int32),
         np.ascontiguousarray(out_offsets, np.int64),
@@ -379,12 +390,19 @@ def _get_reference_rust(regions, out_offsets, reference, ref_offsets, pad_char, 
     )
 
 
-register("get_reference", numba=_get_reference_numba, rust=_get_reference_rust, default="rust")
+register(
+    "get_reference",
+    numba=_get_reference_numba,
+    rust=_get_reference_rust,
+    default="rust",
+)
 
 
 def get_reference(regions, out_offsets, reference, ref_offsets, pad_char):
     parallel = should_parallelize(int(out_offsets[-1]))
-    return get("get_reference")(regions, out_offsets, reference, ref_offsets, pad_char, parallel)
+    return get("get_reference")(
+        regions, out_offsets, reference, ref_offsets, pad_char, parallel
+    )
 ```
 
 Note: `parallel` is computed in the Python entry (not inside the kernels) so both backends receive the identical flag — this keeps the numba twin byte-identical to today's behavior and makes the strategy's `parallel` field meaningful.
@@ -585,11 +603,16 @@ pub fn hash4(a: u64, b: u64, c: u64, d: u64) -> u64 {
 - [ ] **Step 2: Add a direct numba-vs-rust PRNG parity test.** Temporarily expose the rust `hash4` via a `#[pyfunction]` (e.g. `ffi::_debug_hash4`) and a numba `_hash4` accessor in `_tracks.py`, then over a hypothesis grid of `(a,b,c,d)` `uint64` quadruples assert `rust_hash4(a,b,c,d) == int(_hash4(a,b,c,d))`. This is the single most important guard for FlankSample byte-identity.
 
 ```python
-@given(st.integers(0, 2**64 - 1), st.integers(0, 2**64 - 1),
-       st.integers(0, 2**64 - 1), st.integers(0, 2**64 - 1))
+@given(
+    st.integers(0, 2**64 - 1),
+    st.integers(0, 2**64 - 1),
+    st.integers(0, 2**64 - 1),
+    st.integers(0, 2**64 - 1),
+)
 def test_hash4_parity(a, b, c, d):
     from genvarloader._dataset._tracks import _hash4
     import numpy as np
+
     exp = int(_hash4(np.uint64(a), np.uint64(b), np.uint64(c), np.uint64(d)))
     assert _gvl_rust._debug_hash4(a, b, c, d) == exp
 ```

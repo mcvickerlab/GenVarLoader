@@ -146,8 +146,7 @@ pytestmark = pytest.mark.slow
 
 def dataset_bcf():
     return (
-        gvl.Dataset
-        .open(data_dir / "1kg" / "phased_1kg.bcf.gvl", ref, rc_neg=False)
+        gvl.Dataset.open(data_dir / "1kg" / "phased_1kg.bcf.gvl", ref, rc_neg=False)
         .with_len("ragged")
         .with_seqs("haplotypes")
         .with_tracks(False)

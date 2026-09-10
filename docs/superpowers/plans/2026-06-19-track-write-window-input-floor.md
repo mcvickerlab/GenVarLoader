@@ -70,9 +70,7 @@ def test_stored_window_floored_to_input(
     # One wide region spanning the chr1 variant cluster out to the contig end.
     # Its tail is variant-free, so a pre-fix writer truncates chromEnd to the
     # rightmost variant (< chr1_len); the fix floors it at the input end.
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]})
     variants = _open_variants(source, vcf_dir, pgen_dir, filtered_svar)
     out = tmp_path / "ds.gvl"
     gvl.write(out, bed, variants=variants, overwrite=True)
@@ -164,9 +162,7 @@ def test_annot_track_tail_not_truncated_by_variants(vcf_dir, ref_fasta, tmp_path
     bw.addEntries(["chr1"], [0], ends=[chr1_len], values=[0.5])
     bw.close()
 
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]})
     out = tmp_path / "ds.gvl"
     gvl.write(
         out,
@@ -238,9 +234,7 @@ def test_warns_on_truncated_track_window(vcf_dir, ref_fasta, tmp_path):
     bw.addHeader([("chr1", chr1_len)])
     bw.addEntries(["chr1"], [0], ends=[chr1_len], values=[0.5])
     bw.close()
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [100], "chromEnd": [chr1_len]})
     out = tmp_path / "ds.gvl"
     gvl.write(
         out,

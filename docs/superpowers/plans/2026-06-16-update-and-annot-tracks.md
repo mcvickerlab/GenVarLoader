@@ -342,9 +342,7 @@ def test_annot_intervals_from_bigwig(tmp_path):
     data_dir = Path(__file__).parent.parent / "data" / "bigwig"
     bw = data_dir / "sample_0.bw"
     # a region known to overlap intervals in the fixture bigwig
-    regions = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [1000]}
-    )
+    regions = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [1000]})
     itvs = _annot_intervals(regions, bw, max_mem=2**30)
     # shape (regions, None), one region
     assert itvs.values.offsets.shape == (2,)
@@ -414,13 +412,9 @@ def _annot_intervals_from_bigwig(
             out_ends.append(np.asarray(itvs.ends[r, 0], dtype=np.int32))
             out_values.append(np.asarray(itvs.values[r, 0], dtype=np.float32))
             lengths.append(len(s))
-    flat_starts = (
-        np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
-    )
+    flat_starts = np.concatenate(out_starts) if out_starts else np.empty(0, np.int32)
     flat_ends = np.concatenate(out_ends) if out_ends else np.empty(0, np.int32)
-    flat_values = (
-        np.concatenate(out_values) if out_values else np.empty(0, np.float32)
-    )
+    flat_values = np.concatenate(out_values) if out_values else np.empty(0, np.float32)
     offsets = lengths_to_offsets(np.asarray(lengths, np.int32))
     shape = (regions.height, None)
     return RaggedIntervals(
@@ -483,13 +477,13 @@ def test_write_with_annot_tracks(phased_vcf, ref_fasta, tmp_path):
     import polars as pl
 
     out = tmp_path / "ds"
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [64]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [64]})
     annot = bed.with_columns(chromEnd=pl.col("chromStart") + 1, score=pl.lit(1.0))
     gvl.write(out, bed, variants=phased_vcf, annot_tracks={"5ss": annot})
-    ds = gvl.Dataset.open(out, ref_fasta).with_seqs("annotated").with_tracks(
-        "5ss", "tracks"
+    ds = (
+        gvl.Dataset.open(out, ref_fasta)
+        .with_seqs("annotated")
+        .with_tracks("5ss", "tracks")
     )
     assert "5ss" in ds.available_tracks
 ```
@@ -538,15 +532,13 @@ Update the "at least one input" guard:
 After the existing track-writing block (~286-289), add:
 
 ```python
-            if annot_tracks is not None:
-                logger.info("Writing annotation tracks.")
-                annot_bed = regions_to_bed(
-                    np.load(path / "regions.npy"), contigs
-                ).select("chrom", "chromStart", "chromEnd")
-                for name, source in annot_tracks.items():
-                    _write_annot_track(
-                        path / "annot_intervals" / name, annot_bed, source, max_mem
-                    )
+if annot_tracks is not None:
+    logger.info("Writing annotation tracks.")
+    annot_bed = regions_to_bed(np.load(path / "regions.npy"), contigs).select(
+        "chrom", "chromStart", "chromEnd"
+    )
+    for name, source in annot_tracks.items():
+        _write_annot_track(path / "annot_intervals" / name, annot_bed, source, max_mem)
 ```
 
 Add the import at the top of `_write.py`:
@@ -672,37 +664,35 @@ Replace the sequential track / annot blocks in `write` with job construction. Va
 still run first, serially (they finalize `gvl_bed` and write `regions.npy`):
 
 ```python
-            # variants already written above; regions.npy is finalized here.
-            _write_regions(path, gvl_bed, contigs)
+# variants already written above; regions.npy is finalized here.
+_write_regions(path, gvl_bed, contigs)
 
-            jobs: list[Callable[[int], None]] = []
-            if tracks is not None:
-                _tracks = list(tracks)
-                _bed = gvl_bed
+jobs: list[Callable[[int], None]] = []
+if tracks is not None:
+    _tracks = list(tracks)
+    _bed = gvl_bed
 
-                def _tracks_job(mm: int, _tracks=_tracks, _bed=_bed):
-                    for tr in _tracks:
-                        _write_track(path / "intervals" / tr.name, _bed, tr, samples, mm)
+    def _tracks_job(mm: int, _tracks=_tracks, _bed=_bed):
+        for tr in _tracks:
+            _write_track(path / "intervals" / tr.name, _bed, tr, samples, mm)
 
-                jobs.append(_tracks_job)
+    jobs.append(_tracks_job)
 
-            if annot_tracks is not None:
-                annot_bed = regions_to_bed(
-                    np.load(path / "regions.npy"), contigs
-                ).select("chrom", "chromStart", "chromEnd")
-                _annots = dict(annot_tracks)
+if annot_tracks is not None:
+    annot_bed = regions_to_bed(np.load(path / "regions.npy"), contigs).select(
+        "chrom", "chromStart", "chromEnd"
+    )
+    _annots = dict(annot_tracks)
 
-                def _annot_job(mm: int, _annots=_annots, _bed=annot_bed):
-                    for name, source in _annots.items():
-                        _write_annot_track(
-                            path / "annot_intervals" / name, _bed, source, mm
-                        )
+    def _annot_job(mm: int, _annots=_annots, _bed=annot_bed):
+        for name, source in _annots.items():
+            _write_annot_track(path / "annot_intervals" / name, _bed, source, mm)
 
-                jobs.append(_annot_job)
+    jobs.append(_annot_job)
 
-            if jobs:
-                logger.info(f"Writing {len(jobs)} track categor(ies).")
-                _run_jobs(jobs, max_mem)
+if jobs:
+    logger.info(f"Writing {len(jobs)} track categor(ies).")
+    _run_jobs(jobs, max_mem)
 ```
 
 Remove the now-superseded sequential `if tracks` / `if annot_tracks` blocks added in
@@ -774,7 +764,9 @@ def test_update_accepts_dataset_object(phased_vcf, ref_fasta, bigwigs, tmp_path)
     assert bigwigs.name in gvl.Dataset.open(out, ref_fasta).available_tracks
 
 
-def test_update_rejects_extra_or_missing_samples(phased_vcf, ref_fasta, bigwigs, tmp_path):
+def test_update_rejects_extra_or_missing_samples(
+    phased_vcf, ref_fasta, bigwigs, tmp_path
+):
     out = tmp_path / "ds"
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [64]})
     gvl.write(out, bed, variants=phased_vcf, samples=bigwigs.samples[:-1])
@@ -853,7 +845,9 @@ def update(
         _tracks = list(tracks) if tracks is not None else []
 
         if tracks is None and annot_tracks is None:
-            raise ValueError("At least one of `tracks` or `annot_tracks` must be provided.")
+            raise ValueError(
+                "At least one of `tracks` or `annot_tracks` must be provided."
+            )
 
         # validate strict sample-set agreement for per-sample tracks
         for tr in _tracks:
@@ -914,24 +908,25 @@ file in the same parent; the latter is a file and `p.iterdir()` on it raises. Gu
 loops:
 
 ```python
-        def _is_track_dir(p: Path) -> bool:
-            return (
-                p.is_dir()
-                and ".tmp." not in p.name
-                and ".old." not in p.name
-                and not p.name.endswith(".lock")
-            )
+def _is_track_dir(p: Path) -> bool:
+    return (
+        p.is_dir()
+        and ".tmp." not in p.name
+        and ".old." not in p.name
+        and not p.name.endswith(".lock")
+    )
 
-        available_tracks: list[str] = []
-        if strack_dir.exists():
-            for p in strack_dir.iterdir():
-                if not _is_track_dir(p):
-                    continue
-                if len(list(p.iterdir())) == 0:
-                    p.rmdir()
-                else:
-                    available_tracks.append(p.name)
-            available_tracks.sort()
+
+available_tracks: list[str] = []
+if strack_dir.exists():
+    for p in strack_dir.iterdir():
+        if not _is_track_dir(p):
+            continue
+        if len(list(p.iterdir())) == 0:
+            p.rmdir()
+        else:
+            available_tracks.append(p.name)
+    available_tracks.sort()
 ```
 
 Apply the same `_is_track_dir` guard to the `available_annots` loop. Define
@@ -991,8 +986,10 @@ def test_annot_tracks(phased_vcf, ref_fasta, tmp_path):
         chromEnd=pl.col("chromStart") + 1, score=pl.lit(1.0)
     )
     gvl.update(out, annot_tracks={"5ss": annots})
-    annot_ds = gvl.Dataset.open(out, ref_fasta).with_seqs("annotated").with_tracks(
-        "5ss", "tracks"
+    annot_ds = (
+        gvl.Dataset.open(out, ref_fasta)
+        .with_seqs("annotated")
+        .with_tracks("5ss", "tracks")
     )
     haps, tracks = annot_ds[:]
     mask = haps.ref_coords == ak.Array(
@@ -1024,9 +1021,7 @@ def test_annot_overlap_explicit():
     got = annot_overlap(regions, annot)
     # region 0 [chr1:0-100] overlaps the 3 chr1 annots; region 1 [chr1:50-150] overlaps
     # the chr1 annots at 60-70 and 90-95; region 2 [chr2:0-100] overlaps the chr2 annot.
-    np.testing.assert_array_equal(
-        np.diff(got.values.offsets), np.array([3, 2, 1])
-    )
+    np.testing.assert_array_equal(np.diff(got.values.offsets), np.array([3, 2, 1]))
     # region 2's single interval is the chr2 annot 5-15 with score 4.0
     np.testing.assert_array_equal(np.asarray(got.starts[2]), [5])
     np.testing.assert_array_equal(np.asarray(got.ends[2]), [15])

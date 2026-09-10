@@ -214,20 +214,24 @@ the implementation; delete afterward.
 import polars as pl
 import polars_bio as pb
 
-queries = pl.DataFrame({
-    "chrom": ["chr1", "chr1", "chr2"],
-    "start": [0, 50, 0],
-    "end": [10, 60, 10],
-    "_q": [0, 1, 2],
-    "sample_id": ["s0", "s0", "s0"],
-})
-table = pl.DataFrame({
-    "chrom": ["chr1", "chr1"],
-    "start": [2, 100],
-    "end": [5, 105],
-    "value": [1.0, 2.0],
-    "sample_id": ["s0", "s0"],
-})
+queries = pl.DataFrame(
+    {
+        "chrom": ["chr1", "chr1", "chr2"],
+        "start": [0, 50, 0],
+        "end": [10, 60, 10],
+        "_q": [0, 1, 2],
+        "sample_id": ["s0", "s0", "s0"],
+    }
+)
+table = pl.DataFrame(
+    {
+        "chrom": ["chr1", "chr1"],
+        "start": [2, 100],
+        "end": [5, 105],
+        "value": [1.0, 2.0],
+        "sample_id": ["s0", "s0"],
+    }
+)
 
 print("=== overlap ===")
 ov = pb.overlap(
@@ -300,13 +304,15 @@ from genvarloader._table import Table
 
 
 def make_long_df():
-    return pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1", "s1"],
-        "chrom": ["chr1", "chr1", "chr1", "chr2"],
-        "start": [10, 100, 20, 0],
-        "end": [20, 110, 30, 5],
-        "value": [1.0, 2.0, 3.0, 4.0],
-    })
+    return pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr2"],
+            "start": [10, 100, 20, 0],
+            "end": [20, 110, 30, 5],
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
 
 def test_table_init_from_long_df():
@@ -378,19 +384,20 @@ class Table:
     ) -> None:
         self.name = name
         df = self._normalize_input(data, column_map)
-        df = df.cast({
-            "sample_id": pl.Utf8,
-            "chrom": pl.Utf8,
-            "start": pl.Int64,
-            "end": pl.Int64,
-            "value": pl.Float32,
-        }).sort("chrom", "sample_id", "start")
+        df = df.cast(
+            {
+                "sample_id": pl.Utf8,
+                "chrom": pl.Utf8,
+                "start": pl.Int64,
+                "end": pl.Int64,
+                "value": pl.Float32,
+            }
+        ).sort("chrom", "sample_id", "start")
         self._df = df
         self.samples = sorted(df["sample_id"].unique().to_list())
         self.contigs = {
             row["chrom"]: int(row["max_end"])
-            for row in df
-            .group_by("chrom")
+            for row in df.group_by("chrom")
             .agg(pl.col("end").max().alias("max_end"))
             .iter_rows(named=True)
         }
@@ -477,18 +484,22 @@ git commit -m "feat: add Table skeleton with long-form DataFrame init"
 ```python
 def test_table_init_from_dict_of_dfs():
     per_sample = {
-        "s0": pl.DataFrame({
-            "chrom": ["chr1"],
-            "start": [10],
-            "end": [20],
-            "value": [1.0],
-        }),
-        "s1": pl.DataFrame({
-            "chrom": ["chr2"],
-            "start": [0],
-            "end": [5],
-            "value": [2.0],
-        }),
+        "s0": pl.DataFrame(
+            {
+                "chrom": ["chr1"],
+                "start": [10],
+                "end": [20],
+                "value": [1.0],
+            }
+        ),
+        "s1": pl.DataFrame(
+            {
+                "chrom": ["chr2"],
+                "start": [0],
+                "end": [5],
+                "value": [2.0],
+            }
+        ),
     }
     t = Table("signal", per_sample)
     assert t.samples == ["s0", "s1"]
@@ -496,13 +507,15 @@ def test_table_init_from_dict_of_dfs():
 
 
 def test_table_column_map_renames_long_form():
-    df = pl.DataFrame({
-        "donor": ["s0"],
-        "chrom": ["chr1"],
-        "chromStart": [10],
-        "chromEnd": [20],
-        "signal": [1.5],
-    })
+    df = pl.DataFrame(
+        {
+            "donor": ["s0"],
+            "chrom": ["chr1"],
+            "chromStart": [10],
+            "chromEnd": [20],
+            "signal": [1.5],
+        }
+    )
     t = Table(
         "signal",
         df,
@@ -519,12 +532,14 @@ def test_table_column_map_renames_long_form():
 
 def test_table_column_map_per_sample_dict():
     per_sample = {
-        "s0": pl.DataFrame({
-            "chrom": ["chr1"],
-            "chromStart": [10],
-            "chromEnd": [20],
-            "signal": [1.5],
-        }),
+        "s0": pl.DataFrame(
+            {
+                "chrom": ["chr1"],
+                "chromStart": [10],
+                "chromEnd": [20],
+                "signal": [1.5],
+            }
+        ),
     }
     t = Table(
         "signal",
@@ -694,13 +709,15 @@ def _brute_count(df: pl.DataFrame, contig: str, starts, ends, samples):
 
 
 def test_table_count_intervals_matches_brute_force():
-    df = pl.DataFrame({
-        "sample_id": ["s0", "s0", "s0", "s1", "s1"],
-        "chrom": ["chr1", "chr1", "chr1", "chr1", "chr1"],
-        "start": [0, 50, 200, 10, 60],
-        "end": [10, 60, 210, 20, 70],
-        "value": [1.0, 2.0, 3.0, 4.0, 5.0],
-    })
+    df = pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr1", "chr1"],
+            "start": [0, 50, 200, 10, 60],
+            "end": [10, 60, 210, 20, 70],
+            "value": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
     t = Table("signal", df)
     starts = np.array([0, 55, 100, 200], dtype=np.int32)
     ends = np.array([15, 65, 150, 205], dtype=np.int32)
@@ -801,12 +818,14 @@ def _build_queries(
     samples: list[str],
 ) -> pl.DataFrame:
     n = len(starts)
-    return pl.DataFrame({
-        "_q": np.arange(n, dtype=np.int64),
-        "chrom": np.repeat(np.array([contig], dtype=object), n),
-        "start": starts,
-        "end": ends,
-    }).join(pl.DataFrame({"sample_id": samples}), how="cross")
+    return pl.DataFrame(
+        {
+            "_q": np.arange(n, dtype=np.int64),
+            "chrom": np.repeat(np.array([contig], dtype=object), n),
+            "start": starts,
+            "end": ends,
+        }
+    ).join(pl.DataFrame({"sample_id": samples}), how="cross")
 ```
 
 - [ ] **Step 4: Run tests**
@@ -841,13 +860,15 @@ from genvarloader._utils import lengths_to_offsets
 
 
 def test_table_intervals_from_offsets_roundtrip():
-    df = pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1"],
-        "chrom": ["chr1", "chr1", "chr1"],
-        "start": [0, 50, 10],
-        "end": [10, 60, 20],
-        "value": [1.5, 2.5, 3.5],
-    })
+    df = pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1"],
+            "chrom": ["chr1", "chr1", "chr1"],
+            "start": [0, 50, 10],
+            "end": [10, 60, 20],
+            "value": [1.5, 2.5, 3.5],
+        }
+    )
     t = Table("signal", df)
     starts = np.array([0, 40], dtype=np.int32)
     ends = np.array([15, 70], dtype=np.int32)
@@ -1196,22 +1217,26 @@ ddir = Path(__file__).parents[1] / "data"
 
 
 def _make_bed(tmp_path: Path) -> pl.DataFrame:
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 100],
-        "chromEnd": [50, 200],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 100],
+            "chromEnd": [50, 200],
+        }
+    )
     return bed
 
 
 def _make_table_df() -> pl.DataFrame:
-    return pl.DataFrame({
-        "sample_id": ["s0", "s0", "s1", "s1"],
-        "chrom": ["chr1", "chr1", "chr1", "chr1"],
-        "start": [10, 110, 5, 150],
-        "end": [20, 130, 15, 160],
-        "value": [1.0, 2.0, 3.0, 4.0],
-    })
+    return pl.DataFrame(
+        {
+            "sample_id": ["s0", "s0", "s1", "s1"],
+            "chrom": ["chr1", "chr1", "chr1", "chr1"],
+            "start": [10, 110, 5, 150],
+            "end": [20, 130, 15, 160],
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
 
 def test_write_with_table_only_roundtrip(tmp_path):
@@ -1267,11 +1292,13 @@ Append to `tests/dataset/test_write_tracks.py`:
 
 ```python
 def test_write_with_mixed_bigwigs_and_table(tmp_path):
-    bed = pl.DataFrame({
-        "chrom": ["chr1"],
-        "chromStart": [0],
-        "chromEnd": [200],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [0],
+            "chromEnd": [200],
+        }
+    )
     bw_dir = ddir / "bigwig"
     bw = gvl.BigWigs(
         "bw_signal",
@@ -1283,13 +1310,15 @@ def test_write_with_mixed_bigwigs_and_table(tmp_path):
     # Table sample IDs match the BigWigs sample IDs so the intersection is non-empty.
     table = Table(
         "tab_signal",
-        pl.DataFrame({
-            "sample_id": ["sample_0", "sample_1"],
-            "chrom": ["chr1", "chr1"],
-            "start": [0, 50],
-            "end": [10, 60],
-            "value": [9.0, 8.0],
-        }),
+        pl.DataFrame(
+            {
+                "sample_id": ["sample_0", "sample_1"],
+                "chrom": ["chr1", "chr1"],
+                "start": [0, 50],
+                "end": [10, 60],
+                "value": [9.0, 8.0],
+            }
+        ),
     )
 
     out = tmp_path / "mixed.gvl"
@@ -1305,23 +1334,27 @@ def test_write_duplicate_track_names_rejected(tmp_path):
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [100]})
     t1 = Table(
         "dup",
-        pl.DataFrame({
-            "sample_id": ["s0"],
-            "chrom": ["chr1"],
-            "start": [0],
-            "end": [10],
-            "value": [1.0],
-        }),
+        pl.DataFrame(
+            {
+                "sample_id": ["s0"],
+                "chrom": ["chr1"],
+                "start": [0],
+                "end": [10],
+                "value": [1.0],
+            }
+        ),
     )
     t2 = Table(
         "dup",
-        pl.DataFrame({
-            "sample_id": ["s0"],
-            "chrom": ["chr1"],
-            "start": [50],
-            "end": [60],
-            "value": [2.0],
-        }),
+        pl.DataFrame(
+            {
+                "sample_id": ["s0"],
+                "chrom": ["chr1"],
+                "start": [50],
+                "end": [60],
+                "value": [2.0],
+            }
+        ),
     )
     with pytest.raises(ValueError, match="[Dd]uplicate"):
         gvl.write(path=tmp_path / "x.gvl", bed=bed, tracks=[t1, t2])

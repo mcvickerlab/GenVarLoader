@@ -329,9 +329,7 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 def choose_samples() -> list[str]:
     """Deterministically pick N samples present in both genotypes and bigwigs."""
-    psam = pl.read_csv(
-        PLINK_PREFIX.with_suffix(".psam"), separator="\t"
-    )
+    psam = pl.read_csv(PLINK_PREFIX.with_suffix(".psam"), separator="\t")
     # plink psam first column is "#IID" or "IID".
     iid_col = "#IID" if "#IID" in psam.columns else "IID"
     geno_samples = set(psam[iid_col].to_list())
@@ -358,11 +356,15 @@ def slice_pgen(samples: list[str]) -> Path:
     run(
         [
             "plink2",
-            "--pfile", str(PLINK_PREFIX),
-            "--chr", "chr22",
-            "--keep", str(keep),
+            "--pfile",
+            str(PLINK_PREFIX),
+            "--chr",
+            "chr22",
+            "--keep",
+            str(keep),
             "--make-pgen",
-            "--out", str(out_prefix),
+            "--out",
+            str(out_prefix),
         ]
     )
     keep.unlink()
@@ -441,7 +443,7 @@ def build_dataset(samples: list[str], pgen: Path, bed_path: Path) -> Path:
         if not bw.exists():
             raise SystemExit(f"Missing chr22 bigwig for {sample}: {bw}")
         paths[sample] = str(bw)
-    assert set(paths) == set(samples), (set(samples) - set(paths))
+    assert set(paths) == set(samples), set(samples) - set(paths)
 
     tracks = gvl.BigWigs("read-depth", paths)
 
@@ -653,10 +655,20 @@ Expected: no import errors (conftest is imported during collection). No tests co
 Create a temporary check (do NOT commit) `tests/benchmarks/_smoke.py`:
 
 ```python
-def test_smoke(captured_haplotypes, captured_diffs, captured_intervals_to_tracks,
-               captured_realign_tracks, captured_germline_ccfs):
-    for c in (captured_haplotypes, captured_diffs, captured_intervals_to_tracks,
-              captured_realign_tracks, captured_germline_ccfs):
+def test_smoke(
+    captured_haplotypes,
+    captured_diffs,
+    captured_intervals_to_tracks,
+    captured_realign_tracks,
+    captured_germline_ccfs,
+):
+    for c in (
+        captured_haplotypes,
+        captured_diffs,
+        captured_intervals_to_tracks,
+        captured_realign_tracks,
+        captured_germline_ccfs,
+    ):
         assert c.args or c.kwargs
 ```
 
@@ -731,9 +743,7 @@ def test_reconstruct_haplotypes_from_sparse(benchmark, captured_haplotypes):
 
 
 def test_intervals_to_tracks(benchmark, captured_intervals_to_tracks):
-    result = _warm_and_run(
-        benchmark, intervals_to_tracks, captured_intervals_to_tracks
-    )
+    result = _warm_and_run(benchmark, intervals_to_tracks, captured_intervals_to_tracks)
     # intervals_to_tracks returns a dense track array.
     assert result is not None
 
@@ -934,7 +944,9 @@ def build(ds, mode: str):
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--mode", choices=["haplotypes", "tracks", "variants"], required=True)
+    p.add_argument(
+        "--mode", choices=["haplotypes", "tracks", "variants"], required=True
+    )
     p.add_argument("--n-batches", type=int, default=N_BATCHES)
     args = p.parse_args()
 
@@ -952,8 +964,10 @@ def main() -> None:
     regions = [i % n_regions for i in range(n)]
     samples = [(i // n_regions) % n_samples for i in range(n)]
 
-    print(f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
-          f"batches={args.n_batches} batch={n}")
+    print(
+        f"mode={args.mode} threads={os.environ['NUMBA_NUM_THREADS']} "
+        f"batches={args.n_batches} batch={n}"
+    )
     for i in range(args.n_batches + BURN_IN):
         _ = ds[regions, samples]
     print("done")

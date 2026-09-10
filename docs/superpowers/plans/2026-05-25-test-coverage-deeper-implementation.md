@@ -79,8 +79,7 @@ def base_dataset(request, phased_vcf_gvl, phased_pgen_gvl, phased_svar_gvl, ref_
         "svar": phased_svar_gvl,
     }[request.param]
     return (
-        gvl.Dataset
-        .open(gvl_path, ref_fasta, rc_neg=False)
+        gvl.Dataset.open(gvl_path, ref_fasta, rc_neg=False)
         .with_len("ragged")
         .with_tracks(False)
     )
@@ -186,8 +185,7 @@ import seqpro as sp
 
 def _open_haps(path, ref):
     return (
-        gvl.Dataset
-        .open(path, ref, rc_neg=False)
+        gvl.Dataset.open(path, ref, rc_neg=False)
         .with_tracks(False)
         .with_seqs("haplotypes")
     )
@@ -890,11 +888,13 @@ import genvarloader as gvl
 
 @pytest.fixture
 def tiny_bed():
-    return pl.DataFrame({
-        "chrom": ["chr1"],
-        "chromStart": [1000],
-        "chromEnd": [1100],
-    })
+    return pl.DataFrame(
+        {
+            "chrom": ["chr1"],
+            "chromStart": [1000],
+            "chromEnd": [1100],
+        }
+    )
 
 
 def test_empty_bed_either_succeeds_or_raises_clearly(tmp_path, ref_fasta, source_vcf):
@@ -920,11 +920,13 @@ def test_empty_bed_either_succeeds_or_raises_clearly(tmp_path, ref_fasta, source
 def test_overlapping_bed_regions_succeed_or_raise(tmp_path, ref_fasta, source_vcf):
     """Overlapping BED regions: should succeed (regions are independent) OR
     raise a clear error documenting the constraint."""
-    overlapping = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [1000, 1050],
-        "chromEnd": [1100, 1150],
-    })
+    overlapping = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [1000, 1050],
+            "chromEnd": [1100, 1150],
+        }
+    )
     out = tmp_path / "overlap.gvl"
     try:
         gvl.write(
@@ -938,11 +940,13 @@ def test_overlapping_bed_regions_succeed_or_raise(tmp_path, ref_fasta, source_vc
 
 def test_bed_with_missing_contig_raises(tmp_path, ref_fasta, source_vcf):
     """A BED entry on a contig not in the reference must raise."""
-    bad_bed = pl.DataFrame({
-        "chrom": ["chrZZZ_not_real"],
-        "chromStart": [0],
-        "chromEnd": [100],
-    })
+    bad_bed = pl.DataFrame(
+        {
+            "chrom": ["chrZZZ_not_real"],
+            "chromStart": [0],
+            "chromEnd": [100],
+        }
+    )
     out = tmp_path / "bad_contig.gvl"
     with pytest.raises((ValueError, KeyError, RuntimeError)):
         gvl.write(out_dir=out, bed=bad_bed, variants=source_vcf, reference=ref_fasta)

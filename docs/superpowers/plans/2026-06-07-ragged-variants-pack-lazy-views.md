@@ -40,9 +40,10 @@ class TestIndexedLayouts:
         field = ak.zip({"x": r}, depth_limit=1)[perm]["x"]
 
         from awkward.contents import IndexedArray
+
         assert isinstance(field.layout, IndexedArray)
 
-        rag = Ragged(field)              # used to raise: Expected 1 ragged dimension, got 0
+        rag = Ragged(field)  # used to raise: Expected 1 ragged dimension, got 0
         # accessors that route through unbox() must all work
         assert rag.offsets is not None
         assert rag.data is not None
@@ -59,9 +60,10 @@ class TestIndexedLayouts:
         rec = ak.zip({"a": r, "b": r}, depth_limit=1)[np.array([2, 0, 1])]
 
         from awkward.contents import IndexedArray
+
         assert isinstance(rec.layout, IndexedArray)
 
-        rag = Ragged(rec)                # record-layout Ragged over an indexed layout
+        rag = Ragged(rec)  # record-layout Ragged over an indexed layout
         # offsets extraction (via _extract_list_offsets) must not crash
         assert rag.offsets is not None
         assert ak.to_list(rag["a"]) == ak.to_list(rec["a"])
@@ -129,31 +131,38 @@ In `unbox`, extend the loop condition and add an Indexed* branch that projects a
 without recording a dimension:
 
 ```python
-    while isinstance(
-        node,
-        (ListArray, ListOffsetArray, RegularArray, RecordArray, IndexedArray, IndexedOptionArray),
-    ):
-        if isinstance(node, (IndexedArray, IndexedOptionArray)):
-            node = node.project()
-            continue
-        if isinstance(node, RecordArray):
-            raise ValueError(  # noqa: TRY004
-                "Must extract a single field before unboxing a Ragged array of records."
-            )
-        elif isinstance(node, RegularArray):
-            shape.append(node.size)
+while isinstance(
+    node,
+    (
+        ListArray,
+        ListOffsetArray,
+        RegularArray,
+        RecordArray,
+        IndexedArray,
+        IndexedOptionArray,
+    ),
+):
+    if isinstance(node, (IndexedArray, IndexedOptionArray)):
+        node = node.project()
+        continue
+    if isinstance(node, RecordArray):
+        raise ValueError(  # noqa: TRY004
+            "Must extract a single field before unboxing a Ragged array of records."
+        )
+    elif isinstance(node, RegularArray):
+        shape.append(node.size)
+    else:
+        shape.append(None)
+        n_ragged += 1
+        if isinstance(node, ListOffsetArray):
+            offsets = node.offsets.data
         else:
-            shape.append(None)
-            n_ragged += 1
-            if isinstance(node, ListOffsetArray):
-                offsets = node.offsets.data
-            else:
-                offsets = np.stack(  # pyrefly: ignore[no-matching-overload]  # awkward .data is ArrayLike, not _ArrayLike
-                    [node.starts.data, node.stops.data],  # type: ignore
-                    0,
-                )
+            offsets = np.stack(  # pyrefly: ignore[no-matching-overload]  # awkward .data is ArrayLike, not _ArrayLike
+                [node.starts.data, node.stops.data],  # type: ignore
+                0,
+            )
 
-        node = node.content
+    node = node.content
 ```
 
 - [ ] **Step 4: Update the `unbox` docstring (zero-copy caveat)**
@@ -234,7 +243,9 @@ def test_to_packed_numeric_fields_reorder_after_fancy_index():
     fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
     got = fancy.to_packed()
     exp = ak.to_packed(ak.Array(fancy))
-    np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
+    np.testing.assert_array_equal(
+        np.asarray(got["start"].data), np.asarray(exp["start"].data)
+    )
     assert ak.to_list(got["start"]) == ak.to_list(exp["start"])
 ```
 
@@ -281,12 +292,19 @@ def test_pack_alleles_kernel_identity_and_reorder():
     leaf = np.frombuffer(b"ACGTGG", np.uint8)
     allele_starts = np.array([0, 3, 4], np.int64)
     allele_stops = np.array([3, 4, 6], np.int64)
-    var_starts = np.array([0, 2], np.int64)   # row0 -> alleles[0:2], row1 -> alleles[2:3]
+    var_starts = np.array(
+        [0, 2], np.int64
+    )  # row0 -> alleles[0:2], row1 -> alleles[2:3]
     var_stops = np.array([2, 3], np.int64)
 
     # identity order
     packed, allele_off, group_off = _pack_alleles(
-        np.array([0, 1], np.int64), var_starts, var_stops, allele_starts, allele_stops, leaf
+        np.array([0, 1], np.int64),
+        var_starts,
+        var_stops,
+        allele_starts,
+        allele_stops,
+        leaf,
     )
     assert bytes(packed) == b"ACGTGG"
     assert allele_off.tolist() == [0, 3, 4, 6]
@@ -294,7 +312,12 @@ def test_pack_alleles_kernel_identity_and_reorder():
 
     # reversed row order
     packed, allele_off, group_off = _pack_alleles(
-        np.array([1, 0], np.int64), var_starts, var_stops, allele_starts, allele_stops, leaf
+        np.array([1, 0], np.int64),
+        var_starts,
+        var_stops,
+        allele_starts,
+        allele_stops,
+        leaf,
     )
     assert bytes(packed) == b"GGACGT"
     assert allele_off.tolist() == [0, 2, 5, 6]
@@ -314,18 +337,22 @@ def test_decompose_alleles_reversed():
     from genvarloader._dataset._rag_variants import _decompose_alleles, _pack_alleles
 
     rv = _make_rv(
-        [b"A", b"C", b"G", b"T", b"N"], [b"a", b"c", b"g", b"t", b"n"],
-        [1, 2, 3, 4, 5], [0, 2, 3, 5], ploidy=1,
+        [b"A", b"C", b"G", b"T", b"N"],
+        [b"a", b"c", b"g", b"t", b"n"],
+        [1, 2, 3, 4, 5],
+        [0, 2, 3, 5],
+        ploidy=1,
     )
     fancy = RaggedVariants.from_ak(rv[np.array([2, 0])])
-    row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy = _decompose_alleles(
-        fancy["alt"]
+    row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy = (
+        _decompose_alleles(fancy["alt"])
     )
     assert ploidy == 1
     packed, allele_off, group_off = _pack_alleles(
         row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
     )
     from genvarloader._dataset._haps import _build_allele_layout
+
     rebuilt = _build_allele_layout(packed, allele_off, group_off, ploidy)
     assert ak.to_list(rebuilt) == ak.to_list(fancy["alt"])
 ```
@@ -392,9 +419,7 @@ def _decompose_alleles(arr: ak.Array):
         reg = lay
 
     if not isinstance(reg, RegularArray):
-        raise ValueError(
-            f"Unsupported allele layout for packing: {arr.layout.form}"
-        )
+        raise ValueError(f"Unsupported allele layout for packing: {arr.layout.form}")
     ploidy = int(reg.size)
 
     var_node = reg.content
@@ -410,9 +435,9 @@ def _decompose_alleles(arr: ak.Array):
         n_out_rows = len(reg) * ploidy
         row_src = np.arange(n_out_rows, dtype=np.int64)
     else:
-        row_src = (
-            index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)
-        ).reshape(-1)
+        row_src = (index[:, None] * ploidy + np.arange(ploidy, dtype=np.int64)).reshape(
+            -1
+        )
     return row_src, var_starts, var_stops, allele_starts, allele_stops, leaf, ploidy
 
 
@@ -479,8 +504,11 @@ Append to `tests/dataset/test_flat_variants.py`:
 def test_to_packed_alt_ref_on_lazy_views(transform):
     group_off = [0, 2, 3, 5]
     rv = _make_rv(
-        [b"ACG", b"T", b"GG", b"AA", b"C"], [b"A", b"CC", b"T", b"G", b"TT"],
-        [1, 5, 9, 12, 20], group_off, ploidy=1,
+        [b"ACG", b"T", b"GG", b"AA", b"C"],
+        [b"A", b"CC", b"T", b"G", b"TT"],
+        [1, 5, 9, 12, 20],
+        group_off,
+        ploidy=1,
     )
     view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
     view = RaggedVariants.from_ak(view)
@@ -488,7 +516,9 @@ def test_to_packed_alt_ref_on_lazy_views(transform):
     exp = ak.to_packed(ak.Array(view))
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
     assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
-    np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
+    np.testing.assert_array_equal(
+        np.asarray(got["start"].data), np.asarray(exp["start"].data)
+    )
 
 
 def test_to_packed_explicit_listarray_variant_level():
@@ -497,16 +527,26 @@ def test_to_packed_explicit_listarray_variant_level():
     from awkward.index import Index
 
     def listarray_alleles(joined_bytes, allele_off, starts, stops):
-        leaf = NumpyArray(np.frombuffer(joined_bytes, np.uint8), parameters={"__array__": "byte"})
-        allele = ListOffsetArray(
-            Index(np.asarray(allele_off, np.int64)), leaf, parameters={"__array__": "bytestring"}
+        leaf = NumpyArray(
+            np.frombuffer(joined_bytes, np.uint8), parameters={"__array__": "byte"}
         )
-        var = ListArray(Index(np.asarray(starts, np.int64)), Index(np.asarray(stops, np.int64)), allele)
+        allele = ListOffsetArray(
+            Index(np.asarray(allele_off, np.int64)),
+            leaf,
+            parameters={"__array__": "bytestring"},
+        )
+        var = ListArray(
+            Index(np.asarray(starts, np.int64)),
+            Index(np.asarray(stops, np.int64)),
+            allele,
+        )
         return ak.Array(RegularArray(var, 1))
 
     alt = listarray_alleles(b"ACGTGG", [0, 3, 4, 6], [0, 2], [2, 3])
     ref = listarray_alleles(b"ACCT", [0, 1, 3, 4], [0, 2], [2, 3])
-    start = Ragged.from_offsets(np.array([1, 5, 9], np.int32), (2, None), np.array([0, 2, 3], np.int64))
+    start = Ragged.from_offsets(
+        np.array([1, 5, 9], np.int32), (2, None), np.array([0, 2, 3], np.int64)
+    )
     rv = RaggedVariants(alt=alt, start=start, ref=ref)
 
     got = rv.to_packed()
@@ -526,39 +566,44 @@ In `to_packed`, replace the body of the `if field in ("alt", "ref"):` branch (th
 `_alt_layout_parts` and does the g0/a0 rebase, ~lines 213–237) with:
 
 ```python
-            if field in ("alt", "ref"):
-                if _is_canonical_alleles(arr.layout):
-                    # fast path (unchanged): canonical (possibly sliced) layout
-                    leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
-                    g0 = int(group_off[0])
-                    rebased_group = np.asarray(group_off, np.int64) - g0
-                    a0 = int(allele_off[g0])
-                    sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
-                    sliced_leaf = leaf[a0:]
-                    allele_lvl = Ragged.from_offsets(
-                        sliced_leaf.view("S1"),
-                        (sliced_allele_off.size - 1, None),
-                        sliced_allele_off,
-                    ).to_packed()
-                    packed[field] = _build_allele_layout(
-                        np.asarray(allele_lvl.data).view(np.uint8),
-                        np.asarray(allele_lvl.offsets),
-                        rebased_group,
-                        ploidy,
-                    )
-                else:
-                    # non-canonical (IndexedArray/ListArray from slicing/reorder):
-                    # numba gather, no ak.to_packed / awkward gather primitives.
-                    (
-                        row_src, var_starts, var_stops,
-                        allele_starts, allele_stops, leaf, ploidy,
-                    ) = _decompose_alleles(arr)
-                    packed_bytes, allele_off, group_off = _pack_alleles(
-                        row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
-                    )
-                    packed[field] = _build_allele_layout(
-                        packed_bytes, allele_off, group_off, ploidy
-                    )
+if field in ("alt", "ref"):
+    if _is_canonical_alleles(arr.layout):
+        # fast path (unchanged): canonical (possibly sliced) layout
+        leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+        g0 = int(group_off[0])
+        rebased_group = np.asarray(group_off, np.int64) - g0
+        a0 = int(allele_off[g0])
+        sliced_allele_off = np.asarray(allele_off[g0:], np.int64) - a0
+        sliced_leaf = leaf[a0:]
+        allele_lvl = Ragged.from_offsets(
+            sliced_leaf.view("S1"),
+            (sliced_allele_off.size - 1, None),
+            sliced_allele_off,
+        ).to_packed()
+        packed[field] = _build_allele_layout(
+            np.asarray(allele_lvl.data).view(np.uint8),
+            np.asarray(allele_lvl.offsets),
+            rebased_group,
+            ploidy,
+        )
+    else:
+        # non-canonical (IndexedArray/ListArray from slicing/reorder):
+        # numba gather, no ak.to_packed / awkward gather primitives.
+        (
+            row_src,
+            var_starts,
+            var_stops,
+            allele_starts,
+            allele_stops,
+            leaf,
+            ploidy,
+        ) = _decompose_alleles(arr)
+        packed_bytes, allele_off, group_off = _pack_alleles(
+            row_src, var_starts, var_stops, allele_starts, allele_stops, leaf
+        )
+        packed[field] = _build_allele_layout(
+            packed_bytes, allele_off, group_off, ploidy
+        )
 ```
 
 > The fast-path block is the existing code verbatim, now guarded by `_is_canonical_alleles`. The
@@ -594,15 +639,20 @@ Append to `tests/dataset/test_flat_variants.py`:
 def test_rc_on_lazy_views_matches_reference(transform):
     group_off = [0, 2, 3, 5]
     rv = _make_rv(
-        [b"ACG", b"T", b"GG", b"AA", b"C"], [b"A", b"CC", b"T", b"G", b"TT"],
-        [1, 5, 9, 12, 20], group_off, ploidy=1,
+        [b"ACG", b"T", b"GG", b"AA", b"C"],
+        [b"A", b"CC", b"T", b"G", b"TT"],
+        [1, 5, 9, 12, 20],
+        group_off,
+        ploidy=1,
     )
     view = rv[::-1] if transform == "reverse" else rv[np.array([2, 0, 3, 1])]
     view = RaggedVariants.from_ak(view)
 
     n = view.shape[0]
     mask = np.ones(n, np.bool_)
-    exp_alt, exp_ref = _ref_rc(view, mask)   # independent awkward reference (top of file)
+    exp_alt, exp_ref = _ref_rc(
+        view, mask
+    )  # independent awkward reference (top of file)
 
     out = view.rc_(mask)
     assert ak.to_list(out["alt"]) == ak.to_list(exp_alt)
@@ -664,13 +714,15 @@ def test_to_packed_ploidy2_reordered():
     alt = _build_allele_layout(
         np.frombuffer(b"ACGTGGA", np.uint8),
         np.array([0, 2, 3, 4, 6, 7], np.int64),
-        group_off, ploidy=2,
+        group_off,
+        ploidy=2,
     )
     # ref alleles: ["a","c","g","t","n"] -> b"acgtn"
     ref = _build_allele_layout(
         np.frombuffer(b"acgtn", np.uint8),
         np.array([0, 1, 2, 3, 4, 5], np.int64),
-        group_off, ploidy=2,
+        group_off,
+        ploidy=2,
     )
     start = Ragged.from_offsets(
         np.array([1, 2, 3, 4, 5], np.int32), (2, 2, None), group_off

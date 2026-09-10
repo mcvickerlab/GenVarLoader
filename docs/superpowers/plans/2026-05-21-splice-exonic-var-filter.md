@@ -224,8 +224,7 @@ def svar_gvl_path(tmp_path):
 def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
     ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset
-        .open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
     )
@@ -240,8 +239,7 @@ def test_with_settings_var_filter_propagates_to_recon(svar_gvl_path):
 def test_with_settings_var_filter_false_clears_recon(svar_gvl_path):
     ref_path = _DATA_DIR / "fasta" / "hg38.fa.bgz"
     ds = (
-        gvl.Dataset
-        .open(svar_gvl_path, reference=ref_path)
+        gvl.Dataset.open(svar_gvl_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(var_filter="exonic")
         .with_settings(var_filter=False)
@@ -551,8 +549,7 @@ def test_open_vs_with_settings_parity_state(spliced_svar_ds_path):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset
-        .open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),
@@ -578,8 +575,7 @@ def test_open_vs_with_settings_parity_output(spliced_svar_ds_path):
     ).with_seqs("haplotypes")
 
     ds_b = (
-        gvl.Dataset
-        .open(spliced_svar_ds_path, reference=ref_path)
+        gvl.Dataset.open(spliced_svar_ds_path, reference=ref_path)
         .with_seqs("haplotypes")
         .with_settings(
             splice_info=("transcript_id", "exon_number"),

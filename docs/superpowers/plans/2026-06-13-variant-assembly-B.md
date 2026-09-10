@@ -47,14 +47,12 @@ Expected: PASS. This is the pre-refactor reference (esp. `test_flat_getitem_snap
 In `python/genvarloader/_dataset/_haps.py`, replace the variants branch of `__call__` (currently the `if flat: ... else: ragv = self._get_variants(...)` block) with an unconditional flat decode:
 
 ```python
-        if issubclass(self.kind, RaggedVariants):
-            if splice_plan is not None:
-                raise NotImplementedError(
-                    "Spliced output is not supported for RaggedVariants."
-                )
-            from ._flat_variants import get_variants_flat
+if issubclass(self.kind, RaggedVariants):
+    if splice_plan is not None:
+        raise NotImplementedError("Spliced output is not supported for RaggedVariants.")
+    from ._flat_variants import get_variants_flat
 
-            return cast(_H, get_variants_flat(self, idx))
+    return cast(_H, get_variants_flat(self, idx))
 ```
 
 (The `flat` parameter on `__call__` is retained for signature stability across reconstructors but is no longer read for variants — the `_query.py` boundary decides ragged-vs-flat via `view.flat_output`.)
@@ -138,19 +136,23 @@ def test_fill_empty_seq_kernel():
 
     # 3 rows: empty, ["AC","G"], empty
     data = np.frombuffer(b"ACG", np.uint8).copy()
-    var_off = np.array([0, 0, 2, 2], np.int64)      # per-row variant boundaries
-    seq_off = np.array([0, 2, 3], np.int64)         # per-variant byte boundaries
+    var_off = np.array([0, 0, 2, 2], np.int64)  # per-row variant boundaries
+    seq_off = np.array([0, 2, 3], np.int64)  # per-variant byte boundaries
     dummy = np.frombuffer(b"N", np.uint8).copy()
     nd, nvar, nseq = _fill_empty_seq(data, var_off, seq_off, dummy)
-    assert nvar.tolist() == [0, 1, 3, 4]            # each empty row gains 1 variant
-    assert nseq.tolist() == [0, 1, 3, 4, 5]         # dummy(1) AC(2) G(1) dummy(1)
+    assert nvar.tolist() == [0, 1, 3, 4]  # each empty row gains 1 variant
+    assert nseq.tolist() == [0, 1, 3, 4, 5]  # dummy(1) AC(2) G(1) dummy(1)
     assert bytes(nd) == b"NACGN"
 
 
 def test_fill_empty_groups_roundtrip():
     import awkward as ak
 
-    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._dataset._flat_variants import (
+        DummyVariant,
+        _FlatAlleles,
+        _FlatVariants,
+    )
     from genvarloader._flat import _Flat
 
     # b*p = 3 rows: row0 empty, row1 has [b"AC", b"G"], row2 empty
@@ -171,13 +173,21 @@ def test_fill_empty_groups_roundtrip():
 
 
 def test_fill_empty_groups_noop_when_no_empties():
-    from genvarloader._dataset._flat_variants import DummyVariant, _FlatAlleles, _FlatVariants
+    from genvarloader._dataset._flat_variants import (
+        DummyVariant,
+        _FlatAlleles,
+        _FlatVariants,
+    )
     from genvarloader._flat import _Flat
     import awkward as ak
 
     group_off = np.array([0, 1, 2], np.int64)  # every row has 1 variant
-    alt = _FlatAlleles(np.frombuffer(b"AG", np.uint8).copy(),
-                       np.array([0, 1, 2], np.int64), group_off.copy(), (2, None))
+    alt = _FlatAlleles(
+        np.frombuffer(b"AG", np.uint8).copy(),
+        np.array([0, 1, 2], np.int64),
+        group_off.copy(),
+        (2, None),
+    )
     start = _Flat.from_offsets(np.array([3, 7], np.int32), (2, None), group_off.copy())
     fv = _FlatVariants(fields={"alt": alt, "start": start})
     filled = fv.fill_empty_groups(DummyVariant())
@@ -303,23 +313,27 @@ def _fill_empty_seq(data, var_offsets, seq_offsets, dummy):  # pragma: no cover 
 Then `fill_empty_groups` on `_FlatVariants` (add as a method):
 
 ```python
-    def fill_empty_groups(self, dummy: "DummyVariant") -> "_FlatVariants":
-        """Insert one dummy variant into each empty (b*p) group; non-empty
-        groups are unchanged. Every field shares the same empty-row pattern, so
-        the rebuilt offsets stay consistent across fields."""
-        from .._flat import _Flat
+def fill_empty_groups(self, dummy: "DummyVariant") -> "_FlatVariants":
+    """Insert one dummy variant into each empty (b*p) group; non-empty
+    groups are unchanged. Every field shares the same empty-row pattern, so
+    the rebuilt offsets stay consistent across fields."""
+    from .._flat import _Flat
 
-        new_fields: dict[str, Any] = {}
-        for name, f in self.fields.items():
-            if isinstance(f, _FlatAlleles):
-                db = np.frombuffer(dummy.alt if name == "alt" else dummy.ref, np.uint8).copy()
-                nd, nvar, nseq = _fill_empty_seq(f.byte_data, f.var_offsets, f.seq_offsets, db)
-                new_fields[name] = _FlatAlleles(nd, nseq, nvar, f.shape)
-            else:
-                fill = dummy.scalar_for(name, f.data.dtype)
-                nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
-                new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
-        return _FlatVariants(new_fields)
+    new_fields: dict[str, Any] = {}
+    for name, f in self.fields.items():
+        if isinstance(f, _FlatAlleles):
+            db = np.frombuffer(
+                dummy.alt if name == "alt" else dummy.ref, np.uint8
+            ).copy()
+            nd, nvar, nseq = _fill_empty_seq(
+                f.byte_data, f.var_offsets, f.seq_offsets, db
+            )
+            new_fields[name] = _FlatAlleles(nd, nseq, nvar, f.shape)
+        else:
+            fill = dummy.scalar_for(name, f.data.dtype)
+            nd, noff = _fill_empty_scalar(f.data, f.offsets, fill)
+            new_fields[name] = _Flat.from_offsets(nd, f.shape, noff)
+    return _FlatVariants(new_fields)
 ```
 
 - [ ] **Step 4: Run to verify pass**
@@ -491,7 +505,7 @@ Expected: FAIL (`with_settings` has no `dummy_variant` kwarg; `gvl.DummyVariant`
 In `python/genvarloader/_dataset/_impl.py`, add to the `with_settings` signature (after `var_filter`):
 
 ```python
-        dummy_variant: "DummyVariant | Literal[False] | None" = None,
+dummy_variant: "DummyVariant | Literal[False] | None" = (None,)
 ```
 
 Add a runtime import at the top of `_impl.py` (no cycle — `_flat_variants` imports only `_flat` at runtime):
@@ -503,14 +517,12 @@ from ._flat_variants import DummyVariant
 Add a handling block inside `with_settings` (alongside the `min_af`/`var_filter` blocks, before the `if "_seqs" in to_evolve ...` rebuild):
 
 ```python
-        if dummy_variant is not None:
-            if not isinstance(self._seqs, Haps):
-                raise ValueError(
-                    "dummy_variant requires a dataset with variants/genotypes."
-                )
-            dv = None if dummy_variant is False else dummy_variant
-            haps = to_evolve.get("_seqs", self._seqs)
-            to_evolve["_seqs"] = replace(haps, dummy_variant=dv)
+if dummy_variant is not None:
+    if not isinstance(self._seqs, Haps):
+        raise ValueError("dummy_variant requires a dataset with variants/genotypes.")
+    dv = None if dummy_variant is False else dummy_variant
+    haps = to_evolve.get("_seqs", self._seqs)
+    to_evolve["_seqs"] = replace(haps, dummy_variant=dv)
 ```
 
 Add a `dummy_variant` entry to the `with_settings` docstring Parameters section:
@@ -586,8 +598,12 @@ import genvarloader as gvl
 @pytest.mark.parametrize("idx", IDX)
 def test_b_dummy_fill_flat_to_ragged_matches_ragged(snap_dataset, idx):
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N", ilen=0)
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
-    ragged = ds[idx]                                   # ragged mode (now flat decode + to_ragged)
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(dummy_variant=dv)
+    )
+    ragged = ds[idx]  # ragged mode (now flat decode + to_ragged)
     rewrapped = ds.with_output_format("flat")[idx].to_ragged()
     assert _rv_to_lists(rewrapped) == _rv_to_lists(ragged)
 
@@ -596,7 +612,11 @@ def test_b_dummy_fill_no_empty_groups(snap_dataset):
     import awkward as ak
 
     dv = gvl.DummyVariant(start=-1, alt=b"N", ref=b"N")
-    ds = snap_dataset.with_seqs("variants").with_tracks(False).with_settings(dummy_variant=dv)
+    ds = (
+        snap_dataset.with_seqs("variants")
+        .with_tracks(False)
+        .with_settings(dummy_variant=dv)
+    )
     idx = (np.arange(min(6, snap_dataset.shape[0])),)
     rv = ds[idx]
     for ploid_groups in ak.to_list(rv["start"]):

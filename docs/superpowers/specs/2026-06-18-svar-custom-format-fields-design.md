@@ -114,7 +114,9 @@ fields.
   for name in var_fields:
       if name in custom_fmt:
           mm = np.memmap(svar_path / f"{name}.npy", dtype=custom_fmt[name], mode="r")
-          var_field_data[name] = Ragged.from_offsets(mm, rag_shape, offsets.reshape(2, -1))
+          var_field_data[name] = Ragged.from_offsets(
+              mm, rag_shape, offsets.reshape(2, -1)
+          )
   ```
 - Pass `var_field_data=var_field_data` to the `cls(...)` constructor. For the
   legacy (non-SVAR) branch it stays empty.
