@@ -592,7 +592,15 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   correct defense-in-depth and a verified no-op on all currently-passing scenarios. Follow-up
   filed for the still-unclipped `get_variants_flat(self, idx)` no-region call site
   (`_haps.py:676`, reached via `with_seqs("variants").with_tracks(...)`) — issue
-  [#314](https://github.com/mcvickerlab/GenVarLoader/issues/314).
+  [#314](https://github.com/mcvickerlab/GenVarLoader/issues/314). **Landed:** PR
+  [#387](https://github.com/mcvickerlab/GenVarLoader/pull/387) passes `regions` at that
+  site, so both dispatches clip against one window. It also **retires the verification
+  caveat above** — a literal pre-fix repro does exist, just not from the fixtures used
+  here: `extend_to_length` (on by default) widens the write window past `chromEnd` to
+  cover a deletion, which drags an out-of-window variant into the cell, and the
+  tracks-active query then returned `[60, 110]` where tracks-off returned `[60]`. Note
+  this hole is `streaming`-only: on `main`, `get_variants_flat` consumes `regions`
+  solely for flank/window computation, so the missing argument is inert there.
 - ✅ **Variants-output surface, Wave B PR-B2 (`min_af`/`max_af`) — issue
   [#317](https://github.com/mcvickerlab/GenVarLoader/issues/317), closes
   [#319](https://github.com/mcvickerlab/GenVarLoader/issues/319).** `StreamingDataset
