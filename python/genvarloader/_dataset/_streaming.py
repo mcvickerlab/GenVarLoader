@@ -1799,19 +1799,30 @@ class StreamingDataset:
                         else:
                             data, offsets = nxt
                             if track_w is not None:
-                                # Issue #279 Task 7: haplotype BYTES are
-                                # discarded here -- the mixed-tracks output
-                                # convention is "tracks alone" (matching the
-                                # tracks-only path's `data[i]` contract). Only
-                                # `offsets` is needed, for the real per-(row,
-                                # hap) output length -- this already reflects
-                                # `with_len(L)` when set, since
+                                # Issue #380: the mixed drive yields BOTH halves,
+                                # `(haplotypes, tracks)`, matching the written
+                                # path's `HapsTracks.__call__` return order
+                                # (`_reconstruct.py:121-144`). It previously
+                                # reconstructed the haplotype bytes and then
+                                # DISCARDED them, keeping `offsets` alone: that was
+                                # both wasted work on every batch and an
+                                # un-checkable parity gap, since the mixed fixtures
+                                # could only compare the track half against
+                                # `Dataset[r, s]`. `offsets` is still needed below
+                                # for the real per-(row, hap) output length -- it
+                                # already reflects `with_len(L)` when set, since
                                 # `svar1_generate_batch` bakes the fixed length
                                 # into `offsets` itself.
+                                offsets = np.asarray(offsets, np.int64)
+                                haps = Ragged.from_offsets(
+                                    np.asarray(data).view("S1"),
+                                    (hi - lo, backend.ploidy, None),
+                                    offsets,
+                                )
                                 if track_w.realign is not None:
-                                    out_lengths = np.diff(
-                                        np.asarray(offsets, np.int64)
-                                    ).reshape(hi - lo, backend.ploidy)
+                                    out_lengths = np.diff(offsets).reshape(
+                                        hi - lo, backend.ploidy
+                                    )
                                     regions_batch = np.stack(
                                         [
                                             np.zeros(hi - lo, np.int32),
@@ -1838,7 +1849,7 @@ class StreamingDataset:
                                         self.n_samples
                                     ) + flat_s[lo:hi].astype(np.uint64)
                                     base_seed = int(np.bitwise_xor.reduce(_idx))
-                                    out = _realigned_tracks_from_intervals(
+                                    tracks = _realigned_tracks_from_intervals(
                                         track_w.itvs,
                                         track_w.names,
                                         self._insertion_fill,
@@ -1861,12 +1872,13 @@ class StreamingDataset:
                                         )
                                     else:
                                         _lengths = track_w.row_lengths[lo:hi]
-                                    out = _tracks_from_intervals(
+                                    tracks = _tracks_from_intervals(
                                         track_w.itvs,
                                         np.arange(lo, hi, dtype=np.int64),
                                         track_w.row_starts[lo:hi],
                                         _lengths,
                                     )
+                                out = (haps, tracks)
                             else:
                                 out = Ragged.from_offsets(
                                     np.asarray(data).view("S1"),
@@ -2160,17 +2172,20 @@ class StreamingDataset:
             ``(data, region_idxs, sample_idxs)`` when ``return_indices`` is ``True``,
             otherwise ``data`` alone.
 
-        **Tracks** (``tracks=``): when tracks are active, ``data`` is the tracks
-        ALONE -- never a ``(haplotypes, tracks)`` pair, even when a variant source
-        and a reference are both present. This differs deliberately from written
-        ``gvl.Dataset[r, s]``, which returns both halves. With variants and the
-        default ``realign_tracks=True`` the tracks are re-aligned to haplotype
-        coordinates and carry a ploidy axis, shape
+        **Tracks** (``tracks=``): with a variant source AND tracks, ``data`` is a
+        ``(haplotypes, tracks)`` pair -- the same 2-tuple, in the same order, that
+        written ``gvl.Dataset[r, s]`` returns when both are configured
+        (``HapsTracks``, ``_reconstruct.py``). Tracks-only datasets (no
+        ``variants=``) yield the tracks alone, again matching the written path.
+        With variants and the default ``realign_tracks=True`` the tracks are
+        re-aligned to haplotype coordinates and carry a ploidy axis, shape
         ``(batch, n_tracks, ploidy, None)``; with ``realign_tracks=False`` they
         stay in reference coordinates and drop it, ``(batch, n_tracks, None)``;
-        without variants the shape is ``(batch, n_tracks, None)``. The track axis
-        is ordered by track NAME (never ``tracks=`` argument order) and is never
-        squeezed -- a single track still yields a length-1 axis.
+        without variants the shape is ``(batch, n_tracks, None)``. The
+        haplotype half is always ``(batch, ploidy, None)`` -- ``realign_tracks``
+        only ever affects the track half. The track axis is ordered by track NAME
+        (never ``tracks=`` argument order) and is never squeezed -- a single track
+        still yields a length-1 axis.
 
         **Read-time jitter** (``jitter>0``, set via ``with_settings``):
         When ``jitter>0``, each region's read window is translated by an integer

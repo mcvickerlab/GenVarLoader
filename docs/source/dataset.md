@@ -455,13 +455,21 @@ Output shape depends on whether the tracks are re-aligned to haplotype coordinat
 | No variant source, or `realign_tracks=False` | `(batch, n_tracks, ~length)` |
 | Variant source + `realign_tracks=True` (default) | `(batch, n_tracks, ploidy, ~length)` |
 
-```{important}
-**When tracks are active, `to_iter()` yields the tracks ALONE — never a `(haplotypes, tracks)`
-pair — even when both a variant source and a `reference` are attached.** This is a deliberate
-difference from a written `gvl.Dataset[r, s]`, which returns both halves together when both are
-configured. It will surprise anyone porting code from the written path: there is currently no way
-to get haplotypes and tracks out of the same `StreamingDataset.to_iter()` call.
+````{important}
+**With a variant source AND tracks, `to_iter()` yields a `(haplotypes, tracks)` pair**, the same
+2-tuple (and the same order) a written `gvl.Dataset[r, s]` returns when both are configured.
+Tracks-only datasets (no `variants=`) yield the tracks alone — again matching the written path,
+which returns tracks alone when no sequences are active.
+
+```python
+sds = gvl.StreamingDataset("rois.bed", reference="ref.fa", variants="cohort.svar",
+                           tracks=gvl.BigWigs.from_table("signal", "bw_table.tsv"))
+
+for (haps, tracks), region_idxs, sample_idxs in sds.to_iter(batch_size=32):
+    ...  # haps:   Ragged[S1],  shape (batch, ploidy, ~length)
+    ...  # tracks: Ragged[f32], shape (batch, n_tracks, ploidy, ~length)
 ```
+````
 
 **Mixed variants + tracks is SVAR1-only in v1.** Combining `tracks=` with a VCF/BCF, PGEN, or
 `.svar2` variant source raises `NotImplementedError` — none of those three backends exposes the
