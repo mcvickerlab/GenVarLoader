@@ -681,7 +681,11 @@ class Haps(Reconstructor[_H]):
                 )
             from ._flat_variants import get_variants_flat
 
-            out = get_variants_flat(self, idx)
+            # `regions` is the SAME array the direct dispatch in `_get_haps`
+            # passes; without it `get_variants_flat` skips the #202 clip on its
+            # own `regions is None` guard, so a tracks-active query returned
+            # variants a tracks-off query over the same cell clipped out (#314).
+            out = get_variants_flat(self, idx, regions)
         else:
             assert_never(self.kind)
 
