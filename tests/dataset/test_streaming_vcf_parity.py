@@ -339,3 +339,27 @@ def test_vcf_streaming_matches_written_all_cells_multi_contig(
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+def test_vcf_annotated_output_fails_fast(vcf_snp_ins_del_multi):
+    """`with_seqs("annotated")` must RAISE on the VCF backend, never emit ids.
+
+    genoray leaves `RawRecord.global_idx = -1` for VCF, so the local->global
+    gather in `remap_annot_local_to_global` is skipped and the emitted
+    `AnnotatedHaps.var_idxs` would be window-LOCAL ids silently presented as
+    dataset-global ones -- wrong for any multi-contig, narrowed, or
+    interior-exclusion window (issues #305, #311). The fail-fast guard is what
+    keeps that bug loud instead of silent, so it needs a test of its own: without
+    one, deleting the guard reintroduces silently-wrong output with a green suite.
+
+    Retire this test together with the guard once VCF global variant ids land
+    (#305); the `test_same_pos_var_idxs_file_order` VCF params are xfailed on the
+    same condition.
+    """
+    f = vcf_snp_ins_del_multi
+    sds = gvl.StreamingDataset(
+        f.regions, reference=str(f.fasta), variants=str(f.vcf)
+    ).with_seqs("annotated")
+
+    with pytest.raises(NotImplementedError, match="not supported for the VCF backend"):
+        next(iter(sds.to_iter(batch_size=2)))

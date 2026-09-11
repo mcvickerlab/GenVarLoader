@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import genvarloader as gvl
 
@@ -82,3 +83,42 @@ def test_svar2_engine_matches_written(svar2_multicontig_fixture) -> None:
                 )
             seen += 1
     assert seen == fx.bed.height * sds.n_samples
+
+
+@pytest.mark.parametrize("strategy", ["sync", "svar2_engine"])
+def test_n_batches_matches_super_batched_drive(
+    svar2_multicontig_fixture, strategy
+) -> None:
+    """`n_batches` must count the SAME nesting the drive walks (issue #379).
+
+    The SVAR2 drives nest `batch_size` inside `super_batch_rows`, so every
+    super-batch's last batch may be partial. Counting a flat
+    `range(0, n_rows, batch_size)` instead under-reports whenever
+    `sb_rows % batch_size != 0`, and `len(dl)` then lies to progress bars and
+    fixed-step training loops.
+    """
+    fx = svar2_multicontig_fixture
+    sds = gvl.StreamingDataset(
+        fx.bed, reference=fx.reference_path, variants=fx.svar2_path
+    ).with_seqs("haplotypes")
+    sds = _with_strategy(sds, strategy)
+    # Shrink the super-batch so the nesting actually bites. Overriding the
+    # attribute is the sanctioned seam -- `_Svar2Backend.__init__` documents that
+    # the drive READS `_super_batch_rows` rather than recomputing it, precisely so
+    # test/sweep overrides stick.
+    object.__setattr__(sds._backend, "_super_batch_rows", 5)
+    batch_size = 3
+
+    actual = sum(1 for _ in sds.to_iter(batch_size=batch_size))
+
+    # Guard: these params must genuinely discriminate. If a flat count happened to
+    # equal the nested one, the test would pass vacuously even with the bug present.
+    flat = sum(
+        -(-(len(r_idx) * len(s_idx)) // batch_size) for r_idx, s_idx in sds._plan()
+    )
+    assert flat != actual, (
+        "fixture/params no longer exercise super-batch nesting; pick sb_rows and "
+        "batch_size such that sb_rows % batch_size != 0 and n_rows % sb_rows != 0"
+    )
+
+    assert sds.n_batches(batch_size) == actual
