@@ -485,6 +485,30 @@ def _assert_cell_equal(streamed, expected, ctx=""):
     )
 
 
+def _assert_haps_cell_equal(streamed, expected, ploidy: int, ctx="") -> None:
+    """Assert the HAPLOTYPE half of one mixed cell matches ``Dataset[r, s][0]``.
+
+    Issue #380: before the mixed drive returned both halves, streaming
+    reconstructed these bytes and discarded them, so no mixed fixture could
+    ever check them -- the haplotype half of the mixed path was un-oracled.
+
+    Compared per haplotype (the spelling ``test_streaming_with_len.py`` and
+    ``test_streaming_vcf_parity.py`` already use) rather than through
+    ``to_packed()``: it is the one form that works unchanged for BOTH the
+    ragged output and the dense ndarray ``with_len(L)`` yields, on either
+    side, and it names the offending haplotype when it fails.
+    """
+    for h in range(ploidy):
+        got = np.asarray(streamed[h])
+        exp = np.asarray(expected[h])
+        assert got.shape == exp.shape, (
+            f"{ctx}hap {h}: shape {got.shape} != oracle {exp.shape}"
+        )
+        np.testing.assert_array_equal(
+            got, exp, err_msg=f"{ctx}hap {h}: haplotype bytes differ"
+        )
+
+
 def test_mixed_parity_with_indels(streaming_tracks_fixture):
     """Tracks re-aligned to haplotype coordinates -- the case #279 calls out.
 
@@ -505,14 +529,19 @@ def test_mixed_parity_with_indels(streaming_tracks_fixture):
 
     seen = set()
     for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        # Issue #380: the mixed drive yields `(haplotypes, tracks)`, the same
+        # 2-tuple `written[r, s]` returns whenever seqs are active, so BOTH
+        # halves are compared against the oracle. It previously yielded bare
+        # tracks and only the tracks half was checkable.
+        haps, tracks = data
         # The track axis must never be squeezed, and must carry BOTH tracks.
-        assert data.shape[1] == 2, f"track axis {data.shape} lost a track"
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
         for i in range(len(r_idx)):
             r, s = int(r_idx[i]), int(s_idx[i])
-            # `written[r, s]` is a `(haps, tracks)` 2-tuple whenever seqs are
-            # active; streaming's mixed convention yields bare tracks, so only
-            # the tracks half of the oracle is comparable.
-            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
             seen.add((r, s))
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
@@ -564,10 +593,14 @@ def test_mixed_parity_under_forced_windowing(
 
     seen = set()
     for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
-        assert data.shape[1] == 2, f"track axis {data.shape} lost a track"
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
         for i in range(len(r_idx)):
             r, s = int(r_idx[i]), int(s_idx[i])
-            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
             seen.add((r, s))
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
@@ -628,10 +661,15 @@ def test_fixed_output_length_parity(streaming_tracks_fixture):
         .with_tracks("alpha")
         .with_len(L)
     )
-    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    (haps, tracks), r_idx, s_idx = next(
+        iter(sds.to_iter(batch_size=2, return_indices=True))
+    )
     for i in range(len(r_idx)):
         r, s = int(r_idx[i]), int(s_idx[i])
-        _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+        exp_haps, exp_tracks = written[r, s]
+        ctx = f"cell (r={r}, s={s}): "
+        _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+        _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
 
 
 def test_non_default_insertion_fill_parity(streaming_tracks_fixture):
@@ -653,10 +691,15 @@ def test_non_default_insertion_fill_parity(streaming_tracks_fixture):
         .with_tracks("alpha")
         .with_insertion_fill(fill)
     )
-    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    (haps, tracks), r_idx, s_idx = next(
+        iter(sds.to_iter(batch_size=2, return_indices=True))
+    )
     for i in range(len(r_idx)):
         r, s = int(r_idx[i]), int(s_idx[i])
-        _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+        exp_haps, exp_tracks = written[r, s]
+        ctx = f"cell (r={r}, s={s}): "
+        _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+        _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
 
 
 def test_track_with_superset_samples_parity(streaming_tracks_fixture):
@@ -681,15 +724,18 @@ def test_track_with_superset_samples_parity(streaming_tracks_fixture):
     # `written` has fewer, so a positional index would run off the end (and,
     # worse, silently compare the wrong sample where it did not).
     written_pos = {name: i for i, name in enumerate(written.samples)}
-    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=2, return_indices=True)))
+    (haps, tracks), r_idx, s_idx = next(
+        iter(sds.to_iter(batch_size=2, return_indices=True))
+    )
     for i in range(len(r_idx)):
         name = sds.samples[int(s_idx[i])]
         if name not in written_pos:
             continue
         r, w_s = int(r_idx[i]), written_pos[name]
-        _assert_cell_equal(
-            data[i], written[r, w_s][1], ctx=f"cell (r={r}, sample={name!r}): "
-        )
+        exp_haps, exp_tracks = written[r, w_s]
+        ctx = f"cell (r={r}, sample={name!r}): "
+        _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+        _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
 
 
 def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
@@ -710,12 +756,17 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
         .with_tracks("alpha")
         .with_settings(realign_tracks=False)
     )
-    data, r_idx, s_idx = next(iter(sds.to_iter(batch_size=1, return_indices=True)))
+    (haps, tracks), r_idx, s_idx = next(
+        iter(sds.to_iter(batch_size=1, return_indices=True))
+    )
     r, s = int(r_idx[0]), int(s_idx[0])
-    expected = written[r, s][1]
-    # The point of the test: no ploidy axis on either side.
-    assert data[0].shape[:-1] == expected.shape[:-1]
-    _assert_cell_equal(data[0], expected, ctx=f"cell (r={r}, s={s}): ")
+    exp_haps, expected = written[r, s]
+    # The point of the test: no ploidy axis on either side. `realign_tracks`
+    # only ever touches the TRACK half -- the haplotypes keep their ploidy
+    # axis regardless, which the haps assertion below pins down.
+    assert tracks[0].shape[:-1] == expected.shape[:-1]
+    _assert_cell_equal(tracks[0], expected, ctx=f"cell (r={r}, s={s}): ")
+    _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=f"cell (r={r}, s={s}): ")
 
 
 @pytest.mark.parametrize("src", ["vcf", "pgen"])
@@ -966,7 +1017,10 @@ def test_jitter_with_unrealigned_tracks_produces_output(streaming_tracks_fixture
     ).with_settings(jitter=1, realign_tracks=False)
     n_cells = 0
     for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
-        assert data.shape[0] == len(r_idx)
+        # Issue #380: both halves are yielded, so both must be batch-aligned.
+        haps, tracks = data
+        assert tracks.shape[0] == len(r_idx)
+        assert haps.shape[0] == len(r_idx)
         n_cells += len(r_idx)
     n_regions, n_samples = sds.shape
     assert n_cells == n_regions * n_samples
@@ -1003,9 +1057,13 @@ def test_realign_false_with_len_matches_written(streaming_tracks_fixture):
     )
     seen = set()
     for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        haps, tracks = data
         for i in range(len(r_idx)):
             r, s = int(r_idx[i]), int(s_idx[i])
-            _assert_cell_equal(data[i], written[r, s][1], ctx=f"cell (r={r}, s={s}): ")
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
             seen.add((r, s))
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
