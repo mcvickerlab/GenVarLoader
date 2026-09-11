@@ -139,6 +139,28 @@ def _win_mode_kwargs(
 SUPERBATCH_TARGET_ROWS = 4096  # confirmed by the Task-5 sweep
 
 
+def _super_batch_bounds(n_rows: int, sb_rows: int) -> Iterator[tuple[int, int]]:
+    """``(lo, hi)`` super-batch row spans one window of ``n_rows`` is driven in.
+
+    ``sb_rows >= n_rows`` degenerates to a single full-width span, which is exactly
+    the shape of the drives that do *not* super-batch -- so every drive and the
+    batch counter can share one nesting instead of re-deriving it (issue #379).
+    """
+    for lo in range(0, n_rows, max(1, sb_rows)):
+        yield lo, min(lo + sb_rows, n_rows)
+
+
+def _batch_bounds(lo: int, hi: int, batch_size: int) -> Iterator[tuple[int, int]]:
+    """``(lo, hi)`` batch row spans within one super-batch span.
+
+    Bounded by ``hi``, not by the enclosing window: a super-batch whose width is
+    not a multiple of ``batch_size`` ends in a PARTIAL batch, and both the drive
+    and :meth:`StreamingDataset.n_batches` must account for it (issue #379).
+    """
+    for b_lo in range(lo, hi, batch_size):
+        yield b_lo, min(b_lo + batch_size, hi)
+
+
 def _parse_max_mem(max_mem: str | int) -> int:
     """Bytes from an int or a size string like '512MB' / '1g' / '2GiB'."""
     if isinstance(max_mem, int):
@@ -1187,8 +1209,7 @@ class StreamingDataset:
                 # keeps the per-batch work to one kernel call per track over
                 # buffers that are already contiguous (see `_ItvArrays`).
                 flat_itvs = _coerce_window_itvs(per_track)
-                for lo in range(0, n_rows, batch_size):
-                    hi = min(lo + batch_size, n_rows)
+                for lo, hi in _batch_bounds(0, n_rows, batch_size):
                     out = _tracks_from_intervals(
                         flat_itvs,
                         np.arange(lo, hi, dtype=np.int64),
@@ -1622,8 +1643,7 @@ class StreamingDataset:
                         )
                     else:
                         track_w = None
-                    for lo in range(0, n_rows, batch_size):
-                        hi = min(lo + batch_size, n_rows)
+                    for lo, hi in _batch_bounds(0, n_rows, batch_size):
                         nxt = next_batch()
                         if nxt is None:
                             raise RuntimeError(
@@ -1967,8 +1987,7 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(s_idx, len(r_idx))
                     n_rows = len(flat_r)
-                    for lo in range(0, n_rows, batch_size):
-                        hi = min(lo + batch_size, n_rows)
+                    for lo, hi in _batch_bounds(0, n_rows, batch_size):
                         data = backend.generate_batch(
                             r_idx, s_idx, cur[0], cur[1], lo, hi, _out_len
                         )
@@ -2000,8 +2019,7 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(s_idx, len(r_idx))
                     n_rows = len(flat_r)
-                    for sb_lo in range(0, n_rows, sb_rows):
-                        sb_hi = min(sb_lo + sb_rows, n_rows)
+                    for sb_lo, sb_hi in _super_batch_bounds(n_rows, sb_rows):
                         # Estimated output bytes gate `parallel` *before* the fill
                         # (the fill IS the reconstruct, so exact total_bytes is only
                         # known after): a tiny tail stays serial (PR-1a), a
@@ -2018,8 +2036,7 @@ class StreamingDataset:
                                 backend._est_out_bytes(r_idx, sb_hi - sb_lo)
                             ),
                         )
-                        for lo in range(sb_lo, sb_hi, batch_size):
-                            hi = min(lo + batch_size, sb_hi)
+                        for lo, hi in _batch_bounds(sb_lo, sb_hi, batch_size):
                             data = backend._drain(buf, lo - sb_lo, hi - sb_lo)
                             yield data, flat_r[lo:hi], flat_s[lo:hi]
             elif self._prefetch_strategy == "svar2_engine":
@@ -2070,10 +2087,8 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
                     n_rows = len(flat_r)
-                    for sb_lo in range(0, n_rows, sb_rows):
-                        sb_hi = min(sb_lo + sb_rows, n_rows)
-                        for lo in range(sb_lo, sb_hi, batch_size):
-                            hi = min(lo + batch_size, sb_hi)
+                    for sb_lo, sb_hi in _super_batch_bounds(n_rows, sb_rows):
+                        for lo, hi in _batch_bounds(sb_lo, sb_hi, batch_size):
                             nxt = engine.next_batch()
                             if nxt is None:
                                 raise RuntimeError(
@@ -2106,8 +2121,7 @@ class StreamingDataset:
                 flat_s = np.tile(s_idx, len(r_idx))
                 n_rows = len(flat_r)
                 data = self._reconstruct_window(r_idx, s_idx)
-                for lo in range(0, n_rows, batch_size):
-                    hi = min(lo + batch_size, n_rows)
+                for lo, hi in _batch_bounds(0, n_rows, batch_size):
                     yield data[lo:hi], flat_r[lo:hi], flat_s[lo:hi]
 
     def to_iter(
@@ -2204,17 +2218,37 @@ class StreamingDataset:
         """Number of batches :meth:`to_iter` will yield at ``batch_size``.
 
         NOT ``ceil(len(self) / batch_size)``: the plan batches *within* each window,
-        so every window's last batch may be partial. Counting the plan is cheap (it
-        only materializes small index arrays).
+        so every window's last batch may be partial -- and on the super-batched SVAR2
+        drives, within each *super-batch*, so every super-batch's last batch may be
+        partial too (issue #379). Counting the plan is cheap (it only materializes
+        small index arrays).
         """
         return sum(1 for _ in self._iter_batch_spans(batch_size))
 
+    def _drive_super_batch_rows(self) -> int | None:
+        """Super-batch width the drive will use, or ``None`` if it does not nest.
+
+        Only the SVAR2 drives (``"sync"``/``"svar2_engine"``) batch *inside* a
+        super-batch. Read off the backend rather than recomputed, for the same
+        reason the drives read it -- see ``_Svar2Backend.__init__``.
+        """
+        if self._prefetch_strategy in ("sync", "svar2_engine"):
+            return getattr(self._backend, "_super_batch_rows", None)
+        return None
+
     def _iter_batch_spans(self, batch_size: int) -> Iterator[int]:
-        """Batch sizes the plan will yield, without reconstructing anything."""
+        """Batch sizes the plan will yield, without reconstructing anything.
+
+        Walks the SAME nesting the drives walk (``_super_batch_bounds`` ->
+        ``_batch_bounds``) rather than re-deriving a flat ``range`` that silently
+        drops each super-batch's partial tail batch (issue #379).
+        """
+        sb_rows = self._drive_super_batch_rows()
         for r_idx, s_idx in self._plan():
             n_rows = len(r_idx) * len(s_idx)
-            for lo in range(0, n_rows, batch_size):
-                yield min(lo + batch_size, n_rows) - lo
+            for sb_lo, sb_hi in _super_batch_bounds(n_rows, sb_rows or n_rows):
+                for b_lo, b_hi in _batch_bounds(sb_lo, sb_hi, batch_size):
+                    yield b_hi - b_lo
 
     def with_seqs(
         self,
