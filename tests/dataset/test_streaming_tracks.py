@@ -785,7 +785,7 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
 
 @pytest.mark.parametrize("src", ["vcf", "pgen"])
 def test_mixed_tracks_non_svar1_raises(streaming_case, src):
-    """Mixed variants+tracks is SVAR1-ONLY in v1.
+    """Mixed variants+tracks raises for the VCF/PGEN backends.
 
     Combining ``tracks=`` with a VCF or PGEN variant source must raise
     ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks

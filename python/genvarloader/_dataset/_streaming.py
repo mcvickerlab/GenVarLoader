@@ -654,10 +654,12 @@ class _Svar2Realign(NamedTuple):
             )
             if block_data.size != n_per_track:
                 raise NotImplementedError(
-                    "SVAR2 haplotype-realigned tracks are sized by the read-bound "
-                    "kernel (ref_len + diff); a fixed with_len(L) cannot be "
-                    "honoured (mirrors _reconstruct.py:370). Unreachable behind "
-                    "_iter_batches' `_out_len != -1` SVAR2 guard."
+                    "SVAR2 haplotype-realigned track block size does not match "
+                    "this batch's drained haplotype lengths (out_lengths): the "
+                    "read-bound kernel sizes each hap to ref_len + diff, which "
+                    "must agree with the haplotype lengths already produced for "
+                    "this batch. This indicates a haps-vs-tracks length drift, "
+                    "not a with_len(L) request (mirrors _reconstruct.py:370)."
                 )
             out[t * n_per_track : (t + 1) * n_per_track] = np.asarray(
                 block_data, np.float32
@@ -1696,10 +1698,11 @@ class StreamingDataset:
                 )
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
-            # unjittered region bounds and emit ragged haplotypes only, so combining
-            # them with jitter, `with_len`, `with_seqs("annotated")`, or
-            # `with_seqs("variants")` would silently ignore the request. Fail fast
-            # rather than return wrong output; SVAR2 Wave A/B support is a follow-up.
+            # unjittered region bounds and emit ragged haplotypes (optionally with
+            # tracks), so combining them with jitter, `with_len`,
+            # `with_seqs("annotated")`, or `with_seqs("variants")` would silently
+            # ignore the request. Fail fast rather than return wrong output; SVAR2
+            # Wave A/B support is a follow-up.
             if isinstance(self._backend, _Svar2Backend) and (
                 self._jitter > 0 or _out_len != -1 or _annotated or _variants
             ):
@@ -2473,15 +2476,19 @@ class StreamingDataset:
                                         base_seed,
                                     )
                                 else:
-                                    # Unreachable on SVAR2 today (fix round 1,
-                                    # T1): `with_len(<int>)` (`_out_len != -1`)
-                                    # is rejected for the SVAR2 backend before
-                                    # the drive ever runs (`:1674`). Kept for
-                                    # the textual parallel with the SVAR1
-                                    # engine drive's identical branch -- do
-                                    # not "fix" the SVAR2 `with_len` guard on
-                                    # the strength of this branch existing.
+                                    # Live, tested path: `realign_tracks=False`
+                                    # reaches here on SVAR2 today.
                                     if isinstance(self._output_length, int):
+                                        # Unreachable on SVAR2 today (fix round
+                                        # 1, T1): `with_len(<int>)` (`_out_len
+                                        # != -1`) is rejected for the SVAR2
+                                        # backend before the drive ever runs
+                                        # (`:1593`, `:1706`). Kept for the
+                                        # textual parallel with the SVAR1
+                                        # engine drive's identical branch --
+                                        # do not "fix" the SVAR2 `with_len`
+                                        # guard on the strength of this branch
+                                        # existing.
                                         _lengths = np.full(
                                             hi - lo, self._output_length, np.int64
                                         )
@@ -4332,7 +4339,7 @@ class _Svar2Backend:
         `self._regions` -- not the caller-supplied (possibly
         jitter-translated) row/track bounds. That is equivalent to honoring
         `row_starts`/`row_ends` ONLY while `jitter == 0`, which
-        `_iter_batches`' jitter+realign guard (`_streaming.py:1634`) enforces
+        `_iter_batches`' jitter+realign guard (`_streaming.py:1661`) enforces
         today. Relaxing that guard requires threading `row_starts`/`row_ends`
         into the gather here, mirroring how SVAR1's `get_diffs_sparse` call
         takes `q_starts=row_starts, q_ends=row_ends`.

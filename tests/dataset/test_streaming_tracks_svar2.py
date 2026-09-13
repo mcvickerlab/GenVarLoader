@@ -87,11 +87,15 @@ def test_svar2_mixed_parity_with_indels(
     `track_w.row_lengths[lo:hi]`/`flat_r[lo:hi]` are all window-GLOBAL. The
     default `SUPERBATCH_TARGET_ROWS` (4096) against this fixture's 18 rows
     per window means `sb_lo` is always 0, so `lo == lo - sb_lo` for every
-    batch and a regression swapping either index would still pass -- the
-    `5` case forces `sb_lo` to a nonzero value more than once per window (18
-    rows / 5 = 4 super-batches), with `batch_size=4` straddling super-batch
-    boundaries, so a swap actually mis-pairs tracks with rows and fails.
-    Mirrors `test_streaming_parity_svar2.py`'s
+    batch and a regression swapping either index would still pass.
+    `_batch_bounds` is bounded by `hi` (the enclosing super-batch's `sb_hi`),
+    so a batch can never straddle a super-batch boundary -- the `5` case's
+    value is not that `batch_size=4` splits across a boundary, but that it
+    forces `sb_lo` to a nonzero value more than once per window (18 rows / 5
+    = 4 super-batches), which makes the super-batch-local `_drain` indices
+    and the window-global `realign_batch`/`row_starts`/`row_lengths` indices
+    actually diverge, so a regression swapping the two index spaces becomes
+    observable. Mirrors `test_streaming_parity_svar2.py`'s
     `object.__setattr__(sds._backend, "_super_batch_rows", 5)` seam.
     """
     f = streaming_svar2_tracks_fixture
@@ -229,10 +233,10 @@ def test_svar2_realign_false_matches_written(streaming_svar2_tracks_fixture):
 def test_svar2_realign_false_drops_ploidy_axis(streaming_svar2_tracks_fixture):
     """Mirrors SVAR1's `test_realign_false_drops_ploidy_axis`: with
     `realign_tracks=False`, the TRACK half must match the written oracle
-    byte-for-byte, not just in shape. `test_svar2_realign_false_matches_written`
-    above only checks the haplotype half and `tracks.shape[1]`; this pins the
-    actual track values too, narrowed to a single track (`alpha`) so the
-    written oracle can be indexed the same way SVAR1's analog does.
+    byte-for-byte and lack a ploidy axis. `test_svar2_realign_false_matches_written`
+    above already covers this (batch_size=4, both tracks); this test is kept as
+    the direct SVAR1 mirror -- narrowed to a single track (`alpha`) and
+    batch_size=1 so the SVAR1 and SVAR2 suites read side by side.
     """
     f = streaming_svar2_tracks_fixture
     sds = gvl.StreamingDataset(
