@@ -158,19 +158,47 @@ def test_svar2_mixed_with_len_rejected(streaming_svar2_tracks_fixture):
         variants=f.svar2_path,
         tracks=[f.table, f.bigwigs],
     ).with_seqs("haplotypes")
-    with pytest.raises(NotImplementedError, match="fixed-length|with_len"):
+    with pytest.raises(
+        NotImplementedError,
+        match=r"Fixed-length \(with_len\) haplotype-realigned tracks",
+    ):
+        next(iter(sds.with_len(10).to_iter(batch_size=4)))
+
+
+def test_svar2_with_len_without_tracks_hits_general_guard(
+    streaming_svar2_tracks_fixture,
+):
+    """Sibling to `test_svar2_mixed_with_len_rejected`: WITHOUT `tracks=`, `with_len`
+    on a `.svar2` source still raises, but via the pre-existing general SVAR2
+    guard (`jitter>0`/`with_len`/`annotated`/`variants` are all wiring gaps for
+    this backend), not the new mixed-tracks guard above -- there is no
+    `_track_backend` to trip that one. Pins the shadowing relationship between
+    the two guards in executable form: the new guard only fires when tracks are
+    present; this one exercises the guard underneath it.
+    """
+    f = streaming_svar2_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed, reference=f.reference_path, variants=f.svar2_path
+    ).with_seqs("haplotypes")
+    with pytest.raises(
+        NotImplementedError, match=r"with_len \(a fixed output length\)"
+    ):
         next(iter(sds.with_len(10).to_iter(batch_size=4)))
 
 
 def test_svar2_realign_false_matches_written(streaming_svar2_tracks_fixture):
     """`realign_tracks=False` leaves tracks in reference coordinates -- the
     un-realigned path is backend-independent (`_tracks_from_intervals`), so it
-    must work for SVAR2 too, and the track axis loses ploidy."""
+    must work for SVAR2 too, and the track axis loses ploidy. `written` is also
+    pinned to `realign_tracks=False` so the track HALF is a well-posed
+    comparison too, not just the haplotype half (which `realign_tracks` never
+    affects)."""
     f = streaming_svar2_tracks_fixture
     written = (
         gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
         .with_seqs("haplotypes")
         .with_tracks(["alpha", "zeta"])
+        .with_settings(realign_tracks=False)
     )
     sds = (
         gvl.StreamingDataset(
@@ -189,9 +217,11 @@ def test_svar2_realign_false_matches_written(streaming_svar2_tracks_fixture):
         # (batch, n_tracks, ~length) -- no ploidy axis when un-realigned.
         assert tracks.shape[1] == 2
         for i in range(len(r_idx)):
-            _assert_haps_cell_equal(
-                haps[i], written[int(r_idx[i]), int(s_idx[i])][0], sds.ploidy
-            )
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_tracks_cell_equal(tracks[i], exp_tracks, ctx=ctx)
             n += 1
     assert n == written.shape[0] * written.shape[1]
 

@@ -420,8 +420,8 @@ single per-ALT `AF` to keep the two byte-identical.
 ```
 
 The **`.svar2` backend** does not yet support these knobs. It is currently
-**haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
-`with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
+**`with_seqs("haplotypes")`-only, `jitter=0`, ragged output only**; combining a `.svar2` source
+with `jitter>0`, `with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
 `NotImplementedError` (SVAR2 support is a known follow-up).
 
 ### Interval track streaming (`tracks=`)
@@ -542,7 +542,10 @@ with `max_jitter>0`.
 tracks do not yet reproduce `extend_to_length=True` (the `gvl.write` default) or `max_jitter>0` —
 both require a whole-cohort, write-time scan (`max_ends`) that a write-free design can't do
 per-window. Build the parity oracle with `extend_to_length=False, max_jitter=None` until that
-follow-up lands.
+follow-up lands. **Exception — `.svar2` sources:** `gvl.write` rejects `extend_to_length=False`
+for a `.svar2` variant source (the read-bound kernel sizes haplotype output at read time), so
+build a `.svar2` mixed oracle with the default `extend_to_length=True`; SVAR2 mixed parity is
+gated on `max_jitter=None` alone.
 
 `StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
 and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises

@@ -1569,6 +1569,13 @@ class StreamingDataset:
                     "the SVAR1 (.svar) and SVAR2 (.svar2) backends support mixed "
                     "variants+tracks today (issue #375)."
                 )
+            # This fires ahead of the general SVAR2 jitter/`with_len` guard
+            # below, whose `_out_len != -1` clause covers the same case today.
+            # Keep both: that one is a temporary Wave A wiring gap and will be
+            # narrowed when `with_len` lands for SVAR2, whereas this rejection
+            # is permanent -- the written path refuses it too
+            # (`_reconstruct.py:369-376`).
+            #
             # Issue #375 Track A: the SVAR2 read-bound track kernel always
             # sizes each hap to `ref_len + diff` with no `output_length`
             # override, so a fixed-length request cannot be honored
