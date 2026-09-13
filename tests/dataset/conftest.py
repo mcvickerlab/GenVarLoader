@@ -1520,7 +1520,15 @@ def streaming_record_tracks_fixture(request, tmp_path_factory):
             )
 
         tmp_dir = tmp_path_factory.mktemp(f"streaming_{backend}_tracks")
-        bed = f.regions
+        # 3 disjoint sub-windows of the same 250bp contig rather than one
+        # whole-contig region: multi-region CSR replication is the thing the
+        # record mixed path must get right (the engine's CSR is per-hap for the
+        # WHOLE window, shared by every region in it), and a one-region bed
+        # makes that replication the identity. Region [170, 250) holds no
+        # variants, so the pure-reference path is covered too. Shared with the
+        # PGEN case on purpose -- same reference/contig/samples; see this
+        # fixture's own docstring at `:614`.
+        bed = request.getfixturevalue("vcf_snp_ins_del_multi_regions")
         reference_path = Path(f.fasta)
 
         # Write once WITHOUT tracks purely to learn the dataset's public

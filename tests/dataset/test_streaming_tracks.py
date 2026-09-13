@@ -769,42 +769,6 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
     _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=f"cell (r={r}, s={s}): ")
 
 
-@pytest.mark.parametrize("src", ["vcf", "pgen"])
-def test_mixed_tracks_non_svar1_raises(streaming_case, src):
-    """Mixed variants+tracks is SVAR1-ONLY in v1.
-
-    Combining ``tracks=`` with a VCF or PGEN variant source must raise
-    ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks
-    or produce wrong output. Parametrized across both non-SVAR1 backends
-    ``streaming_case`` supports (SVAR2 has its own fixture shape -- see
-    ``test_mixed_tracks_svar2_raises`` -- and SVAR1 is the one backend this
-    guard must NOT fire for, exercised by the parity tests above).
-
-    Sample ids come from the written oracle's own ``samples`` (not a
-    hand-typed guess) so the ``Table`` construction here can't drift out of
-    sync with whichever fixture ``src`` selects.
-    """
-    bed, reference, variants, written = streaming_case(src)
-    samples = list(written.samples)
-    table = gvl.Table(
-        "t",
-        pl.DataFrame(
-            {
-                "sample_id": samples,
-                "chrom": ["chr1"] * len(samples),
-                "start": [0] * len(samples),
-                "end": [10] * len(samples),
-                "value": [float(i) for i in range(len(samples))],
-            }
-        ),
-    )
-    sds = gvl.StreamingDataset(
-        bed, reference=reference, variants=variants, tracks=table
-    )
-    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
-        next(iter(sds.to_iter(batch_size=1)))
-
-
 def test_mixed_tracks_svar2_raises(streaming_svar2_case):
     """Same guard, SVAR2 source.
 
@@ -842,6 +806,14 @@ def test_mixed_tracks_svar2_raises(streaming_svar2_case):
         next(iter(sds.to_iter(batch_size=1)))
 
 
+# Backends wired for mixed variants+tracks, and those not. Kept as module-level
+# tuples so a track that adds a backend moves ONE name between them instead of
+# editing assertions in the test body -- Tracks A (SVAR2) and B (VCF/PGEN) of
+# issue #375 land independently and would otherwise conflict here.
+_MIXED_SUPPORTING = ("_Svar1Backend", "_VcfBackend", "_PgenBackend")
+_MIXED_NOT_SUPPORTING = ("_Svar2Backend",)
+
+
 def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """Pin the data the `to_iter` capability guard actually reads (issue #375).
 
@@ -867,26 +839,15 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """
     import inspect
 
-    from genvarloader._dataset._streaming import (
-        _MixedTracksBackend,
-        _PgenBackend,
-        _Svar1Backend,
-        _Svar2Backend,
-        _VcfBackend,
-    )
+    from genvarloader._dataset import _streaming
+    from genvarloader._dataset._streaming import _MixedTracksBackend
 
-    # SVAR1 is the only backend wired for mixed variants+tracks today.
-    assert _Svar1Backend.supports_mixed_tracks is True
-    assert _Svar2Backend.supports_mixed_tracks is False
-    assert _VcfBackend.supports_mixed_tracks is False
-    assert _PgenBackend.supports_mixed_tracks is False
-
-    # The one backend that claims support must define `mixed_realign_window`
-    # with exactly the checked protocol's signature -- parameter names AND
-    # their annotations AND the return annotation, not just the names. The
-    # names alone would not catch the failure this test exists for: a Track
-    # that returns `(t_ends_ext, realign_window)` instead of
-    # `(realign_window, t_ends_ext)` keeps every parameter name identical.
+    # Every backend claiming support must define `mixed_realign_window` with
+    # exactly the checked protocol's signature -- parameter names AND their
+    # annotations AND the return annotation, not just the names. The names
+    # alone would not catch the failure this test exists for: a backend that
+    # returns `(t_ends_ext, realign_window)` instead of `(realign_window,
+    # t_ends_ext)` keeps every parameter name identical.
     #
     # NOTE: `pyrefly`, not this test, is the PRIMARY gate on shape -- it
     # reports `unsafe-overlap` at the `isinstance(backend,
@@ -894,36 +855,46 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     # `mixed_realign_window` disagrees with the protocol. This test is the
     # runtime backstop for a checker that is not run, or is run permissively.
     # `eval_str=True` RESOLVES the string annotations rather than comparing
-    # them textually. Both declarations are `from __future__`-style strings,
-    # and the two spell the same type differently -- the protocol quotes the
-    # whole return (`"tuple[_MixedRealign, NDArray[np.int32]]"`), the backend
-    # quotes only the forward reference (`tuple["_MixedRealign", ...]`). Those
-    # are the same type, and a textual comparison would fail on the quoting
-    # alone, which is exactly the kind of false alarm that gets a test deleted
-    # instead of heeded.
+    # them textually. The rule every conforming `mixed_realign_window` must
+    # follow: annotate its return UNQUOTED, as
+    # `tuple[_MixedRealign, NDArray[np.int32]]`, exactly like the protocol.
+    # `eval_str=True` does not unwrap a quoted forward reference nested
+    # inside a subscript -- `tuple["_MixedRealign", ...]` evaluates to a
+    # tuple whose first argument is the *string* `"_MixedRealign"`, which
+    # compares UNEQUAL to `tuple[_MixedRealign, ...]`. Quoting only the inner
+    # name therefore fails this comparison with a confusing message; quoting
+    # nothing (or quoting the whole annotation, as the protocol itself does)
+    # passes.
     expected_sig = inspect.signature(
         _MixedTracksBackend.mixed_realign_window, eval_str=True
     )
-    actual_sig = inspect.signature(_Svar1Backend.mixed_realign_window, eval_str=True)
-    assert list(actual_sig.parameters) == list(expected_sig.parameters)
-    assert actual_sig.return_annotation == expected_sig.return_annotation, (
-        "_Svar1Backend.mixed_realign_window's RETURN type has drifted from "
-        "the _MixedTracksBackend protocol (a swapped 2-tuple keeps every "
-        "parameter name identical, so only this assert would catch it):\n"
-        f"  protocol: {expected_sig.return_annotation}\n"
-        f"  backend:  {actual_sig.return_annotation}"
-    )
-    for name, expected_param in expected_sig.parameters.items():
-        assert actual_sig.parameters[name].annotation == expected_param.annotation, (
-            f"_Svar1Backend.mixed_realign_window parameter {name!r} has "
-            f"drifted from the _MixedTracksBackend protocol:\n"
-            f"  protocol: {expected_param.annotation}\n"
-            f"  backend:  {actual_sig.parameters[name].annotation}"
+    for name in _MIXED_SUPPORTING:
+        backend = getattr(_streaming, name)
+        assert backend.supports_mixed_tracks is True
+        actual_sig = inspect.signature(backend.mixed_realign_window, eval_str=True)
+        assert list(actual_sig.parameters) == list(expected_sig.parameters)
+        assert actual_sig.return_annotation == expected_sig.return_annotation, (
+            f"{name}.mixed_realign_window's RETURN type has drifted from "
+            "the _MixedTracksBackend protocol (a swapped 2-tuple keeps "
+            "every parameter name identical, so only this assert would "
+            "catch it):\n"
+            f"  protocol: {expected_sig.return_annotation}\n"
+            f"  backend:  {actual_sig.return_annotation}"
         )
+        for pname, expected_param in expected_sig.parameters.items():
+            assert (
+                actual_sig.parameters[pname].annotation == expected_param.annotation
+            ), (
+                f"{name}.mixed_realign_window parameter {pname!r} has "
+                "drifted from the _MixedTracksBackend protocol:\n"
+                f"  protocol: {expected_param.annotation}\n"
+                f"  backend:  {actual_sig.parameters[pname].annotation}"
+            )
     # None of the non-supporting backends need to satisfy it, but a stray
     # `mixed_realign_window` on one of them would mask a mismatched flag --
     # guard against that too.
-    for backend in (_Svar2Backend, _VcfBackend, _PgenBackend):
+    for name in _MIXED_NOT_SUPPORTING:
+        backend = getattr(_streaming, name)
         assert not backend.supports_mixed_tracks
         assert not hasattr(backend, "mixed_realign_window")
 

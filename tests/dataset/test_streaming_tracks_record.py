@@ -7,13 +7,13 @@ batch. Task 6 consumes it; this file pins its contract.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 import genvarloader as gvl
 from genvarloader.genvarloader import RecordStreamEngine
+
+BACKENDS = ("vcf", "pgen")
 
 
 def test_window_realign_inputs_matches_decode_and_csr_is_well_formed(
@@ -170,7 +170,7 @@ def test_window_realign_inputs_matches_before_and_during_producer(
         )
 
 
-@pytest.mark.parametrize("backend", ["vcf", "pgen"])
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_record_tracks_fixture_writes_a_usable_oracle(
     streaming_record_tracks_fixture, backend
 ):
@@ -193,9 +193,64 @@ def test_record_tracks_fixture_writes_a_usable_oracle(
     # keyed by -- if these disagree, every track value in Tasks 6 and 8 is off
     # by a sample permutation.
     assert list(ds.samples) == f.samples
-    assert set(f.bigwigs.samples) == set(f.samples)
 
-    assert f.bigwigs.name == "alpha"
-    assert f.table.name == "zeta"
-    assert Path(f.variants_path).exists()
+    # The real risk the deleted assertions were reaching for: track files keyed
+    # by names that do not line up with the dataset's public sample order. That
+    # shows up as samples sharing track values, so compare two samples' tracks
+    # in the same region. The fixture gives every (sample, contig, bin) a
+    # distinct value on purpose, so equal rows here mean a mis-keyed fixture --
+    # which would silently corrupt every parity test in Tasks 6 and 8.
+    assert len(f.samples) >= 2, "need two samples to detect a sample-keying bug"
+    # `ds` has both a reference and tracks, so indexing returns the same
+    # `(haps, tracks)` 2-tuple the parity tests in `test_streaming_tracks.py`
+    # unpack (`exp_haps, exp_tracks = written[r, s]`) -- only the second half
+    # is the track data this assertion cares about. The per-cell track is
+    # itself Ragged (per-ploidy realigned length can differ within one
+    # sample when its two haplotype copies carry different indels), so
+    # `np.asarray()` cannot densify it -- compare via `.to_packed()`'s flat
+    # `.lengths`/`.data` instead, which is well-defined regardless.
+    _, tracks0 = ds[0, 0]
+    _, tracks1 = ds[0, 1]
+    packed0, packed1 = tracks0.to_packed(), tracks1.to_packed()
+    identical = np.array_equal(packed0.lengths, packed1.lengths) and np.array_equal(
+        packed0.data, packed1.data
+    )
+    assert not identical, (
+        "samples 0 and 1 have identical track values -- the fixture's bigwigs "
+        "or table are keyed by the wrong sample names"
+    )
+
     assert ds.n_regions == f.bed.height
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_record_window_csr_replicates_across_regions(
+    streaming_record_tracks_fixture, backend
+):
+    """The engine's CSR is per (sample, ploid) for the whole window; the mixed
+    path must replicate it across the window's regions in C-order (region,
+    sample). A transposed or un-replicated CSR reads another sample's variants
+    and shows up only as a silent parity failure, so pin the shape directly.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.variants_path,
+        tracks=[f.table, f.bigwigs],
+    ).with_seqs("haplotypes")
+    b = sds._backend
+    n_reg, n_s = 2, sds.n_samples
+    r_idx = np.arange(n_reg, dtype=np.intp)
+    s_idx = np.arange(n_s, dtype=np.intp)
+    t_starts = np.ascontiguousarray(sds._regions[r_idx, 1], np.int32)
+    t_ends = np.ascontiguousarray(sds._regions[r_idx, 2], np.int32)
+    row_starts = np.repeat(t_starts, n_s).astype(np.int32)
+    row_ends = np.repeat(t_ends, n_s).astype(np.int32)
+    state, t_ends_ext = b.mixed_realign_window(
+        r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+    )
+    assert state.geno_offsets.shape == (2, n_reg * n_s * sds.ploidy)
+    assert state.diffs.shape == (n_reg * n_s, sds.ploidy)
+    assert t_ends_ext.shape == (n_reg,)
+    assert (t_ends_ext >= t_ends).all()
