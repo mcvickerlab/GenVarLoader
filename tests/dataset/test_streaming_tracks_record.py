@@ -209,8 +209,17 @@ def test_record_tracks_fixture_writes_a_usable_oracle(
     # sample when its two haplotype copies carry different indels), so
     # `np.asarray()` cannot densify it -- compare via `.to_packed()`'s flat
     # `.lengths`/`.data` instead, which is well-defined regardless.
-    _, tracks0 = ds[0, 0]
-    _, tracks1 = ds[0, 1]
+    #
+    # Region 2 specifically (not region 0): region 0 has indels that already
+    # make samples 0 and 1 differ in realigned LENGTH regardless of track
+    # values, so an identical-length check there would pass on the length
+    # difference alone and never reach the values -- non-falsifiable against
+    # a mis-keyed fixture (proven by mutation, see H2 in the fix-round-1
+    # report). Region 2 is the fixture's variant-free region, where every
+    # sample's per-hap length is equal, so only the track VALUES can make
+    # this assertion pass or fail.
+    _, tracks0 = ds[2, 0]
+    _, tracks1 = ds[2, 1]
     packed0, packed1 = tracks0.to_packed(), tracks1.to_packed()
     identical = np.array_equal(packed0.lengths, packed1.lengths) and np.array_equal(
         packed0.data, packed1.data
@@ -229,8 +238,16 @@ def test_record_window_csr_replicates_across_regions(
 ):
     """The engine's CSR is per (sample, ploid) for the whole window; the mixed
     path must replicate it across the window's regions in C-order (region,
-    sample). A transposed or un-replicated CSR reads another sample's variants
-    and shows up only as a silent parity failure, so pin the shape directly.
+    sample). Checked against an INDEPENDENT source -- the engine's own CSR,
+    fetched directly via `window_realign_inputs` -- rather than against a
+    restatement of the mixed path's own arithmetic: a transposed `hap_of_row`
+    (region-major <-> sample-major) silently reads another sample's genotypes
+    and must fail this test, not just an un-replicated (wrong-length) one.
+
+    Uses the fixture's full 3-region window with all 3 samples (n_reg == n_s
+    == 3): a transposition is only a genuine permutation of hap indices when
+    the two axes have equal extent, so a smaller r_idx slice would let a
+    transposed implementation pass by coincidence.
     """
     f = streaming_record_tracks_fixture(backend)
     sds = gvl.StreamingDataset(
@@ -240,7 +257,12 @@ def test_record_window_csr_replicates_across_regions(
         tracks=[f.table, f.bigwigs],
     ).with_seqs("haplotypes")
     b = sds._backend
-    n_reg, n_s = 2, sds.n_samples
+    P = sds.ploidy
+    n_reg, n_s = len(sds._regions), sds.n_samples
+    assert n_reg == n_s == 3, (
+        "test assumes the fixture's full 3-region/3-sample window so a "
+        "transposed hap_of_row is a genuine permutation -- fixture changed?"
+    )
     r_idx = np.arange(n_reg, dtype=np.intp)
     s_idx = np.arange(n_s, dtype=np.intp)
     t_starts = np.ascontiguousarray(sds._regions[r_idx, 1], np.int32)
@@ -250,7 +272,46 @@ def test_record_window_csr_replicates_across_regions(
     state, t_ends_ext = b.mixed_realign_window(
         r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
     )
-    assert state.geno_offsets.shape == (2, n_reg * n_s * sds.ploidy)
-    assert state.diffs.shape == (n_reg * n_s, sds.ploidy)
+    assert state.geno_offsets.shape == (2, n_reg * n_s * P)
+    assert state.diffs.shape == (n_reg * n_s, P)
     assert t_ends_ext.shape == (n_reg,)
     assert (t_ends_ext >= t_ends).all()
+
+    # Independent source of truth: query the engine directly for this exact
+    # (contig, t_starts/t_ends, sample sub-range) rather than trusting the
+    # mixed path's own replication of it.
+    contig_idx = int(b._regions[r_idx[0], 0])
+    engine = b._mixed_engine()
+    _, _, _, csr = engine.window_realign_inputs(
+        contig_idx,
+        np.ascontiguousarray(t_starts, np.uint32).tolist(),
+        np.ascontiguousarray(t_ends, np.uint32).tolist(),
+        int(s_idx[0]),
+        int(s_idx[-1]) + 1,
+    )
+    csr = np.ascontiguousarray(csr, np.int64)
+    assert csr.shape == (n_s * P + 1,)
+
+    # Every (region, sample, ploid) row's genotype slice must equal the
+    # engine's own slice for hap `si * ploidy + p` -- i.e. every region block
+    # is an exact replica of the engine's per-hap CSR, sample-major within
+    # the block. `bi = r * n_s + si` is the drive's documented row order
+    # (region-major, sample-minor; see `_streaming.py`'s
+    # `_record_mixed_realign_window` docstring and `row_starts`/`row_ends`'s
+    # construction above via `np.repeat(t_starts, n_s)`), computed here from
+    # scratch rather than reused from the code under test.
+    for r in range(n_reg):
+        for si in range(n_s):
+            bi = r * n_s + si
+            for p in range(P):
+                col = state.geno_offset_idx[bi, p]
+                expected = (int(csr[si * P + p]), int(csr[si * P + p + 1]))
+                actual = (
+                    int(state.geno_offsets[0, col]),
+                    int(state.geno_offsets[1, col]),
+                )
+                assert actual == expected, (
+                    f"region {r} sample {si} ploid {p} (row {bi}): expected "
+                    f"hap {si * P + p}'s CSR slice {expected} from the "
+                    f"engine, got {actual} from the mixed path"
+                )

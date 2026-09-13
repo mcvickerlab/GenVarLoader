@@ -817,12 +817,13 @@ _MIXED_NOT_SUPPORTING = ("_Svar2Backend",)
 def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """Pin the data the `to_iter` capability guard actually reads (issue #375).
 
-    `test_mixed_tracks_non_svar1_raises`/`test_mixed_tracks_svar2_raises`
-    above already pin the guard's user-visible BEHAVIOR (VCF/PGEN/SVAR2 +
-    ``tracks=`` raises `NotImplementedError` at `to_iter` time) -- constructing
-    another `StreamingDataset` over one of those sources would only repeat
-    that, not add coverage. What those tests can't see is the guard's
-    SOURCE OF TRUTH: each backend's `supports_mixed_tracks` `ClassVar[bool]`,
+    `test_mixed_tracks_svar2_raises` above already pins the guard's
+    user-visible BEHAVIOR (SVAR2 + ``tracks=`` raises `NotImplementedError` at
+    `to_iter` time; SVAR1/VCF/PGEN + ``tracks=`` do not, since the #375 fix
+    round wired all three) -- constructing another `StreamingDataset` over one
+    of those sources would only repeat that, not add coverage. What that test
+    can't see is the guard's SOURCE OF TRUTH: each backend's
+    `supports_mixed_tracks` `ClassVar[bool]`,
     and -- since the #375 fix round -- whether a backend that sets it `True`
     actually shapes `mixed_realign_window` to match the `_MixedTracksBackend`
     protocol `to_iter` narrows to before calling it. A backend could flip the
@@ -863,8 +864,11 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     # tuple whose first argument is the *string* `"_MixedRealign"`, which
     # compares UNEQUAL to `tuple[_MixedRealign, ...]`. Quoting only the inner
     # name therefore fails this comparison with a confusing message; quoting
-    # nothing (or quoting the whole annotation, as the protocol itself does)
-    # passes.
+    # nothing (as `_MixedTracksBackend.mixed_realign_window` itself does, at
+    # `_streaming.py:446`) or quoting the WHOLE annotation (as the
+    # module-level `_record_mixed_realign_window` helper does, at
+    # `_streaming.py:518`) both pass -- only a partial quote inside the
+    # subscript fails.
     expected_sig = inspect.signature(
         _MixedTracksBackend.mixed_realign_window, eval_str=True
     )

@@ -1497,8 +1497,8 @@ class StreamingDataset:
                 raise NotImplementedError(
                     "StreamingDataset tracks= combined with a variant source is "
                     f"not supported for {type(self._backend).__name__} yet; only "
-                    "the SVAR1 (.svar) backend supports mixed variants+tracks "
-                    "today (issue #375)."
+                    "the SVAR1 (.svar), VCF/BCF, and PGEN backends support mixed "
+                    "variants+tracks today (issue #375); .svar2 does not yet."
                 )
             # Task 8 (spec §3.3/§8): `with_seqs("variant-windows")` + tracks +
             # `realign_tracks=True` mirrors the WRITTEN path's own `ValueError`
@@ -4130,7 +4130,7 @@ class _VcfBackend:
         """
         return self._has_cached_af
 
-    def _mixed_engine(self):
+    def _mixed_engine(self) -> object:
         """A zero-job engine kept solely for `window_realign_inputs` calls.
 
         `window_realign_inputs` decodes the window it is handed and never
@@ -4368,7 +4368,7 @@ class _PgenBackend:
         """
         return False
 
-    def _mixed_engine(self):
+    def _mixed_engine(self) -> object:
         """A zero-job engine kept solely for `window_realign_inputs` calls.
 
         `window_realign_inputs` decodes the window it is handed and never
