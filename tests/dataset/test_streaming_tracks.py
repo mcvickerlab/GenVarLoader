@@ -13,7 +13,21 @@ import polars as pl
 import pytest
 
 import genvarloader as gvl
+from genvarloader._dataset._streaming import (
+    _MixedTracksBackend,
+    _PgenBackend,
+    _Svar1Backend,
+    _Svar2Backend,
+    _VcfBackend,
+)
 from genvarloader._dataset._track_stream import _TrackBackend
+
+# Backends that implement the `_MixedTracksBackend` protocol (issue #375) vs.
+# those that don't yet. Move a name between these two tuples as backends gain
+# (or lose) mixed variants+tracks support -- `test_supports_mixed_tracks_flags_
+# match_mixed_realign_window_protocol` below iterates both.
+_MIXED_TRACKS_CONFORMING_BACKENDS = (_Svar1Backend, _Svar2Backend)
+_MIXED_TRACKS_NONCONFORMING_BACKENDS = (_VcfBackend, _PgenBackend)
 
 
 def test_fixture_builds(streaming_tracks_fixture):
@@ -867,21 +881,14 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """
     import inspect
 
-    from genvarloader._dataset._streaming import (
-        _MixedTracksBackend,
-        _PgenBackend,
-        _Svar1Backend,
-        _Svar2Backend,
-        _VcfBackend,
-    )
+    # SVAR1 and SVAR2 are wired for mixed variants+tracks today (issue #375);
+    # VCF/PGEN are not yet.
+    for backend in _MIXED_TRACKS_CONFORMING_BACKENDS:
+        assert backend.supports_mixed_tracks is True
+    for backend in _MIXED_TRACKS_NONCONFORMING_BACKENDS:
+        assert backend.supports_mixed_tracks is False
 
-    # SVAR1 is the only backend wired for mixed variants+tracks today.
-    assert _Svar1Backend.supports_mixed_tracks is True
-    assert _Svar2Backend.supports_mixed_tracks is False
-    assert _VcfBackend.supports_mixed_tracks is False
-    assert _PgenBackend.supports_mixed_tracks is False
-
-    # The one backend that claims support must define `mixed_realign_window`
+    # Every backend that claims support must define `mixed_realign_window`
     # with exactly the checked protocol's signature -- parameter names AND
     # their annotations AND the return annotation, not just the names. The
     # names alone would not catch the failure this test exists for: a Track
@@ -904,26 +911,30 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     expected_sig = inspect.signature(
         _MixedTracksBackend.mixed_realign_window, eval_str=True
     )
-    actual_sig = inspect.signature(_Svar1Backend.mixed_realign_window, eval_str=True)
-    assert list(actual_sig.parameters) == list(expected_sig.parameters)
-    assert actual_sig.return_annotation == expected_sig.return_annotation, (
-        "_Svar1Backend.mixed_realign_window's RETURN type has drifted from "
-        "the _MixedTracksBackend protocol (a swapped 2-tuple keeps every "
-        "parameter name identical, so only this assert would catch it):\n"
-        f"  protocol: {expected_sig.return_annotation}\n"
-        f"  backend:  {actual_sig.return_annotation}"
-    )
-    for name, expected_param in expected_sig.parameters.items():
-        assert actual_sig.parameters[name].annotation == expected_param.annotation, (
-            f"_Svar1Backend.mixed_realign_window parameter {name!r} has "
-            f"drifted from the _MixedTracksBackend protocol:\n"
-            f"  protocol: {expected_param.annotation}\n"
-            f"  backend:  {actual_sig.parameters[name].annotation}"
+    for backend in _MIXED_TRACKS_CONFORMING_BACKENDS:
+        actual_sig = inspect.signature(backend.mixed_realign_window, eval_str=True)
+        assert list(actual_sig.parameters) == list(expected_sig.parameters)
+        assert actual_sig.return_annotation == expected_sig.return_annotation, (
+            f"{backend.__name__}.mixed_realign_window's RETURN type has "
+            "drifted from the _MixedTracksBackend protocol (a swapped "
+            "2-tuple keeps every parameter name identical, so only this "
+            "assert would catch it):\n"
+            f"  protocol: {expected_sig.return_annotation}\n"
+            f"  backend:  {actual_sig.return_annotation}"
         )
+        for name, expected_param in expected_sig.parameters.items():
+            assert (
+                actual_sig.parameters[name].annotation == expected_param.annotation
+            ), (
+                f"{backend.__name__}.mixed_realign_window parameter {name!r} "
+                "has drifted from the _MixedTracksBackend protocol:\n"
+                f"  protocol: {expected_param.annotation}\n"
+                f"  backend:  {actual_sig.parameters[name].annotation}"
+            )
     # None of the non-supporting backends need to satisfy it, but a stray
     # `mixed_realign_window` on one of them would mask a mismatched flag --
     # guard against that too.
-    for backend in (_Svar2Backend, _VcfBackend, _PgenBackend):
+    for backend in _MIXED_TRACKS_NONCONFORMING_BACKENDS:
         assert not backend.supports_mixed_tracks
         assert not hasattr(backend, "mixed_realign_window")
 
