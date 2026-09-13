@@ -34,8 +34,10 @@ if TYPE_CHECKING:
 
     from .._ragged import RaggedIntervals, RaggedTracks
     from .._types import IntervalTrack
+    from ..genvarloader import Svar2Store
     from ._flat_variants import VarWindowOpt
     from ._insertion_fill import InsertionFill
+    from ._svar2_haps import _GatherInputs
     from ._track_stream import _TrackBackend
 
 # Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
@@ -373,13 +375,13 @@ class _MixedRealign(Protocol):
     Mixed variants+tracks needs two things per window: state computed once
     (per-row genotype views, deletion diffs) and a per-batch kernel that turns
     that state plus the window's intervals into `RaggedTracks`. Different
-    variant sources need BOTH to differ -- SVAR1 and the record backends share
-    the fused `intervals_and_realign_track_fused` kernel over a CSR
+    variant sources need BOTH to differ -- SVAR1 and the record backends
+    share the fused `intervals_and_realign_track_fused` kernel over a CSR
     (`_RealignWindow`), while SVAR2 has no fused kernel and must split into
     `intervals_to_tracks` + `shift_and_realign_tracks_from_svar2_readbound`
-    (`_Svar2Realign` -- Track A, not yet landed). Bundling state with its
-    kernel is what keeps the drive loop free of `isinstance` dispatch: the
-    drive holds one optional and calls one method on it.
+    (`_Svar2Realign`). Bundling state with its kernel is what keeps the
+    drive loop free of `isinstance` dispatch: the drive holds one optional
+    and calls one method on it.
     """
 
     def realign_batch(
@@ -526,11 +528,11 @@ class _Svar2Realign(NamedTuple):
     group list.
     """
 
-    store: object
+    store: "Svar2Store"
     contig: str
     ploidy: int
     #: `_gather_rows`' first seven elements for the WHOLE window's rows.
-    gi: tuple
+    gi: "_GatherInputs"
     #: `(n_rows, ploidy)` int32 per-hap reference-length diffs.
     diffs: "NDArray[np.int32]"
     #: `(n_rows, ploidy)` int32 all-zero shifts (streaming never sets
@@ -556,6 +558,16 @@ class _Svar2Realign(NamedTuple):
         same way `_realigned_tracks_from_intervals` does -- see that function's
         docstring for why streaming reorders and the written path does not
         (issue #371).
+
+        `out_lengths` is used only to size `n_per_track`/`tm_offsets`, never
+        fed to the read-bound kernel: unlike the fused SVAR1 kernel, the SVAR2
+        read-bound kernel sizes each hap to `ref_len + diff` itself and cannot
+        be told a fixed length, mirroring the written path's own guard
+        (`if isinstance(output_length, int): raise NotImplementedError(...)`,
+        `_reconstruct.py:370-375`). `out_lengths` and the kernel's native
+        sizing therefore MUST agree, or this silently mis-labels the ragged
+        result; see the `block_data.size` check below for what happens when
+        they don't.
         """
         from .._ragged import RaggedTracks
         from .._threads import should_parallelize
@@ -589,32 +601,31 @@ class _Svar2Realign(NamedTuple):
         # first six entries are per-row (or per-row*P for the vk_* pairs);
         # `region_bounds` is per-row too. Row order is C-order (region,
         # sample), identical to the drive's.
-        (
-            region_starts,
-            orig_samples,
-            vk_snp,
-            vk_indel,
-            dense_snp,
-            dense_indel,
-            region_bounds,
-        ) = (
-            self.gi[0][lo:hi],
-            self.gi[1][lo:hi],
-            self.gi[2][lo * P : hi * P],
-            self.gi[3][lo * P : hi * P],
-            self.gi[4][lo:hi],
-            self.gi[5][lo:hi],
-            self.gi[6][lo:hi],
-        )
+        # None of these depend on `t`: `intervals_to_tracks` fully overwrites
+        # `tracks_buf` each call (it is not accumulated across tracks), and
+        # the gather-input/`starts` arrays are the same per-row slices for
+        # every track. Hoisted out of the loop below.
+        region_starts = np.ascontiguousarray(self.gi[0][lo:hi], np.uint32)
+        orig_samples = np.ascontiguousarray(self.gi[1][lo:hi], np.int64)
+        vk_snp = np.ascontiguousarray(self.gi[2][lo * P : hi * P], np.int64)
+        vk_indel = np.ascontiguousarray(self.gi[3][lo * P : hi * P], np.int64)
+        dense_snp = np.ascontiguousarray(self.gi[4][lo:hi], np.int64)
+        dense_indel = np.ascontiguousarray(self.gi[5][lo:hi], np.int64)
+        region_bounds = np.ascontiguousarray(self.gi[6][lo:hi], np.int32)
         shifts_b = np.ascontiguousarray(self.shifts[lo:hi], np.int32)
         offset_idxs = np.arange(lo, hi, dtype=np.int64)
+        starts = np.ascontiguousarray(regions_batch[:, 1], np.int32)
         g_total = int(track_ofsts[-1])
+        tracks_buf = np.empty(g_total, np.float32)
+        do_parallel = should_parallelize(g_total * 4)
+        # GLOBAL batch row per query. Single contig group here, so the
+        # group's rows ARE the batch's rows, in order.
+        batch_rows = np.arange(batch, dtype=np.int64)
 
         for t, (name, itv) in enumerate(zip(names, itvs)):
-            tracks_buf = np.empty(g_total, np.float32)
             intervals_to_tracks(
                 offset_idxs=offset_idxs,
-                starts=np.ascontiguousarray(regions_batch[:, 1], np.int32),
+                starts=starts,
                 itv_starts=itv.starts,
                 itv_ends=itv.ends,
                 itv_values=itv.values,
@@ -625,24 +636,29 @@ class _Svar2Realign(NamedTuple):
             block_data, _block_off = shift_and_realign_tracks_from_svar2_readbound(
                 self.store,
                 self.contig,
-                np.ascontiguousarray(region_starts, np.uint32),
-                np.ascontiguousarray(orig_samples, np.int64),
-                np.ascontiguousarray(vk_snp, np.int64),
-                np.ascontiguousarray(vk_indel, np.int64),
-                np.ascontiguousarray(dense_snp, np.int64),
-                np.ascontiguousarray(dense_indel, np.int64),
-                np.ascontiguousarray(region_bounds, np.int32),
+                region_starts,
+                orig_samples,
+                vk_snp,
+                vk_indel,
+                dense_snp,
+                dense_indel,
+                region_bounds,
                 shifts_b,
                 tracks_buf,
                 track_ofsts,
                 np.ascontiguousarray(strat_params[t], np.float64),
                 np.int64(strat_ids[t]),
                 np.uint64(base_seed),
-                # GLOBAL batch row per query. Single contig group here, so the
-                # group's rows ARE the batch's rows, in order.
-                np.arange(batch, dtype=np.int64),
-                should_parallelize(g_total * 4),
+                batch_rows,
+                do_parallel,
             )
+            if block_data.size != n_per_track:
+                raise NotImplementedError(
+                    "SVAR2 haplotype-realigned tracks are sized by the read-bound "
+                    "kernel (ref_len + diff); a fixed with_len(L) cannot be "
+                    "honoured (mirrors _reconstruct.py:370). Unreachable behind "
+                    "_iter_batches' `_out_len != -1` SVAR2 guard."
+                )
             out[t * n_per_track : (t + 1) * n_per_track] = np.asarray(
                 block_data, np.float32
             )
@@ -1550,8 +1566,8 @@ class StreamingDataset:
                 raise NotImplementedError(
                     "StreamingDataset tracks= combined with a variant source is "
                     f"not supported for {type(self._backend).__name__} yet; only "
-                    "the SVAR1 (.svar) and SVAR2 (.svar2) backends support mixed "
-                    "variants+tracks today (issue #375)."
+                    "the SVAR1 (.svar) backend supports mixed variants+tracks "
+                    "today (issue #375)."
                 )
             # Issue #375 Track A: `_Svar2Backend` declares the capability
             # (`supports_mixed_tracks = True` + a conforming
@@ -4122,13 +4138,25 @@ class _Svar2Backend:
         Same contract and the same deletion-extension formula as
         `_Svar1Backend.mixed_realign_window` -- see that docstring for why the
         extension exists and why it deliberately does not match the written
-        WRITER's `chromEnd`. Only the source of `diffs` differs: SVAR1 walks a
-        CSR in numpy (`get_diffs_sparse`), SVAR2 asks the read-bound kernel
+        WRITER's `chromEnd`. The source of `diffs` differs: SVAR1 walks a CSR
+        in numpy (`get_diffs_sparse`), SVAR2 asks the read-bound kernel
         (`hap_diffs_from_svar2_readbound`), which is the same call the written
         SVAR2 path makes (`Svar2Haps._haplotype_diffs`).
+
+        Unlike SVAR1, this reads NEITHER `row_starts`/`row_ends` NOR
+        `t_starts`: the read-bound kernel takes its query bounds from
+        `read_window`'s `region_bounds`, i.e. the RAW unjittered
+        `self._regions` -- not the caller-supplied (possibly
+        jitter-translated) row/track bounds. That is equivalent to honoring
+        `row_starts`/`row_ends` ONLY while `jitter == 0`, which
+        `_iter_batches`' jitter+realign guard (`_streaming.py:1634`) enforces
+        today. Relaxing that guard requires threading `row_starts`/`row_ends`
+        into the gather here, mirroring how SVAR1's `get_diffs_sparse` call
+        takes `q_starts=row_starts, q_ends=row_ends`.
         """
         from .._threads import should_parallelize
         from ..genvarloader import hap_diffs_from_svar2_readbound
+        from ._svar2_haps import _range_work_bytes
 
         r_idx = np.asarray(r_idx, np.intp)
         s_idx = np.asarray(s_idx, np.intp)
@@ -4156,7 +4184,7 @@ class _Svar2Backend:
                 gi[6],
                 P,
                 False,
-                should_parallelize(n_rows * P),
+                should_parallelize(_range_work_bytes(n_rows, P, gi)),
                 None,
             ),
             np.int32,

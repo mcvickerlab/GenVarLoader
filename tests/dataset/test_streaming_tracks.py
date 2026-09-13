@@ -820,7 +820,15 @@ def test_mixed_tracks_non_svar1_raises(streaming_case, src):
 
 
 def test_mixed_tracks_svar2_raises(streaming_svar2_case):
-    """Same guard, SVAR2 source.
+    """Different guard than the vcf/pgen case above: the Track A bridge guard.
+
+    `_Svar2Backend` now declares `supports_mixed_tracks = True` (issue #375
+    Track A), so the general capability guard exercised above does NOT fire
+    for SVAR2. This exercises the separate, narrowly-scoped bridge guard in
+    `StreamingDataset._iter_batches` (see its comment: "Issue #375 Track A")
+    that preserves this exact user-facing behavior until a later task wires
+    `mixed_realign_window` into the read drive. Delete this test together
+    with that guard once that wiring lands.
 
     ``streaming_svar2_case`` returns ``(bed, reference, variants)`` -- three
     values, not ``streaming_case``'s four -- because it has no plain
@@ -852,7 +860,7 @@ def test_mixed_tracks_svar2_raises(streaming_svar2_case):
     sds = gvl.StreamingDataset(
         bed, reference=reference, variants=variants, tracks=table
     )
-    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
+    with pytest.raises(NotImplementedError, match="not wired into the read drive yet"):
         next(iter(sds.to_iter(batch_size=1)))
 
 
