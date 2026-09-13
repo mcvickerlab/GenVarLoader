@@ -12,6 +12,7 @@ into the "sync" read drive, so `StreamingDataset(..., tracks=...)` over a
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import genvarloader as gvl
 
@@ -73,7 +74,26 @@ def _assert_tracks_cell_equal(streamed, expected, ctx="") -> None:
     )
 
 
-def test_svar2_mixed_parity_with_indels(streaming_svar2_tracks_fixture):
+@pytest.mark.parametrize("super_batch_rows", [4096, 5])
+def test_svar2_mixed_parity_with_indels(
+    streaming_svar2_tracks_fixture, super_batch_rows
+):
+    """Byte-identical parity for BOTH halves of the (haplotypes, tracks) pair.
+
+    Parametrized over `super_batch_rows` (issue #375 Track A fix round 1,
+    M1): the drive mixes two index spaces on adjacent lines --
+    `_drain(buf, lo - sb_lo, hi - sb_lo)` is super-batch-LOCAL while
+    `realign_batch(lo, hi, ...)`/`track_w.row_starts[lo:hi]`/
+    `track_w.row_lengths[lo:hi]`/`flat_r[lo:hi]` are all window-GLOBAL. The
+    default `SUPERBATCH_TARGET_ROWS` (4096) against this fixture's 18 rows
+    per window means `sb_lo` is always 0, so `lo == lo - sb_lo` for every
+    batch and a regression swapping either index would still pass -- the
+    `5` case forces `sb_lo` to a nonzero value more than once per window (18
+    rows / 5 = 4 super-batches), with `batch_size=4` straddling super-batch
+    boundaries, so a swap actually mis-pairs tracks with rows and fails.
+    Mirrors `test_streaming_parity_svar2.py`'s
+    `object.__setattr__(sds._backend, "_super_batch_rows", 5)` seam.
+    """
     f = streaming_svar2_tracks_fixture
     written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
         "haplotypes"
@@ -84,6 +104,7 @@ def test_svar2_mixed_parity_with_indels(streaming_svar2_tracks_fixture):
         variants=f.svar2_path,
         tracks=[f.table, f.bigwigs],
     ).with_seqs("haplotypes")
+    object.__setattr__(sds._backend, "_super_batch_rows", super_batch_rows)
 
     seen = set()
     for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
@@ -100,3 +121,25 @@ def test_svar2_mixed_parity_with_indels(streaming_svar2_tracks_fixture):
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+def test_svar2_engine_tracks_raises(streaming_svar2_tracks_fixture):
+    """The test-only "svar2_engine" strategy has no track path (fix round 1, L3).
+
+    Mirrors `test_streaming_parity_svar2.py`'s `_with_strategy` seam: force
+    `_prefetch_strategy="svar2_engine"` on a clone and confirm `tracks=`
+    still raises there, since only the default "sync" strategy is wired.
+    """
+    import copy
+
+    f = streaming_svar2_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar2_path,
+        tracks=[f.table, f.bigwigs],
+    )
+    sds = copy.copy(sds)
+    object.__setattr__(sds, "_prefetch_strategy", "svar2_engine")
+    with pytest.raises(NotImplementedError, match="svar2_engine"):
+        next(iter(sds.to_iter(batch_size=1)))
