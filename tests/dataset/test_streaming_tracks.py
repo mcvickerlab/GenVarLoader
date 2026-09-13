@@ -842,6 +842,64 @@ def test_mixed_tracks_svar2_raises(streaming_svar2_case):
         next(iter(sds.to_iter(batch_size=1)))
 
 
+def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
+    """Pin the data the `to_iter` capability guard actually reads (issue #375).
+
+    `test_mixed_tracks_non_svar1_raises`/`test_mixed_tracks_svar2_raises`
+    above already pin the guard's user-visible BEHAVIOR (VCF/PGEN/SVAR2 +
+    ``tracks=`` raises `NotImplementedError` at `to_iter` time) -- constructing
+    another `StreamingDataset` over one of those sources would only repeat
+    that, not add coverage. What those tests can't see is the guard's
+    SOURCE OF TRUTH: each backend's `supports_mixed_tracks` `ClassVar[bool]`,
+    and -- since the #375 fix round -- whether a backend that sets it `True`
+    actually shapes `mixed_realign_window` to match the `_MixedTracksBackend`
+    protocol `to_iter` narrows to before calling it. A backend could flip the
+    flag without a conforming method and every existing raise-test would stay
+    green; this test is the one place that would catch it.
+
+    Structural conformance is checked via signature comparison rather than
+    `isinstance`/`issubclass` against `_MixedTracksBackend`: that Protocol has
+    a non-method member (`supports_mixed_tracks`), and CPython's `typing`
+    module only supports `isinstance()` against such a Protocol on a live
+    INSTANCE, not `issubclass()` against the class -- constructing a real
+    `_Svar1Backend` instance just for this check would drag in fixture
+    plumbing this test is meant to avoid.
+    """
+    import inspect
+
+    from genvarloader._dataset._streaming import (
+        _MixedTracksBackend,
+        _PgenBackend,
+        _Svar1Backend,
+        _Svar2Backend,
+        _VcfBackend,
+    )
+
+    # SVAR1 is the only backend wired for mixed variants+tracks today.
+    assert _Svar1Backend.supports_mixed_tracks is True
+    assert _Svar2Backend.supports_mixed_tracks is False
+    assert _VcfBackend.supports_mixed_tracks is False
+    assert _PgenBackend.supports_mixed_tracks is False
+
+    # The one backend that claims support must define `mixed_realign_window`
+    # with exactly the checked protocol's parameter names, in order -- the
+    # same shape `to_iter`'s `isinstance(backend, _MixedTracksBackend)`
+    # narrows against before calling it.
+    expected_params = list(
+        inspect.signature(_MixedTracksBackend.mixed_realign_window).parameters
+    )
+    assert (
+        list(inspect.signature(_Svar1Backend.mixed_realign_window).parameters)
+        == expected_params
+    )
+    # None of the non-supporting backends need to satisfy it, but a stray
+    # `mixed_realign_window` on one of them would mask a mismatched flag --
+    # guard against that too.
+    for backend in (_Svar2Backend, _VcfBackend, _PgenBackend):
+        assert not backend.supports_mixed_tracks
+        assert not hasattr(backend, "mixed_realign_window")
+
+
 def test_insertion_fill_without_tracks_raises(streaming_tracks_fixture):
     """Spec §3.1: `with_insertion_fill` on a track-less dataset is an error.
 

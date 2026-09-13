@@ -12,6 +12,7 @@ from typing import (
     NamedTuple,
     Protocol,
     cast,
+    runtime_checkable,
 )
 
 import numpy as np
@@ -376,9 +377,9 @@ class _MixedRealign(Protocol):
     the fused `intervals_and_realign_track_fused` kernel over a CSR
     (`_RealignWindow`), while SVAR2 has no fused kernel and must split into
     `intervals_to_tracks` + `shift_and_realign_tracks_from_svar2_readbound`
-    (`_Svar2Realign`). Bundling state with its kernel is what keeps the drive
-    loop free of `isinstance` dispatch: the drive holds one optional and calls
-    one method on it.
+    (`_Svar2Realign` -- Track A, not yet landed). Bundling state with its
+    kernel is what keeps the drive loop free of `isinstance` dispatch: the
+    drive holds one optional and calls one method on it.
     """
 
     def realign_batch(
@@ -410,6 +411,44 @@ class _MixedRealign(Protocol):
 
         Returns:
             `RaggedTracks` of shape `(hi-lo, n_tracks, ploidy, None)`.
+        """
+        ...
+
+
+@runtime_checkable
+class _MixedTracksBackend(Protocol):
+    """A stream backend that can serve mixed variants + tracks.
+
+    The backend half of the `_MixedRealign` seam (issue #375): `_MixedRealign`
+    is the per-window STATE plus the kernel that consumes it; this is the
+    CAPABILITY a backend declares in order to produce that state in the first
+    place. Declaring it as a `@runtime_checkable` Protocol -- rather than only
+    the loose `supports_mixed_tracks` bool every backend already carries --
+    makes the pairing machine-checkable: `to_iter`'s `isinstance(backend,
+    _MixedTracksBackend)` narrows the backend union at the one call site that
+    matters, so a backend that flips `supports_mixed_tracks = True` without a
+    correctly-shaped `mixed_realign_window` (wrong return order, typo'd name,
+    wrong parameter types) is caught there -- statically by `pyrefly`, or at
+    worst by a clear `AssertionError` at the narrowing site -- instead of an
+    `AttributeError` hundreds of lines away in the batch loop.
+    """
+
+    supports_mixed_tracks: ClassVar[bool]
+
+    def mixed_realign_window(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        t_starts: NDArray[np.int32],
+        t_ends: NDArray[np.int32],
+        row_starts: NDArray[np.int32],
+        row_ends: NDArray[np.int32],
+    ) -> "tuple[_MixedRealign, NDArray[np.int32]]":
+        """Per-window realign state + deletion-extended track ends.
+
+        See `_Svar1Backend.mixed_realign_window` for the full contract every
+        conforming backend must satisfy (index spaces, row ordering, shapes,
+        and the exact 2-tuple return order).
         """
         ...
 
@@ -1405,8 +1444,9 @@ class StreamingDataset:
                 )
             # Deliberate seam, NOT covered by any required parity test (the
             # fixture is built with `max_jitter=None`): `_Svar1Backend.read_window`
-            # (used below, per-window, to size the deletion-extended track query)
-            # always queries the RAW unjittered `_regions` bounds, while the
+            # (used by `mixed_realign_window`, per-window, to size the
+            # deletion-extended track query) always queries the RAW unjittered
+            # `_regions` bounds, while the
             # haplotype engine and the track query itself use the jitter-translated
             # bounds (`_jitter_region_bounds`). Under jitter>0 this can miss a
             # boundary deletion and under-extend the track query. Fail fast rather
@@ -1650,6 +1690,21 @@ class StreamingDataset:
                         row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
 
                         if self._realign_tracks:
+                            # M2 (#375 review): narrow to the checked
+                            # `_MixedTracksBackend` protocol here, at the one
+                            # call site that matters, rather than trusting the
+                            # `supports_mixed_tracks` guard above alone. The
+                            # guard already makes this assert unreachable in
+                            # practice; its job is to turn a backend that sets
+                            # the flag without (or with a wrongly-shaped)
+                            # `mixed_realign_window` into a `pyrefly` error or
+                            # a clear `AssertionError` here, instead of an
+                            # `AttributeError` deep in the batch loop.
+                            assert isinstance(backend, _MixedTracksBackend), (
+                                f"{type(backend).__name__} sets "
+                                "supports_mixed_tracks without a conforming "
+                                "mixed_realign_window."
+                            )
                             realign_w, t_ends_ext = backend.mixed_realign_window(
                                 r_idx,
                                 s_idx_w,
@@ -2755,6 +2810,9 @@ class _Svar1Backend:
     per-region live genotype reads hit the store during iteration.
     """
 
+    #: Mixed variants+tracks is wired for this backend (issue #375).
+    supports_mixed_tracks: ClassVar[bool] = True
+
     def __init__(
         self,
         svar_path: str | Path,
@@ -3325,9 +3383,6 @@ class _Svar1Backend:
         )
         return np.asarray(o_starts, np.int64), np.asarray(o_stops, np.int64)
 
-    #: Mixed variants+tracks is wired for this backend (issue #279).
-    supports_mixed_tracks: ClassVar[bool] = True
-
     def mixed_realign_window(
         self,
         r_idx: NDArray[np.intp],
@@ -3341,7 +3396,12 @@ class _Svar1Backend:
 
         Moved verbatim out of the `to_iter` drive (issue #375): the drive used
         to reach into `_Svar1Backend`-only attributes directly, which is what
-        made the mixed path SVAR1-only.
+        made the mixed path SVAR1-only. This is the backend HALF of the
+        `_MixedRealign` seam: a conforming backend must produce a
+        correctly-shaped state object plus extended ends from exactly this
+        signature -- see `_MixedTracksBackend` for the checked contract. All
+        coordinate arrays below are 0-based, half-open reference coordinates
+        unless noted.
 
         `t_ends` is extended per REGION by that region's max deletion length
         across the window's samples, because `_regions` is the raw BED while
@@ -3359,6 +3419,66 @@ class _Svar1Backend:
         because ragged re-alignment never reads past reference index
         `region_len - 1` and `with_len(L)` is bounded by the minimum region
         length on both sides. An `extend_to_length` follow-up must revisit both.
+
+        Args:
+            r_idx: `(n_regions,)` indices into `self._regions` -- region SORT
+                order, the same space the drive iterates in. NOT the public,
+                user-facing region index; the drive separately maps to that
+                via `self._sort_order[r_idx]` when it needs it.
+            s_idx: `(n_samples,)` PUBLIC (sorted-name) sample indices, the
+                same space `gvl.Dataset`'s `s` means. A backend whose native
+                storage uses a different sample order (e.g. VCF column order)
+                MUST translate internally -- the way this implementation's
+                `read_window`/`_phys_sample_idx` do -- the caller never
+                performs that translation itself.
+            t_starts: `(n_regions,)` int32, one un-extended track query start
+                per region. Present for contract symmetry with `t_ends` and
+                for a future backend that may need it; this implementation
+                does not read it (the extension below is end-only).
+            t_ends: `(n_regions,)` int32, one un-extended track query end per
+                region -- the value this method extends.
+            row_starts: `(n_regions * n_samples,)` int32, one track-row start
+                per (region, sample) pair, REGION-MAJOR SAMPLE-MINOR: row
+                `i * n_samples + j` is `(region r_idx[i], sample s_idx[j])`.
+                This is `np.repeat(t_starts, n_samples)` and MUST stay in
+                that order -- it is the same layout `geno_offset_idx`/
+                `flat_r`/`flat_s` use elsewhere in the drive, and this
+                method's own `region_max_del` reshape (`len(r_idx),
+                len(s_idx)`) depends on it.
+            row_ends: `(n_regions * n_samples,)` int32, same
+                region-major/sample-minor layout as `row_starts`, one row end
+                per (region, sample) pair.
+
+        Returns:
+            A 2-tuple `(realign_window, t_ends_ext)`, in that exact order:
+
+            - `realign_window`: a `_MixedRealign` (here, a `_RealignWindow`)
+              bundling this window's re-align state. `diffs` and
+              `geno_offset_idx` are `(n_regions * n_samples, ploidy)`,
+              region-major/sample-minor like `row_starts` with ploidy as the
+              FAST axis (haplotype `h` of row `i` is `geno_offset_idx[i,
+              h]`, flat index `i * ploidy + h`). `geno_offsets` is `(2,
+              n_regions * n_samples * ploidy)` and WINDOW-LOCAL (indices
+              into this window's own CSR, not the dataset-global store).
+              `geno_v_idxs`/`v_starts`/`ilens` are the per-variant tables
+              the kernel indexes through `geno_offset_idx`; for this backend
+              they are the store's dataset-GLOBAL memmaps, but a record
+              backend (VCF/PGEN) would hand back a window-LOCAL decoded
+              table instead (see `_RealignWindow`'s docstring) -- either
+              way the caller only ever reaches them through
+              `geno_offset_idx`, never as absolute dataset-global variant
+              indices.
+            - `t_ends_ext`: `(n_regions,)` int32, `t_ends` extended by each
+              region's max deletion length over `s_idx` -- one value PER
+              REGION, not per row. Feed this (not `t_ends`) to the track
+              backend's `read_window` so the interval query covers every
+              sample's realigned tail.
+
+            This computation assumes jitter is OFF for `_realign_tracks=True`
+            streams (the caller's `jitter>0` guard just above raises before
+            this method would ever be called with jittered bounds): an
+            un-translated extension over jittered `t_starts`/`t_ends` would
+            under-size the query relative to what the haplotype engine used.
         """
         from ._genotypes import get_diffs_sparse
 
