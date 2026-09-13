@@ -143,3 +143,139 @@ def test_svar2_engine_tracks_raises(streaming_svar2_tracks_fixture):
     object.__setattr__(sds, "_prefetch_strategy", "svar2_engine")
     with pytest.raises(NotImplementedError, match="svar2_engine"):
         next(iter(sds.to_iter(batch_size=1)))
+
+
+def test_svar2_mixed_with_len_rejected(streaming_svar2_tracks_fixture):
+    """The written SVAR2 mixed path refuses fixed-length realigned tracks
+    (`_reconstruct.py:_call_svar2`: the readbound kernel always sizes each hap
+    to ref_len + diff, so an int output_length cannot be honored
+    byte-identically). Streaming must refuse identically rather than silently
+    mis-size."""
+    f = streaming_svar2_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar2_path,
+        tracks=[f.table, f.bigwigs],
+    ).with_seqs("haplotypes")
+    with pytest.raises(NotImplementedError, match="fixed-length|with_len"):
+        next(iter(sds.with_len(10).to_iter(batch_size=4)))
+
+
+def test_svar2_realign_false_matches_written(streaming_svar2_tracks_fixture):
+    """`realign_tracks=False` leaves tracks in reference coordinates -- the
+    un-realigned path is backend-independent (`_tracks_from_intervals`), so it
+    must work for SVAR2 too, and the track axis loses ploidy."""
+    f = streaming_svar2_tracks_fixture
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs("haplotypes")
+        .with_tracks(["alpha", "zeta"])
+    )
+    sds = (
+        gvl.StreamingDataset(
+            f.bed,
+            reference=f.reference_path,
+            variants=f.svar2_path,
+            tracks=[f.table, f.bigwigs],
+        )
+        .with_seqs("haplotypes")
+        .with_settings(realign_tracks=False)
+    )
+
+    n = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        haps, tracks = data
+        # (batch, n_tracks, ~length) -- no ploidy axis when un-realigned.
+        assert tracks.shape[1] == 2
+        for i in range(len(r_idx)):
+            _assert_haps_cell_equal(
+                haps[i], written[int(r_idx[i]), int(s_idx[i])][0], sds.ploidy
+            )
+            n += 1
+    assert n == written.shape[0] * written.shape[1]
+
+
+def test_svar2_realign_false_drops_ploidy_axis(streaming_svar2_tracks_fixture):
+    """Mirrors SVAR1's `test_realign_false_drops_ploidy_axis`: with
+    `realign_tracks=False`, the TRACK half must match the written oracle
+    byte-for-byte, not just in shape. `test_svar2_realign_false_matches_written`
+    above only checks the haplotype half and `tracks.shape[1]`; this pins the
+    actual track values too, narrowed to a single track (`alpha`) so the
+    written oracle can be indexed the same way SVAR1's analog does.
+    """
+    f = streaming_svar2_tracks_fixture
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar2_path,
+        tracks=f.bigwigs,
+    ).with_settings(realign_tracks=False)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs("haplotypes")
+        .with_tracks("alpha")
+        .with_settings(realign_tracks=False)
+    )
+    (haps, tracks), r_idx, s_idx = next(
+        iter(sds.to_iter(batch_size=1, return_indices=True))
+    )
+    r, s = int(r_idx[0]), int(s_idx[0])
+    exp_haps, exp_tracks = written[r, s]
+    ctx = f"cell (r={r}, s={s}): "
+    # No ploidy axis on the track side when un-realigned.
+    assert tracks[0].shape[:-1] == exp_tracks.shape[:-1]
+    _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=ctx)
+    _assert_tracks_cell_equal(tracks[0], exp_tracks, ctx=ctx)
+
+
+def test_svar2_mixed_single_track(streaming_svar2_tracks_fixture):
+    """One track, not two: exercises the n_tracks == 1 reorder path (the
+    track-major -> (b, t, p) permutation is a no-op there, so a bug in the
+    permutation shows up only by contrast with the two-track case)."""
+    f = streaming_svar2_tracks_fixture
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs("haplotypes")
+        .with_tracks("alpha")
+    )
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar2_path,
+        tracks=[f.bigwigs],
+    ).with_seqs("haplotypes")
+
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 1
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_tracks_cell_equal(tracks[i], exp_tracks, ctx=ctx)
+
+
+def test_svar2_mixed_batch_size_one(streaming_svar2_tracks_fixture):
+    """batch_size=1 is the ONE case where the written path's own track-major
+    layout bug (#371) is invisible, so it is also the case where a streaming
+    reorder bug hides. Pin it explicitly."""
+    f = streaming_svar2_tracks_fixture
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.svar2_path,
+        tracks=[f.table, f.bigwigs],
+    ).with_seqs("haplotypes")
+
+    for data, r_idx, s_idx in sds.to_iter(batch_size=1, return_indices=True):
+        haps, tracks = data
+        r, s = int(r_idx[0]), int(s_idx[0])
+        exp_haps, exp_tracks = written[r, s]
+        ctx = f"cell (r={r}, s={s}): "
+        _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=ctx)
+        _assert_tracks_cell_equal(tracks[0], exp_tracks, ctx=ctx)

@@ -1569,6 +1569,28 @@ class StreamingDataset:
                     "the SVAR1 (.svar) and SVAR2 (.svar2) backends support mixed "
                     "variants+tracks today (issue #375)."
                 )
+            # Issue #375 Track A: the SVAR2 read-bound track kernel always
+            # sizes each hap to `ref_len + diff` with no `output_length`
+            # override, so a fixed-length request cannot be honored
+            # byte-identically. The WRITTEN path refuses this too, in the same
+            # words (`_reconstruct.py:_call_svar2`) -- this is a mirrored
+            # semantic rejection, not a streaming gap. NOTE: unlike some of
+            # this backend's other guards, `realign_tracks=False` is NOT an
+            # escape hatch here -- the general SVAR2 `with_len` guard further
+            # below rejects a fixed `output_length` for this backend
+            # regardless of `realign_tracks`, so this message does not offer
+            # it (verified empirically: turning off re-alignment still hits
+            # that guard).
+            if (
+                self._track_backend is not None
+                and self._realign_tracks
+                and isinstance(self._output_length, int)
+                and isinstance(self._backend, _Svar2Backend)
+            ):
+                raise NotImplementedError(
+                    "Fixed-length (with_len) haplotype-realigned tracks are not "
+                    "supported for svar2 sources; use ragged output."
+                )
             # Task 8 (spec §3.3/§8): `with_seqs("variant-windows")` + tracks +
             # `realign_tracks=True` mirrors the WRITTEN path's own `ValueError`
             # verbatim (`_reconstruct.py:537-543`) -- windows are
