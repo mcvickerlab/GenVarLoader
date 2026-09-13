@@ -882,16 +882,44 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     assert _PgenBackend.supports_mixed_tracks is False
 
     # The one backend that claims support must define `mixed_realign_window`
-    # with exactly the checked protocol's parameter names, in order -- the
-    # same shape `to_iter`'s `isinstance(backend, _MixedTracksBackend)`
-    # narrows against before calling it.
-    expected_params = list(
-        inspect.signature(_MixedTracksBackend.mixed_realign_window).parameters
+    # with exactly the checked protocol's signature -- parameter names AND
+    # their annotations AND the return annotation, not just the names. The
+    # names alone would not catch the failure this test exists for: a Track
+    # that returns `(t_ends_ext, realign_window)` instead of
+    # `(realign_window, t_ends_ext)` keeps every parameter name identical.
+    #
+    # NOTE: `pyrefly`, not this test, is the PRIMARY gate on shape -- it
+    # reports `unsafe-overlap` at the `isinstance(backend,
+    # _MixedTracksBackend)` narrowing in `to_iter` for any union member whose
+    # `mixed_realign_window` disagrees with the protocol. This test is the
+    # runtime backstop for a checker that is not run, or is run permissively.
+    # `eval_str=True` RESOLVES the string annotations rather than comparing
+    # them textually. Both declarations are `from __future__`-style strings,
+    # and the two spell the same type differently -- the protocol quotes the
+    # whole return (`"tuple[_MixedRealign, NDArray[np.int32]]"`), the backend
+    # quotes only the forward reference (`tuple["_MixedRealign", ...]`). Those
+    # are the same type, and a textual comparison would fail on the quoting
+    # alone, which is exactly the kind of false alarm that gets a test deleted
+    # instead of heeded.
+    expected_sig = inspect.signature(
+        _MixedTracksBackend.mixed_realign_window, eval_str=True
     )
-    assert (
-        list(inspect.signature(_Svar1Backend.mixed_realign_window).parameters)
-        == expected_params
+    actual_sig = inspect.signature(_Svar1Backend.mixed_realign_window, eval_str=True)
+    assert list(actual_sig.parameters) == list(expected_sig.parameters)
+    assert actual_sig.return_annotation == expected_sig.return_annotation, (
+        "_Svar1Backend.mixed_realign_window's RETURN type has drifted from "
+        "the _MixedTracksBackend protocol (a swapped 2-tuple keeps every "
+        "parameter name identical, so only this assert would catch it):\n"
+        f"  protocol: {expected_sig.return_annotation}\n"
+        f"  backend:  {actual_sig.return_annotation}"
     )
+    for name, expected_param in expected_sig.parameters.items():
+        assert actual_sig.parameters[name].annotation == expected_param.annotation, (
+            f"_Svar1Backend.mixed_realign_window parameter {name!r} has "
+            f"drifted from the _MixedTracksBackend protocol:\n"
+            f"  protocol: {expected_param.annotation}\n"
+            f"  backend:  {actual_sig.parameters[name].annotation}"
+        )
     # None of the non-supporting backends need to satisfy it, but a stray
     # `mixed_realign_window` on one of them would mask a mismatched flag --
     # guard against that too.

@@ -443,7 +443,7 @@ class _MixedTracksBackend(Protocol):
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
-    ) -> "tuple[_MixedRealign, NDArray[np.int32]]":
+    ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """Per-window realign state + deletion-extended track ends.
 
         See `_Svar1Backend.mixed_realign_window` for the full contract every
@@ -1690,16 +1690,37 @@ class StreamingDataset:
                         row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
 
                         if self._realign_tracks:
-                            # M2 (#375 review): narrow to the checked
-                            # `_MixedTracksBackend` protocol here, at the one
-                            # call site that matters, rather than trusting the
-                            # `supports_mixed_tracks` guard above alone. The
-                            # guard already makes this assert unreachable in
-                            # practice; its job is to turn a backend that sets
-                            # the flag without (or with a wrongly-shaped)
-                            # `mixed_realign_window` into a `pyrefly` error or
-                            # a clear `AssertionError` here, instead of an
-                            # `AttributeError` deep in the batch loop.
+                            # M2 (#375 review): narrow to `_MixedTracksBackend`
+                            # here, at the one call site that matters, rather
+                            # than trusting the `supports_mixed_tracks` guard
+                            # above alone. The guard already makes this assert
+                            # unreachable in practice -- the point is what the
+                            # narrowing buys at CHECK time, and the two halves
+                            # catch different things:
+                            #
+                            # - Statically, `pyrefly` reports `unsafe-overlap`
+                            #   ON THIS LINE if ANY member of `backend`'s union
+                            #   defines `mixed_realign_window` with a shape that
+                            #   disagrees with the protocol -- swapped return
+                            #   tuple, wrong parameter types, either one.
+                            #   Verified empirically against this repo's
+                            #   pyrefly config, not assumed. This is the half
+                            #   that protects Tracks A and B: the moment SVAR2
+                            #   or VCF/PGEN grows a mis-shaped
+                            #   `mixed_realign_window`, the type check fails
+                            #   here instead of the drive failing at runtime.
+                            # - At runtime, `isinstance` against a
+                            #   `runtime_checkable` protocol checks attribute
+                            #   PRESENCE ONLY -- never signatures. So it catches
+                            #   exactly one thing the static half cannot: a
+                            #   backend that sets the flag with no
+                            #   `mixed_realign_window` at all (or a typo'd
+                            #   name), turning an `AttributeError` deep in the
+                            #   batch loop into a clear `AssertionError` naming
+                            #   the offending backend.
+                            #
+                            # Neither half alone is sufficient; do not drop
+                            # either one believing the other covers it.
                             assert isinstance(backend, _MixedTracksBackend), (
                                 f"{type(backend).__name__} sets "
                                 "supports_mixed_tracks without a conforming "
@@ -3391,7 +3412,7 @@ class _Svar1Backend:
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
-    ) -> tuple["_MixedRealign", NDArray[np.int32]]:
+    ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """One window's fused-kernel realign state + deletion-extended track ends.
 
         Moved verbatim out of the `to_iter` drive (issue #375): the drive used
@@ -3457,9 +3478,17 @@ class _Svar1Backend:
               `geno_offset_idx` are `(n_regions * n_samples, ploidy)`,
               region-major/sample-minor like `row_starts` with ploidy as the
               FAST axis (haplotype `h` of row `i` is `geno_offset_idx[i,
-              h]`, flat index `i * ploidy + h`). `geno_offsets` is `(2,
-              n_regions * n_samples * ploidy)` and WINDOW-LOCAL (indices
-              into this window's own CSR, not the dataset-global store).
+              h]`, flat index `i * ploidy + h`). `geno_offset_idx` is the
+              WINDOW-LOCAL half of the pair: a plain `arange` over this
+              window's own rows, so it addresses `geno_offsets`' columns and
+              nothing else. `geno_offsets` itself is `(2, n_regions *
+              n_samples * ploidy)` -- CSR `[start, stop)` pairs whose values
+              index `geno_v_idxs`, and for this backend they come straight
+              out of `read_window`, so they are ABSOLUTE offsets into the
+              store's `variant_idxs` mmap, NOT window-relative. A record
+              backend hands back offsets into its own decoded window table
+              instead; both are correct because the kernel only ever reaches
+              them via `geno_offset_idx`.
               `geno_v_idxs`/`v_starts`/`ilens` are the per-variant tables
               the kernel indexes through `geno_offset_idx`; for this backend
               they are the store's dataset-GLOBAL memmaps, but a record
