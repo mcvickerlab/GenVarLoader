@@ -1011,6 +1011,7 @@ impl RecordStreamEngine {
     #[allow(clippy::too_many_arguments)]
     fn debug_decode_window(
         &self,
+        py: Python<'_>,
         contig_idx: usize,
         region_starts: Vec<u32>,
         region_ends: Vec<u32>,
@@ -1030,8 +1031,12 @@ impl RecordStreamEngine {
             s_hi,
         };
         let backend = Arc::clone(self.core.backend());
-        let slot = backend
-            .debug_fill(&job)
+        // Release the GIL before decoding -- see `PgenWindowFiller::reader_lock`'s
+        // lock-before-GIL ordering rule. Without this, a call made while a producer is
+        // live would block on that lock while holding the GIL the producer needs to
+        // proceed: the same deadlock `window_realign_inputs` avoids via `py.detach`.
+        let slot = py
+            .detach(|| backend.debug_fill(&job))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok((
             slot.v_starts,

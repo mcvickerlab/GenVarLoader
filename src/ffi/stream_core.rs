@@ -211,10 +211,14 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// backend. Two callers:
     ///
     /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) — test/debug-only,
-    ///   parity testing, never called while a producer is running.
+    ///   parity testing.
     /// - `RecordStreamEngine::window_realign_inputs` (issue #375 Track B) — a genuine
     ///   production path for mixed VCF/PGEN variants+tracks streams, called per window
     ///   while the producer is live.
+    ///
+    /// Both release the GIL (`py.detach`) around their call in here, so both are safe to
+    /// call against a live producer — safety does not rest on a call-site convention like
+    /// "only call this before iteration starts".
     ///
     /// The synchronous-decode-on-the-caller's-thread pattern this enables is legitimate
     /// production use ONLY under two conditions, both the caller's responsibility: the
