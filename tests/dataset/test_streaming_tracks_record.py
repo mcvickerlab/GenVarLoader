@@ -13,6 +13,8 @@ import pytest
 import genvarloader as gvl
 from genvarloader.genvarloader import RecordStreamEngine
 
+from tests.dataset._mixed_assertions import _assert_cell_equal, _assert_haps_cell_equal
+
 BACKENDS = ("vcf", "pgen")
 
 
@@ -315,3 +317,178 @@ def test_record_window_csr_replicates_across_regions(
                     f"hap {si * P + p}'s CSR slice {expected} from the "
                     f"engine, got {actual} from the mixed path"
                 )
+
+
+# --- Issue #375 Track B, Task 8: VCF/PGEN mixed parity, edge cases, docs ---
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("batch_size", [1, 4])
+def test_record_mixed_parity_with_indels(
+    streaming_record_tracks_fixture, backend, batch_size
+):
+    """Both halves of every mixed cell against `Dataset[r, s]`.
+
+    `batch_size=1` is included because it is the ONE case where the written
+    path's own track-major layout bug (#371) is invisible, so it is also
+    where a streaming reorder bug would hide.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.variants_path,
+        tracks=[f.table, f.bigwigs],
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=batch_size, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"{backend} cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_record_mixed_parity_under_forced_windowing(
+    streaming_record_tracks_fixture, backend
+):
+    """Same parity as `test_record_mixed_parity_with_indels`, forced to
+    actually plan multiple windows over the fixture's 3x3 region/sample grid.
+
+    `max_mem="4k"` is tuned (task-8-brief.md), not guessed: at the default
+    `TRACK_BYTES_PER_CELL` sizing, `max_mem="1m"` still fits the WHOLE 3x3
+    grid in one window (`window_samples=3, window_regions=64`), which would
+    make this test a silent duplicate of `test_record_mixed_parity_with_indels`
+    exercising nothing about multi-window planning. The assertion just below
+    -- not just the `"4k"` constant -- is what actually gates that: it fails
+    loudly if `TRACK_BYTES_PER_CELL`'s placeholder estimate ever changes
+    enough to make `"4k"` stop forcing multiple windows.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
+        "haplotypes"
+    )
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.variants_path,
+        tracks=[f.table, f.bigwigs],
+        max_mem="4k",
+    ).with_seqs("haplotypes")
+
+    assert sds._window_samples < len(f.samples) or sds._window_regions < f.bed.height, (
+        "max_mem did not actually force a multi-window plan; this test is vacuous"
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=2, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"{backend} cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_record_mixed_fixed_length_parity(streaming_record_tracks_fixture, backend):
+    """`with_len(10)` mixed-path parity, both halves.
+
+    Unlike SVAR2 (which has no fused kernel for a fixed output length), the
+    record backends' fused kernel honors an explicit output length directly:
+    the drive takes `out_lengths` from the batch's own haplotype offsets,
+    which already bake in `L`. So this must MATCH the written oracle rather
+    than raise `NotImplementedError`.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    written = (
+        gvl.Dataset.open(f.dataset_path, reference=f.reference_path)
+        .with_seqs("haplotypes")
+        .with_len(10)
+    )
+    sds = (
+        gvl.StreamingDataset(
+            f.bed,
+            reference=f.reference_path,
+            variants=f.variants_path,
+            tracks=[f.table, f.bigwigs],
+        )
+        .with_seqs("haplotypes")
+        .with_len(10)
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"{backend} cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_record_realign_false_matches_written(streaming_record_tracks_fixture, backend):
+    """`realign_tracks=False` keeps tracks in reference coordinates.
+
+    Dispatches through the backend-independent `_tracks_from_intervals` path
+    instead of the fused realign kernel -- the track axis loses its ploidy
+    dimension and no CSR is read at all -- but the HAPLOTYPE half is
+    untouched by `realign_tracks` and must still match the written oracle.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    written = gvl.Dataset.open(f.dataset_path, reference=f.reference_path).with_seqs(
+        "haplotypes"
+    )
+    sds = (
+        gvl.StreamingDataset(
+            f.bed,
+            reference=f.reference_path,
+            variants=f.variants_path,
+            tracks=[f.table, f.bigwigs],
+        )
+        .with_seqs("haplotypes")
+        .with_settings(realign_tracks=False)
+    )
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, _exp_tracks = written[r, s]
+            ctx = f"{backend} cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }

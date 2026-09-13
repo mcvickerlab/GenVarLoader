@@ -471,10 +471,10 @@ for (haps, tracks), region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 ```
 ````
 
-**Mixed variants + tracks is SVAR1-only in v1.** Combining `tracks=` with a VCF/BCF, PGEN, or
-`.svar2` variant source raises `NotImplementedError` — none of those three backends exposes the
-genotype seam the re-alignment kernel needs. Tracks alone (no `variants=`) work on every backend
-combination, since there is nothing to re-align against.
+**Mixed variants + tracks supports SVAR1, VCF/BCF, and PGEN.** Combining `tracks=` with a
+`.svar2` variant source raises `NotImplementedError` — SVAR2 uses a different written-path track
+kernel and does not yet expose the genotype seam the re-alignment kernel needs. Tracks alone (no
+`variants=`) work on every backend combination, since there is nothing to re-align against.
 
 `with_seqs` combined with tracks only wires the default `"haplotypes"` kind; the written path
 supports more, and streaming's gaps raise rather than silently degrade:
