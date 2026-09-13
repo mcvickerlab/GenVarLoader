@@ -1059,9 +1059,17 @@ impl RecordStreamEngine {
     /// in the calling thread via `debug_fill`, the same path
     /// `debug_decode_window` uses. That means a mixed VCF/PGEN stream decodes
     /// each window TWICE: once here for the track sizing, once in the producer
-    /// for the haplotypes. Correct, thread-safe, and roughly 2x the decode cost
-    /// on the mixed path only -- folding it into the producer is a tracked
-    /// follow-up, not a v1 requirement.
+    /// for the haplotypes. This decode is serialized against the producer by
+    /// `PgenWindowFiller`'s `reader_lock` -- PGEN's `fill` mutates the single shared
+    /// pgenlib reader (`apply_sample_subset`) and releases the GIL before reading, so two
+    /// concurrent `fill`s would otherwise interleave and silently swap sample columns. The
+    /// GIL is released for the whole call (`py.detach`) so this thread can block on that
+    /// lock without deadlocking the producer, which needs the GIL while holding it, and so
+    /// the producer keeps making progress while this synchronous decode runs. VCF needs no
+    /// lock -- `VcfWindowFiller::fill` opens a fresh record source per call, so there is no
+    /// shared mutable reader to race. Net cost: roughly 2x decode on the mixed path, plus
+    /// possible blocking while the producer finishes the window it is already filling --
+    /// folding this into the producer is a tracked follow-up, not a v1 requirement.
     #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
     #[allow(clippy::too_many_arguments)]
     fn window_realign_inputs<'py>(
@@ -1091,8 +1099,12 @@ impl RecordStreamEngine {
             s_hi,
         };
         let backend = Arc::clone(self.core.backend());
-        let slot = backend
-            .debug_fill(&job)
+        // Release the GIL for the decode: `PgenWindowFiller::fill` takes its `reader_lock`
+        // before re-acquiring the GIL internally, and the producer thread does the same, so
+        // holding the GIL across this call would deadlock the two against each other. Also
+        // lets the producer keep making progress while this synchronous decode runs.
+        let slot = py
+            .detach(|| backend.debug_fill(&job))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok((
             Array1::from_vec(slot.v_starts).into_pyarray(py),

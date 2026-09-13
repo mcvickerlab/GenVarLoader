@@ -412,6 +412,17 @@ pub struct PgenWindowFiller {
     contig_max_ref_len: HashMap<String, u32>,
     overlap: OverlapMode,
     chunk_size: usize,
+    /// Serializes `fill` against itself. `apply_sample_subset` mutates the single shared
+    /// pgenlib `reader` and the GIL is released between that mutation and the read, so two
+    /// concurrent `fill`s would let one thread's `change_sample_subset` land between the
+    /// other's subset-set and read -- silently decoding the wrong sample columns. The
+    /// producer thread and a consumer-thread caller of
+    /// `RecordStreamEngine::window_realign_inputs` are exactly that pair.
+    ///
+    /// LOCK ORDERING: take this lock BEFORE acquiring the GIL, never after. Callers holding
+    /// the GIL must release it (`py.detach`) before entering `fill`, or the producer -- which
+    /// needs the GIL while holding this lock -- deadlocks against them.
+    reader_lock: std::sync::Mutex<()>,
 }
 
 impl PgenWindowFiller {
@@ -487,6 +498,7 @@ impl PgenWindowFiller {
             contig_max_ref_len,
             overlap: OverlapMode::Variant,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            reader_lock: std::sync::Mutex::new(()),
         })
     }
 
@@ -552,6 +564,15 @@ impl WindowFiller for PgenWindowFiller {
         contig: &ContigRef,
         slot: &mut DecodedWindow,
     ) -> anyhow::Result<()> {
+        // See `reader_lock`'s doc for why this is held across the whole fill, and for the
+        // lock-before-GIL ordering rule. Recover from poisoning rather than cascading a
+        // panic: the guarded state is reset by `apply_sample_subset` at the top of every
+        // fill, so a poisoned lock carries no stale invariant.
+        let _reader_guard = self
+            .reader_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let n_local_samples = job.s_hi - job.s_lo;
 
         // Set the pgenlib subset to this job's physical columns and get the un-sorter that

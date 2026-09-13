@@ -71,3 +71,96 @@ def test_window_realign_inputs_matches_decode_and_csr_is_well_formed(
     assert v_starts.size > 0
     assert geno_v_idxs.size > 0
     assert np.any(ilens != 0), "fixture must contain indels for this seam to matter"
+
+    # M1 (#375 Track B fix round 1): a SINGLE-region window can't distinguish a
+    # correct per-hap CSR from a wrong per-(region, sample) CSR -- both produce
+    # the exact same `(n_samples * ploidy + 1,)` shape when there is only one
+    # region. Query the SAME sample sub-range but split across TWO disjoint
+    # regions of the same contig instead: under a (wrong) per-(region, sample)
+    # CSR the offsets array would have shape `2 * n_samples * ploidy + 1`
+    # (one CSR segment per region), so this is the one case that actually
+    # discriminates the two implementations.
+    split = contig_len // 2
+    v_starts_2r, ilens_2r, geno_v_idxs_2r, geno_offsets_2r = eng.window_realign_inputs(
+        0, [0, split], [split, contig_len], 0, f.n_samples
+    )
+    assert geno_offsets_2r.shape == (f.n_samples * f.ploidy + 1,), (
+        "geno_offsets must stay per-hap over the sample sub-range regardless of "
+        "region count -- a per-(region, sample) CSR would produce "
+        f"{2 * f.n_samples * f.ploidy + 1} here instead"
+    )
+    assert geno_offsets_2r[0] == 0
+    assert geno_offsets_2r[-1] == geno_v_idxs_2r.size
+    assert np.all(np.diff(geno_offsets_2r) >= 0)
+    if geno_v_idxs_2r.size:
+        assert geno_v_idxs_2r.min() >= 0
+        assert geno_v_idxs_2r.max() < v_starts_2r.size
+    # The two-region window still covers the whole contig, so its variant table
+    # must match the single-region call's table exactly.
+    np.testing.assert_array_equal(v_starts_2r, v_starts)
+    np.testing.assert_array_equal(ilens_2r, ilens)
+
+
+def test_window_realign_inputs_matches_before_and_during_producer(
+    pgen_snp_ins_del_multi,
+):
+    """M2 (#375 Track B fix round 1): pins the H1 fix -- `window_realign_inputs`
+    must return the SAME result whether called before the producer thread has
+    started or while it is concurrently decoding other jobs. `PgenWindowFiller`
+    mutates a single shared pgenlib reader (`apply_sample_subset`) and releases
+    the GIL before reading, so an unserialized concurrent decode from this
+    method (the consumer thread) racing the producer's own decode could
+    silently swap in the wrong sample columns, or -- if the GIL were held
+    across the call -- deadlock against the producer entirely (`reader_lock`
+    needs the GIL too). Several identical jobs are registered so the producer
+    keeps actively decoding (prefetching into its free-slot pool) right after
+    the first `next_batch()` call returns, maximizing the chance this test
+    actually overlaps the two decodes rather than merely running twice
+    sequentially.
+    """
+    f = pgen_snp_ins_del_multi
+    contig_len = int(f.regions["chromEnd"][0])
+    ref_seq = "".join(f.fasta.read_text().splitlines()[1:])
+
+    n_jobs = 6
+    eng = RecordStreamEngine(
+        "pgen",
+        str(f.pgen),
+        f.sample_names,
+        f.ploidy,
+        [f.contig],
+        [ref_seq.encode()],
+        [0] * n_jobs,  # job_contig_idx
+        [[0]] * n_jobs,  # job_region_starts
+        [[contig_len]] * n_jobs,  # job_region_ends
+        [0] * n_jobs,  # job_s_lo
+        [f.n_samples] * n_jobs,  # job_s_hi
+        None,  # fasta_path=None -- matches gvl.write's PGEN parity (no read-time left-align)
+        ord("N"),
+        False,
+        1,  # batch_size=1 -- many small batches, so the producer stays busy decoding
+        -1,  # output_length: ragged
+    )
+
+    args = (0, [0], [contig_len], 0, f.n_samples)
+
+    # 1. Baseline: call before the producer thread exists at all.
+    before = eng.window_realign_inputs(*args)
+
+    # 2. Start consuming -- this spawns the producer thread (`ensure_started`),
+    # which immediately begins prefetching windows for the queued jobs ahead of
+    # what we've consumed.
+    batch = eng.next_batch()
+    assert batch is not None, "fixture must yield at least one batch"
+
+    # 3. Call again while the producer is (most likely) still actively decoding
+    # one of the remaining queued jobs on its own thread.
+    during = eng.window_realign_inputs(*args)
+
+    # 4. Must be identical -- deterministic and race-free.
+    for name, b, d in zip(
+        ("v_starts", "ilens", "geno_v_idxs", "geno_offsets"), before, during
+    ):
+        np.testing.assert_array_equal(
+            b, d, err_msg=f"{name} mismatch pre/during producer"
+        )

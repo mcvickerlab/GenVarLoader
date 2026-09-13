@@ -204,11 +204,26 @@ impl<B: EngineBackend> StreamEngineCore<B> {
         }
     }
 
-    /// Test/debug-only escape hatch: expose the shared backend handle directly, bypassing
-    /// the producer/consumer channel machinery entirely. Used by
-    /// `RecordStreamEngine::debug_decode_window` (issue #276 task 7) to run a single
-    /// `WindowFiller::fill` against a scratch slot for parity testing — production code
-    /// only ever drives the backend through `next_batch_core`.
+    /// Escape hatch: expose the shared backend handle directly, bypassing the
+    /// producer/consumer channel machinery entirely, so a caller can run a single
+    /// `WindowFiller::fill` against a scratch slot on its own thread while the producer
+    /// thread (if started) is concurrently doing the same against the same `Arc`-shared
+    /// backend. Two callers:
+    ///
+    /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) — test/debug-only,
+    ///   parity testing, never called while a producer is running.
+    /// - `RecordStreamEngine::window_realign_inputs` (issue #375 Track B) — a genuine
+    ///   production path for mixed VCF/PGEN variants+tracks streams, called per window
+    ///   while the producer is live.
+    ///
+    /// The synchronous-decode-on-the-caller's-thread pattern this enables is legitimate
+    /// production use ONLY under two conditions, both the caller's responsibility: the
+    /// caller must release the GIL before calling in (`py.detach`), since the producer
+    /// needs the GIL and a caller holding it while blocked on a filler-internal lock would
+    /// deadlock the two; and any filler with shared mutable state (e.g.
+    /// `PgenWindowFiller`, whose `fill` mutates a single shared pgenlib reader) must
+    /// serialize its own `fill` internally (see `PgenWindowFiller::reader_lock`) rather
+    /// than relying on this accessor for exclusion — it provides none.
     pub(crate) fn backend(&self) -> &Arc<B> {
         &self.backend
     }
