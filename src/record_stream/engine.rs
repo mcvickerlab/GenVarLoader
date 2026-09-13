@@ -1064,17 +1064,23 @@ impl RecordStreamEngine {
     /// in the calling thread via `debug_fill`, the same path
     /// `debug_decode_window` uses. That means a mixed VCF/PGEN stream decodes
     /// each window TWICE: once here for the track sizing, once in the producer
-    /// for the haplotypes. This decode is serialized against the producer by
-    /// `PgenWindowFiller`'s `reader_lock` -- PGEN's `fill` mutates the single shared
-    /// pgenlib reader (`apply_sample_subset`) and releases the GIL before reading, so two
-    /// concurrent `fill`s would otherwise interleave and silently swap sample columns. The
-    /// GIL is released for the whole call (`py.detach`) so this thread can block on that
-    /// lock without deadlocking the producer, which needs the GIL while holding it, and so
-    /// the producer keeps making progress while this synchronous decode runs. VCF needs no
-    /// lock -- `VcfWindowFiller::fill` opens a fresh record source per call, so there is no
-    /// shared mutable reader to race. Net cost: roughly 2x decode on the mixed path, plus
-    /// possible blocking while the producer finishes the window it is already filling --
-    /// folding this into the producer is a tracked follow-up, not a v1 requirement.
+    /// for the haplotypes.
+    ///
+    /// As shipped, Python's `_mixed_engine()` gives this call its OWN engine
+    /// (a separate `PgenWindowFiller`/`reader_lock` or `VcfWindowFiller` from
+    /// the drive's), so in production this decode never actually contends
+    /// with the producer -- the two run against independent fillers with no
+    /// shared mutable state. `PgenWindowFiller`'s `reader_lock` (see its doc
+    /// comment) would still serialize this call against a producer sharing
+    /// the SAME filler, which is why it stays: `debug_fill` is a genuine
+    /// production entry point (not test-only), and the lock is what makes the
+    /// obvious future consolidation onto one engine safe. Today only
+    /// `test_window_realign_inputs_matches_before_and_during_producer`
+    /// exercises that pairing (final review, M1). VCF needs no lock either
+    /// way -- `VcfWindowFiller::fill` opens a fresh record source per call, so
+    /// there is no shared mutable reader to race. Net cost: roughly 2x decode
+    /// on the mixed path (one per engine); folding this into a single shared
+    /// engine is a tracked follow-up, not a v1 requirement.
     #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
     #[allow(clippy::too_many_arguments)]
     fn window_realign_inputs<'py>(

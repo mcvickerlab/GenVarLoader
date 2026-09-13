@@ -213,8 +213,18 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) — test/debug-only,
     ///   parity testing.
     /// - `RecordStreamEngine::window_realign_inputs` (issue #375 Track B) — a genuine
-    ///   production path for mixed VCF/PGEN variants+tracks streams, called per window
-    ///   while the producer is live.
+    ///   production path for mixed VCF/PGEN variants+tracks streams, called per window.
+    ///   As shipped, Python's `_mixed_engine()` calls it against a separate,
+    ///   plan-less engine (`jobs=[]`) built just for this, so in production
+    ///   there is no producer thread on that engine's `Arc`-shared backend to
+    ///   contend with -- the concurrent-with-a-live-producer case this doc
+    ///   describes is currently exercised only by
+    ///   `test_window_realign_inputs_matches_before_and_during_producer`,
+    ///   which deliberately drives one engine both ways. It stays a genuine
+    ///   safety property of this accessor regardless, since folding the mixed
+    ///   path onto the drive engine (removing the double decode) is the
+    ///   obvious next step and would make this the live case (final review,
+    ///   M1).
     ///
     /// Both release the GIL (`py.detach`) around their call in here, so both are safe to
     /// call against a live producer — safety does not rest on a call-site convention like

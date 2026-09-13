@@ -8,6 +8,8 @@ batch. Task 6 consumes it; this file pins its contract.
 from __future__ import annotations
 
 import numpy as np
+import polars as pl
+import pyBigWig
 import pytest
 
 import genvarloader as gvl
@@ -487,6 +489,128 @@ def test_record_realign_false_matches_written(streaming_record_tracks_fixture, b
             exp_haps, _exp_tracks = written[r, s]
             ctx = f"{backend} cell (r={r}, s={s}): "
             _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            seen.add((r, s))
+
+    assert seen == {
+        (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
+    }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("max_mem", [None, "4k"])
+def test_record_mixed_multi_contig_parity(
+    vcf_multi_contig, pgen_multi_contig, tmp_path_factory, backend, max_mem
+):
+    """Regression coverage for the record path's contig resolution (final review, M3).
+
+    Every other mixed fixture in this file is a single 250bp `chr1`, so
+    `contig_idx = int(backend._regions[r_idx[0], 0])`
+    (`_streaming.py::_record_mixed_realign_window`) is always 0 there -- the
+    new `backend._regions` table, its agreement with
+    `StreamingDataset._regions`, and the multi-contig `ValueError` guard were
+    otherwise entirely untested (contig resolution is the one input to
+    `mixed_realign_window` genuinely new to Track B). This drives 2 contigs x
+    2 regions x 3 samples through both halves of the mixed cell, at the
+    default window plan and forced to multiple windows (`max_mem="4k"`).
+    """
+    f = vcf_multi_contig if backend == "vcf" else pgen_multi_contig
+    variants_path = str(f.vcf) if backend == "vcf" else str(f.pgen)
+    bed = f.regions
+    assert bed["chrom"].n_unique() == 2, "fixture regressed to single-contig coverage"
+
+    tmp_dir = tmp_path_factory.mktemp(f"streaming_{backend}_mc_tracks")
+
+    # Write once WITHOUT tracks purely to learn the dataset's public sample
+    # order -- same two-step pattern `streaming_record_tracks_fixture` uses,
+    # for the same reason (the track files must be keyed by those names).
+    probe = tmp_dir / "probe.gvl"
+    gvl.write(probe, bed, variants=variants_path, overwrite=True)
+    samples = list(gvl.Dataset.open(probe).samples)
+
+    fai = pl.read_csv(
+        str(f.fasta) + ".fai",
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "length", "offset", "linebases", "linewidth"],
+    )
+    contig_sizes = [
+        (r["chrom"], int(r["length"]))
+        for r in fai.iter_rows(named=True)
+        if r["chrom"] in set(bed["chrom"].to_list())
+    ]
+    assert len(contig_sizes) == 2, "fixture regressed to single-contig coverage"
+
+    BIN = 10
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(samples):
+        p = tmp_dir / f"{sample}.alpha.bw"
+        with pyBigWig.open(str(p), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            chroms, starts, ends, values = [], [], [], []
+            for contig, size in contig_sizes:
+                for b, lo in enumerate(range(0, size, BIN)):
+                    hi = min(lo + BIN, size)
+                    chroms.append(contig)
+                    starts.append(lo)
+                    ends.append(hi)
+                    # Distinct per (sample, contig, bin), and the
+                    # contig-dependent term now actually fires with 2
+                    # contigs -- unlike `streaming_record_tracks_fixture`'s
+                    # single-contig bed, where it was dead code.
+                    values.append(
+                        float(10 * (i + 1) + b)
+                        + (0.5 if contig != contig_sizes[0][0] else 0.0)
+                    )
+            bw.addEntries(chroms, starts, ends=ends, values=values)
+        bw_paths[sample] = str(p)
+    alpha = gvl.BigWigs("alpha", bw_paths)
+
+    rows = []
+    for i, sample in enumerate(samples):
+        for c_idx, (contig, size) in enumerate(contig_sizes):
+            for b, lo in enumerate(range(0, size, BIN)):
+                rows.append(
+                    {
+                        "sample_id": sample,
+                        "chrom": contig,
+                        "start": lo,
+                        "end": min(lo + BIN, size),
+                        "value": float(1000 * c_idx + 100 * (i + 1) + b),
+                    }
+                )
+    zeta = gvl.Table("zeta", pl.DataFrame(rows))
+
+    out = tmp_dir / f"{backend}_mc_tracks.gvl"
+    gvl.write(
+        path=out,
+        bed=bed,
+        variants=variants_path,
+        tracks=[zeta, alpha],
+        extend_to_length=False,
+        max_jitter=None,
+        overwrite=True,
+    )
+
+    written = gvl.Dataset.open(out, reference=f.fasta).with_seqs("haplotypes")
+    extra_kwargs = {} if max_mem is None else {"max_mem": max_mem}
+    sds = gvl.StreamingDataset(
+        bed,
+        reference=f.fasta,
+        variants=variants_path,
+        tracks=[zeta, alpha],
+        **extra_kwargs,
+    ).with_seqs("haplotypes")
+
+    seen = set()
+    for data, r_idx, s_idx in sds.to_iter(batch_size=2, return_indices=True):
+        haps, tracks = data
+        assert tracks.shape[1] == 2, f"track axis {tracks.shape} lost a track"
+        for i in range(len(r_idx)):
+            r, s = int(r_idx[i]), int(s_idx[i])
+            exp_haps, exp_tracks = written[r, s]
+            ctx = f"{backend} multi-contig cell (r={r}, s={s}): "
+            _assert_haps_cell_equal(haps[i], exp_haps, sds.ploidy, ctx=ctx)
+            _assert_cell_equal(tracks[i], exp_tracks, ctx=ctx)
             seen.add((r, s))
 
     assert seen == {

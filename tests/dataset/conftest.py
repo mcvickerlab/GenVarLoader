@@ -1563,13 +1563,15 @@ def streaming_record_tracks_fixture(request, tmp_path_factory):
                         chroms.append(contig)
                         starts.append(lo)
                         ends.append(hi)
-                        # Distinct per (sample, contig, bin) so a wrong sample,
-                        # a wrong contig, or an off-by-one bin shows up in the
-                        # values rather than passing silently.
-                        values.append(
-                            float(10 * (i + 1) + b)
-                            + (0.5 if contig != contig_sizes[0][0] else 0.0)
-                        )
+                        # Distinct per (sample, contig, bin) so a wrong sample
+                        # or an off-by-one bin shows up in the values rather
+                        # than passing silently. No contig-dependent term here
+                        # (unlike `test_record_mixed_multi_contig_parity`'s
+                        # own bigwig-building code): this fixture's bed is
+                        # always single-contig (final review, M3), so such a
+                        # term would be permanently dead rather than merely
+                        # untested.
+                        values.append(float(10 * (i + 1) + b))
                 bw.addEntries(chroms, starts, ends=ends, values=values)
             bw_paths[sample] = str(p)
         alpha = gvl.BigWigs("alpha", bw_paths)

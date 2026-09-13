@@ -545,7 +545,11 @@ def _record_mixed_realign_window(
 
     The deletion-extension formula for `t_ends_ext` is `_Svar1Backend`'s,
     verbatim -- see that method's docstring for why it exists and why it
-    deliberately does not match the written WRITER's `chromEnd`.
+    deliberately does not match the written WRITER's `chromEnd`. On every path
+    this branch's tests reach, `t_ends_ext` is a no-op (the default ragged
+    output and every `with_len(L)` case exercised here stay within the
+    unextended `t_ends`); it becomes load-bearing only under the `with_len`
+    parity gap `_Svar1Backend.mixed_realign_window` documents.
     """
     from ._genotypes import get_diffs_sparse
 
@@ -560,6 +564,24 @@ def _record_mixed_realign_window(
         raise ValueError(
             "_record_mixed_realign_window: window spans multiple contigs; "
             "every engine call must be single-contig."
+        )
+
+    # `_MixedTracksBackend.mixed_realign_window`'s contract accepts an
+    # arbitrary `(n_samples,)` array of public sample indices, but this
+    # implementation narrows it to the contiguous range
+    # `[s_idx[0], s_idx[-1] + 1)` below and then indexes the returned CSR
+    # POSITIONALLY via `hap_of_row` -- a non-contiguous `s_idx` would silently
+    # read the wrong samples' data, and a descending one would underflow the
+    # `usize` range `window_realign_inputs` does not itself validate. `_plan()`
+    # only ever emits `np.arange(s_lo, s_hi)`, so this is unreachable today;
+    # assert it rather than assume it (final review, M4).
+    if n_s > 0 and not np.array_equal(
+        s_idx, np.arange(s_idx[0], s_idx[-1] + 1, dtype=s_idx.dtype)
+    ):
+        raise ValueError(
+            "_record_mixed_realign_window: s_idx must be a contiguous "
+            f"ascending range, per the _MixedTracksBackend.mixed_realign_window "
+            f"contract narrowed by this record-backend implementation; got {s_idx!r}."
         )
 
     engine = backend._mixed_engine()
@@ -3541,11 +3563,13 @@ class _Svar1Backend:
 
         It deliberately does NOT match the written WRITER's `chromEnd`
         extension (`_write.py:1084`), which stores less than its own reader
-        asks for. That asymmetry can only leave the written path with zeros in
-        a tail streaming fills with real values, and is unobservable today
-        because ragged re-alignment never reads past reference index
-        `region_len - 1` and `with_len(L)` is bounded by the minimum region
-        length on both sides. An `extend_to_length` follow-up must revisit both.
+        asks for. On the default ragged output that asymmetry is inert
+        (re-alignment never reads past reference index `region_len - 1`), but
+        it IS observable when `with_len(L)` exceeds a deletion-shrunk
+        haplotype's natural length: streaming then fills the track's tail with
+        real signal read past the region end, while a written `Dataset`
+        zero-pads it. See `docs/source/dataset.md`'s "Known parity gap"
+        warning for the user-facing writeup; tracked as a follow-up.
 
         Args:
             r_idx: `(n_regions,)` indices into `self._regions` -- region SORT
@@ -4137,8 +4161,12 @@ class _VcfBackend:
         touches the engine's own plan, so a plan-less engine is enough -- and
         keeping it separate from the drive's engine means the mixed track read
         cannot perturb the producer/consumer lockstep. Built lazily and cached
-        on the backend: constructing it costs the same as opening the source,
-        paid once per `StreamingDataset`, not once per window.
+        on the backend, paid once per `StreamingDataset`, not once per window.
+        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
+        #307 placeholder optimization makes this call allocate no reference
+        bytes at all -- without it, this would otherwise pull the whole
+        reference (and, for PGEN, a full second `.pvar` scan) into a second
+        Rust engine (issue #375 Track B final review, H1).
         """
         if self._mixed_engine_obj is None:
             self._mixed_engine_obj = self.build_engine([], 1, 1)
@@ -4225,8 +4253,21 @@ class _VcfBackend:
         ]
 
         contig_names = list(self._contigs)
+        # Materialize reference bytes ONLY for contigs some job touches (#307),
+        # mirroring `_Svar1Backend.build_engine`: the engine indexes
+        # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
+        # Materializing every contig would pull the whole reference into
+        # Python (and again into the Rust engine) on every `build_engine` call
+        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # `touched_contigs` is empty and this now allocates nothing at all.
+        # Untouched contigs get an empty placeholder to keep the per-contig
+        # arrays index-aligned (the engine requires equal per-contig lengths).
+        touched_contigs = {int(j[0]) for j in jobs}
         contig_ref_bytes = [
-            self._ref._contig_slice(i)[0] for i in range(len(contig_names))
+            self._ref._contig_slice(i)[0]
+            if i in touched_contigs
+            else np.empty(0, np.uint8)
+            for i in range(len(contig_names))
         ]
 
         job_contig_idx = [int(j[0]) for j in jobs]
@@ -4375,8 +4416,12 @@ class _PgenBackend:
         touches the engine's own plan, so a plan-less engine is enough -- and
         keeping it separate from the drive's engine means the mixed track read
         cannot perturb the producer/consumer lockstep. Built lazily and cached
-        on the backend: constructing it costs the same as opening the source,
-        paid once per `StreamingDataset`, not once per window.
+        on the backend, paid once per `StreamingDataset`, not once per window.
+        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
+        #307 placeholder optimization makes this call allocate no reference
+        bytes at all -- without it, this would otherwise pull the whole
+        reference (and, for PGEN, a full second `.pvar` scan) into a second
+        Rust engine (issue #375 Track B final review, H1).
         """
         if self._mixed_engine_obj is None:
             self._mixed_engine_obj = self.build_engine([], 1, 1)
@@ -4449,8 +4494,21 @@ class _PgenBackend:
         want_ref = "ref" in _active_fields
 
         contig_names = list(self._contigs)
+        # Materialize reference bytes ONLY for contigs some job touches (#307),
+        # mirroring `_Svar1Backend.build_engine`: the engine indexes
+        # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
+        # Materializing every contig would pull the whole reference into
+        # Python (and again into the Rust engine) on every `build_engine` call
+        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # `touched_contigs` is empty and this now allocates nothing at all.
+        # Untouched contigs get an empty placeholder to keep the per-contig
+        # arrays index-aligned (the engine requires equal per-contig lengths).
+        touched_contigs = {int(j[0]) for j in jobs}
         contig_ref_bytes = [
-            self._ref._contig_slice(i)[0] for i in range(len(contig_names))
+            self._ref._contig_slice(i)[0]
+            if i in touched_contigs
+            else np.empty(0, np.uint8)
+            for i in range(len(contig_names))
         ]
 
         job_contig_idx = [int(j[0]) for j in jobs]
