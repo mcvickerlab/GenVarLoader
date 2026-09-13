@@ -789,10 +789,10 @@ def test_mixed_tracks_non_svar1_raises(streaming_case, src):
 
     Combining ``tracks=`` with a VCF or PGEN variant source must raise
     ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks
-    or produce wrong output. Parametrized across both non-SVAR1 backends
-    ``streaming_case`` supports (SVAR2 has its own fixture shape -- see
-    ``test_mixed_tracks_svar2_raises`` -- and SVAR1 is the one backend this
-    guard must NOT fire for, exercised by the parity tests above).
+    or produce wrong output. Parametrized across both variant sources this
+    guard still covers (SVAR1 and SVAR2 both declare the mixed
+    variants+tracks capability today -- issue #375 -- so neither fires this
+    guard; they are exercised by the parity tests instead).
 
     Sample ids come from the written oracle's own ``samples`` (not a
     hand-typed guess) so the ``Table`` construction here can't drift out of
@@ -819,60 +819,15 @@ def test_mixed_tracks_non_svar1_raises(streaming_case, src):
         next(iter(sds.to_iter(batch_size=1)))
 
 
-def test_mixed_tracks_svar2_raises(streaming_svar2_case):
-    """Different guard than the vcf/pgen case above: the Track A bridge guard.
-
-    `_Svar2Backend` now declares `supports_mixed_tracks = True` (issue #375
-    Track A), so the general capability guard exercised above does NOT fire
-    for SVAR2. This exercises the separate, narrowly-scoped bridge guard in
-    `StreamingDataset._iter_batches` (see its comment: "Issue #375 Track A")
-    that preserves this exact user-facing behavior until a later task wires
-    `mixed_realign_window` into the read drive. Delete this test together
-    with that guard once that wiring lands.
-
-    ``streaming_svar2_case`` returns ``(bed, reference, variants)`` -- three
-    values, not ``streaming_case``'s four -- because it has no plain
-    ``gvl.Dataset.open(...)`` oracle wired up (see its docstring in
-    ``conftest.py``), so sample ids are hand-typed from the shared
-    ``_SVAR1_MC_VCF`` fixture text (``S0``/``S1``/``S2``) that
-    ``svar2_multicontig_fixture`` converts, rather than read off a `written`
-    dataset.
-    """
-    bed, reference, variants = streaming_svar2_case
-    # `svar2_multicontig_fixture`'s bed spans BOTH chr1 and chr2 (unlike the
-    # vcf/pgen fixtures above, which are single-contig) -- `_TrackBackend`
-    # validates contig coverage against every contig the bed references, so
-    # the table must cover chr2 too or construction fails before the guard
-    # under test ever runs.
-    samples = ["S0", "S1", "S2"]
-    table = gvl.Table(
-        "t",
-        pl.DataFrame(
-            {
-                "sample_id": samples * 2,
-                "chrom": ["chr1"] * len(samples) + ["chr2"] * len(samples),
-                "start": [0] * len(samples) * 2,
-                "end": [10] * len(samples) * 2,
-                "value": [float(i) for i in range(len(samples) * 2)],
-            }
-        ),
-    )
-    sds = gvl.StreamingDataset(
-        bed, reference=reference, variants=variants, tracks=table
-    )
-    with pytest.raises(NotImplementedError, match="not wired into the read drive yet"):
-        next(iter(sds.to_iter(batch_size=1)))
-
-
 def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """Pin the data the `to_iter` capability guard actually reads (issue #375).
 
-    `test_mixed_tracks_non_svar1_raises`/`test_mixed_tracks_svar2_raises`
-    above already pin the guard's user-visible BEHAVIOR (VCF/PGEN/SVAR2 +
-    ``tracks=`` raises `NotImplementedError` at `to_iter` time) -- constructing
-    another `StreamingDataset` over one of those sources would only repeat
-    that, not add coverage. What those tests can't see is the guard's
-    SOURCE OF TRUTH: each backend's `supports_mixed_tracks` `ClassVar[bool]`,
+    `test_mixed_tracks_non_svar1_raises` above already pins the guard's
+    user-visible BEHAVIOR (VCF/PGEN + ``tracks=`` raises `NotImplementedError`
+    at `to_iter` time) -- constructing another `StreamingDataset` over one of
+    those sources would only repeat that, not add coverage. What that test
+    can't see is the guard's SOURCE OF TRUTH: each backend's
+    `supports_mixed_tracks` `ClassVar[bool]`,
     and -- since the #375 fix round -- whether a backend that sets it `True`
     actually shapes `mixed_realign_window` to match the `_MixedTracksBackend`
     protocol `to_iter` narrows to before calling it. A backend could flip the

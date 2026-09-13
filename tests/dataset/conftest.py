@@ -1477,3 +1477,119 @@ def streaming_tracks_fixture(
         samples=samples,
         contigs_list=list(base.contigs),
     )
+
+
+@dataclass(slots=True)
+class StreamingSvar2TracksFixture:
+    """SVAR2 variants + two interval tracks (issue #375, Track A).
+
+    Deliberately mirrors `StreamingTracksFixture` field-for-field so the SVAR1
+    and SVAR2 mixed suites can be read side by side, and hostile in the same
+    two ways: tracks are passed NON-alphabetically (`zeta` before `alpha`, so
+    a test assuming argument order fails loudly -- the written path sorts,
+    `_tracks.py:283`) and the bed includes a region overlapping a deletion so
+    the indel re-alignment path is exercised.
+    """
+
+    #: A `pl.DataFrame` of BED3+ regions (NOT a path).
+    bed: pl.DataFrame
+    reference_path: Path
+    svar2_path: Path
+    dataset_path: Path
+    bigwigs: gvl.BigWigs
+    table: gvl.Table
+    samples: list[str]
+    contigs_list: list[str]
+
+
+@pytest.fixture(scope="module")
+def streaming_svar2_tracks_fixture(
+    tmp_path_factory, svar2_multicontig_fixture
+) -> StreamingSvar2TracksFixture:
+    """SVAR2 variants + two interval tracks, written with parity-safe flags.
+
+    Scope is ``module``, not ``session``: it depends on the module-scoped
+    ``svar2_multicontig_fixture`` and pytest forbids the wider scope.
+    """
+    base = svar2_multicontig_fixture
+    tmp_dir = tmp_path_factory.mktemp("streaming_svar2_tracks")
+
+    bed = base.bed
+    samples = list(gvl.Dataset.open(base.dataset_path).samples)
+
+    fai = pl.read_csv(
+        str(base.reference_path) + ".fai",
+        separator="\t",
+        has_header=False,
+        new_columns=["chrom", "length", "offset", "linebases", "linewidth"],
+    )
+    contig_sizes = [
+        (r["chrom"], int(r["length"]))
+        for r in fai.iter_rows(named=True)
+        if r["chrom"] in set(bed["chrom"].to_list())
+    ]
+
+    # Disjoint 10 bp bins: the bed's sliding windows overlap heavily, and
+    # bigwig entries must be sorted and non-overlapping.
+    BIN = 10
+    bw_paths: dict[str, str] = {}
+    for i, sample in enumerate(samples):
+        p = tmp_dir / f"{sample}.alpha.bw"
+        with pyBigWig.open(str(p), "w") as bw:
+            bw.addHeader(contig_sizes, maxZooms=0)
+            chroms, starts, ends, values = [], [], [], []
+            for contig, size in contig_sizes:
+                for b, lo in enumerate(range(0, size, BIN)):
+                    hi = min(lo + BIN, size)
+                    chroms.append(contig)
+                    starts.append(lo)
+                    ends.append(hi)
+                    # Distinct per (sample, contig, bin) so a wrong sample, a
+                    # wrong contig, or an off-by-one bin shows up in values.
+                    values.append(
+                        float(10 * (i + 1) + b)
+                        + (0.5 if contig != contig_sizes[0][0] else 0.0)
+                    )
+            bw.addEntries(chroms, starts, ends=ends, values=values)
+        bw_paths[sample] = str(p)
+    alpha = gvl.BigWigs("alpha", bw_paths)
+
+    rows = []
+    for i, sample in enumerate(samples):
+        for c_idx, (contig, size) in enumerate(contig_sizes):
+            for b, lo in enumerate(range(0, size, BIN)):
+                rows.append(
+                    {
+                        "sample_id": sample,
+                        "chrom": contig,
+                        "start": lo,
+                        "end": min(lo + BIN, size),
+                        "value": float(1000 * c_idx + 100 * (i + 1) + b),
+                    }
+                )
+    zeta = gvl.Table("zeta", pl.DataFrame(rows))
+
+    out = tmp_dir / "svar2_tracks.gvl"
+    gvl.write(
+        path=out,
+        bed=bed,
+        variants=base.svar2_path,
+        tracks=[zeta, alpha],
+        # Unlike the SVAR1 mixed fixture, `extend_to_length=False` is not an
+        # option here: `_write_from_svar2` (`_write.py:1233`) hard-rejects it
+        # -- the read-bound kernel always sizes haplotype output at read
+        # time, so the write-time ranges cache must be built for the
+        # extended `chromEnd`. Use the default (`True`).
+        max_jitter=None,
+    )
+
+    return StreamingSvar2TracksFixture(
+        bed=bed,
+        reference_path=base.reference_path,
+        svar2_path=base.svar2_path,
+        dataset_path=out,
+        bigwigs=alpha,
+        table=zeta,
+        samples=samples,
+        contigs_list=list(base.contigs),
+    )
