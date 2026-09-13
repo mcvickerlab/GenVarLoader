@@ -7,8 +7,12 @@ batch. Task 6 consumes it; this file pins its contract.
 
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
 
+import numpy as np
+import pytest
+
+import genvarloader as gvl
 from genvarloader.genvarloader import RecordStreamEngine
 
 
@@ -164,3 +168,34 @@ def test_window_realign_inputs_matches_before_and_during_producer(
         np.testing.assert_array_equal(
             b, d, err_msg=f"{name} mismatch pre/during producer"
         )
+
+
+@pytest.mark.parametrize("backend", ["vcf", "pgen"])
+def test_record_tracks_fixture_writes_a_usable_oracle(
+    streaming_record_tracks_fixture, backend
+):
+    """The Task 6/8 fixture actually produces a written mixed oracle.
+
+    Task 6 consumes this fixture for its CSR-replication tests and Task 8 for
+    byte-identical parity; this smoke test is what makes the fixture itself
+    reviewable now rather than dead weight until then.
+    """
+    f = streaming_record_tracks_fixture(backend)
+
+    ds = gvl.Dataset.open(f.dataset_path, f.reference_path)
+
+    # tracks= was passed [zeta, alpha]; the written axis sorts. A fixture that
+    # silently preserved argument order would defeat every downstream test
+    # that indexes the track axis by position.
+    assert ds.available_tracks == ["alpha", "zeta"]
+
+    # The dataset's public sample order is what the bigwigs and table were
+    # keyed by -- if these disagree, every track value in Tasks 6 and 8 is off
+    # by a sample permutation.
+    assert list(ds.samples) == f.samples
+    assert set(f.bigwigs.samples) == set(f.samples)
+
+    assert f.bigwigs.name == "alpha"
+    assert f.table.name == "zeta"
+    assert Path(f.variants_path).exists()
+    assert ds.n_regions == f.bed.height
