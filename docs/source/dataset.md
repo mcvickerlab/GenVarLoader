@@ -420,8 +420,8 @@ single per-ALT `AF` to keep the two byte-identical.
 ```
 
 The **`.svar2` backend** does not yet support these knobs. It is currently
-**haplotypes-only, `jitter=0`, ragged output only**; combining a `.svar2` source with `jitter>0`,
-`with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
+**`with_seqs("haplotypes")`-only, `jitter=0`, ragged output only**; combining a `.svar2` source
+with `jitter>0`, `with_len(<int>)`, `with_seqs("annotated")`, or `with_seqs("variants")` raises
 `NotImplementedError` (SVAR2 support is a known follow-up).
 
 ### Interval track streaming (`tracks=`)
@@ -471,18 +471,18 @@ for (haps, tracks), region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 ```
 ````
 
-**Mixed variants + tracks supports SVAR1, VCF/BCF, and PGEN.** Combining `tracks=` with a
-`.svar2` variant source raises `NotImplementedError` — SVAR2 uses a different written-path track
-kernel and does not yet expose the genotype seam the re-alignment kernel needs. Tracks alone (no
-`variants=`) work on every backend combination, since there is nothing to re-align against.
+**Mixed variants + tracks is supported on every variant backend**: `.svar` (SVAR1), `.svar2`
+(SVAR2), VCF/BCF and PGEN. Tracks alone (no `variants=`) work on every backend combination too,
+since there is nothing to re-align against.
 
 ```{warning}
 **Known parity gap: re-aligned tracks under a long `with_len(L)`.** When `L` exceeds a
 deletion-shrunk haplotype's natural length, streaming fills the track's trailing region with real
 signal read from beyond the region's end, while a written `Dataset` zero-pads that tail — so the
-two disagree there. This affects every backend that re-aligns tracks (SVAR1, VCF/BCF and PGEN
-alike) and is not specific to any one of them. The default ragged output is unaffected, as is any
-`L` at or below the natural length. Tracked as a follow-up.
+two disagree there. This affects every backend that re-aligns tracks rather than any one of them
+(confirmed on SVAR1, VCF/BCF and PGEN). The default ragged output is unaffected, as is any `L` at
+or below the natural length. Tracked as
+[#398](https://github.com/mcvickerlab/GenVarLoader/issues/398).
 ```
 
 `with_seqs` combined with tracks only wires the default `"haplotypes"` kind; the written path
@@ -551,7 +551,10 @@ with `max_jitter>0`.
 tracks do not yet reproduce `extend_to_length=True` (the `gvl.write` default) or `max_jitter>0` —
 both require a whole-cohort, write-time scan (`max_ends`) that a write-free design can't do
 per-window. Build the parity oracle with `extend_to_length=False, max_jitter=None` until that
-follow-up lands.
+follow-up lands. **Exception — `.svar2` sources:** `gvl.write` rejects `extend_to_length=False`
+for a `.svar2` variant source (the read-bound kernel sizes haplotype output at read time), so
+build a `.svar2` mixed oracle with the default `extend_to_length=True`; SVAR2 mixed parity is
+gated on `max_jitter=None` alone.
 
 `StreamingDataset` is otherwise more limited than `Dataset`: it accepts `.svar`, `.svar2`, VCF/BCF,
 and PGEN (biallelic only) variant sources, and is **iterable-only** — `sds[r, s]` raises

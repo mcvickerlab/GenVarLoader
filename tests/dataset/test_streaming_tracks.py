@@ -13,9 +13,31 @@ import polars as pl
 import pytest
 
 import genvarloader as gvl
+from genvarloader._dataset._streaming import (
+    _MixedTracksBackend,
+    _PgenBackend,
+    _Svar1Backend,
+    _Svar2Backend,
+    _VcfBackend,
+)
 from genvarloader._dataset._track_stream import _TrackBackend
 
 from tests.dataset._mixed_assertions import _assert_cell_equal, _assert_haps_cell_equal
+
+# Backends that implement the `_MixedTracksBackend` protocol (issue #375) vs.
+# those that don't. Both tracks of #375 have landed, so every built-in backend
+# conforms today and the second tuple is empty; it is kept so that a backend
+# added without mixed support moves ONE name between these two tuples instead
+# of editing assertions in the test body --
+# `test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol` below
+# iterates both.
+_MIXED_TRACKS_CONFORMING_BACKENDS = (
+    _Svar1Backend,
+    _Svar2Backend,
+    _VcfBackend,
+    _PgenBackend,
+)
+_MIXED_TRACKS_NONCONFORMING_BACKENDS = ()
 
 
 def test_fixture_builds(streaming_tracks_fixture):
@@ -689,60 +711,51 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
     _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=f"cell (r={r}, s={s}): ")
 
 
-def test_mixed_tracks_svar2_raises(streaming_svar2_case):
-    """Same guard, SVAR2 source.
+def test_mixed_tracks_guard_fires_for_a_nonconforming_backend(
+    streaming_case, monkeypatch
+):
+    """The `supports_mixed_tracks` capability guard still rejects a backend without it.
 
-    ``streaming_svar2_case`` returns ``(bed, reference, variants)`` -- three
-    values, not ``streaming_case``'s four -- because it has no plain
-    ``gvl.Dataset.open(...)`` oracle wired up (see its docstring in
-    ``conftest.py``), so sample ids are hand-typed from the shared
-    ``_SVAR1_MC_VCF`` fixture text (``S0``/``S1``/``S2``) that
-    ``svar2_multicontig_fixture`` converts, rather than read off a `written`
-    dataset.
+    Both tracks of issue #375 have landed, so every BUILT-IN backend declares
+    the mixed variants+tracks capability and no real source reaches this guard
+    any more. The guard is not dead code -- it is the contract a future
+    backend must satisfy before `to_iter` will feed it tracks -- so drop the
+    flag on one backend and assert the rejection still fires at `to_iter`
+    time, rather than the tracks being silently ignored or wrongly produced.
+
+    Sample ids come from the written oracle's own ``samples`` (not a
+    hand-typed guess) so the ``Table`` construction here can't drift out of
+    sync with the fixture.
     """
-    bed, reference, variants = streaming_svar2_case
-    # `svar2_multicontig_fixture`'s bed spans BOTH chr1 and chr2 (unlike the
-    # vcf/pgen fixtures above, which are single-contig) -- `_TrackBackend`
-    # validates contig coverage against every contig the bed references, so
-    # the table must cover chr2 too or construction fails before the guard
-    # under test ever runs.
-    samples = ["S0", "S1", "S2"]
+    bed, reference, variants, written = streaming_case("vcf")
+    monkeypatch.setattr(_VcfBackend, "supports_mixed_tracks", False)
+    samples = list(written.samples)
     table = gvl.Table(
         "t",
         pl.DataFrame(
             {
-                "sample_id": samples * 2,
-                "chrom": ["chr1"] * len(samples) + ["chr2"] * len(samples),
-                "start": [0] * len(samples) * 2,
-                "end": [10] * len(samples) * 2,
-                "value": [float(i) for i in range(len(samples) * 2)],
+                "sample_id": samples,
+                "chrom": ["chr1"] * len(samples),
+                "start": [0] * len(samples),
+                "end": [10] * len(samples),
+                "value": [float(i) for i in range(len(samples))],
             }
         ),
     )
     sds = gvl.StreamingDataset(
         bed, reference=reference, variants=variants, tracks=table
     )
-    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
+    with pytest.raises(NotImplementedError, match="supports_mixed_tracks"):
         next(iter(sds.to_iter(batch_size=1)))
-
-
-# Backends wired for mixed variants+tracks, and those not. Kept as module-level
-# tuples so a track that adds a backend moves ONE name between them instead of
-# editing assertions in the test body -- Tracks A (SVAR2) and B (VCF/PGEN) of
-# issue #375 land independently and would otherwise conflict here.
-_MIXED_SUPPORTING = ("_Svar1Backend", "_VcfBackend", "_PgenBackend")
-_MIXED_NOT_SUPPORTING = ("_Svar2Backend",)
 
 
 def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """Pin the data the `to_iter` capability guard actually reads (issue #375).
 
-    `test_mixed_tracks_svar2_raises` above already pins the guard's
-    user-visible BEHAVIOR (SVAR2 + ``tracks=`` raises `NotImplementedError` at
-    `to_iter` time; SVAR1/VCF/PGEN + ``tracks=`` do not, since the #375 fix
-    round wired all three) -- constructing another `StreamingDataset` over one
-    of those sources would only repeat that, not add coverage. What that test
-    can't see is the guard's SOURCE OF TRUTH: each backend's
+    `test_mixed_tracks_guard_fires_for_a_nonconforming_backend` above already
+    pins the guard's user-visible BEHAVIOR (a backend that does not declare
+    the capability raises `NotImplementedError` at `to_iter` time). What that
+    test can't see is the guard's SOURCE OF TRUTH: each backend's
     `supports_mixed_tracks` `ClassVar[bool]`,
     and -- since the #375 fix round -- whether a backend that sets it `True`
     actually shapes `mixed_realign_window` to match the `_MixedTracksBackend`
@@ -760,15 +773,19 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """
     import inspect
 
-    from genvarloader._dataset import _streaming
-    from genvarloader._dataset._streaming import _MixedTracksBackend
+    # Every built-in backend is wired for mixed variants+tracks now that both
+    # tracks of issue #375 have landed.
+    for backend in _MIXED_TRACKS_CONFORMING_BACKENDS:
+        assert backend.supports_mixed_tracks is True
+    for backend in _MIXED_TRACKS_NONCONFORMING_BACKENDS:
+        assert backend.supports_mixed_tracks is False
 
-    # Every backend claiming support must define `mixed_realign_window` with
-    # exactly the checked protocol's signature -- parameter names AND their
-    # annotations AND the return annotation, not just the names. The names
-    # alone would not catch the failure this test exists for: a backend that
-    # returns `(t_ends_ext, realign_window)` instead of `(realign_window,
-    # t_ends_ext)` keeps every parameter name identical.
+    # Every backend that claims support must define `mixed_realign_window`
+    # with exactly the checked protocol's signature -- parameter names AND
+    # their annotations AND the return annotation, not just the names. The
+    # names alone would not catch the failure this test exists for: a Track
+    # that returns `(t_ends_ext, realign_window)` instead of
+    # `(realign_window, t_ends_ext)` keeps every parameter name identical.
     #
     # NOTE: `pyrefly`, not this test, is the PRIMARY gate on shape -- it
     # reports `unsafe-overlap` at the `isinstance(backend,
@@ -785,40 +802,37 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     # compares UNEQUAL to `tuple[_MixedRealign, ...]`. Quoting only the inner
     # name therefore fails this comparison with a confusing message; quoting
     # nothing (as `_MixedTracksBackend.mixed_realign_window` itself does, at
-    # `_streaming.py:446`) or quoting the WHOLE annotation (as the
+    # `_streaming.py:448`) or quoting the WHOLE annotation (as the
     # module-level `_record_mixed_realign_window` helper does, at
-    # `_streaming.py:518`) both pass -- only a partial quote inside the
+    # `_streaming.py:695`) both pass -- only a partial quote inside the
     # subscript fails.
     expected_sig = inspect.signature(
         _MixedTracksBackend.mixed_realign_window, eval_str=True
     )
-    for name in _MIXED_SUPPORTING:
-        backend = getattr(_streaming, name)
-        assert backend.supports_mixed_tracks is True
+    for backend in _MIXED_TRACKS_CONFORMING_BACKENDS:
         actual_sig = inspect.signature(backend.mixed_realign_window, eval_str=True)
         assert list(actual_sig.parameters) == list(expected_sig.parameters)
         assert actual_sig.return_annotation == expected_sig.return_annotation, (
-            f"{name}.mixed_realign_window's RETURN type has drifted from "
-            "the _MixedTracksBackend protocol (a swapped 2-tuple keeps "
-            "every parameter name identical, so only this assert would "
-            "catch it):\n"
+            f"{backend.__name__}.mixed_realign_window's RETURN type has "
+            "drifted from the _MixedTracksBackend protocol (a swapped "
+            "2-tuple keeps every parameter name identical, so only this "
+            "assert would catch it):\n"
             f"  protocol: {expected_sig.return_annotation}\n"
             f"  backend:  {actual_sig.return_annotation}"
         )
-        for pname, expected_param in expected_sig.parameters.items():
+        for name, expected_param in expected_sig.parameters.items():
             assert (
-                actual_sig.parameters[pname].annotation == expected_param.annotation
+                actual_sig.parameters[name].annotation == expected_param.annotation
             ), (
-                f"{name}.mixed_realign_window parameter {pname!r} has "
-                "drifted from the _MixedTracksBackend protocol:\n"
+                f"{backend.__name__}.mixed_realign_window parameter {name!r} "
+                "has drifted from the _MixedTracksBackend protocol:\n"
                 f"  protocol: {expected_param.annotation}\n"
-                f"  backend:  {actual_sig.parameters[pname].annotation}"
+                f"  backend:  {actual_sig.parameters[name].annotation}"
             )
     # None of the non-supporting backends need to satisfy it, but a stray
     # `mixed_realign_window` on one of them would mask a mismatched flag --
     # guard against that too.
-    for name in _MIXED_NOT_SUPPORTING:
-        backend = getattr(_streaming, name)
+    for backend in _MIXED_TRACKS_NONCONFORMING_BACKENDS:
         assert not backend.supports_mixed_tracks
         assert not hasattr(backend, "mixed_realign_window")
 

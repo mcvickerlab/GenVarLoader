@@ -34,8 +34,10 @@ if TYPE_CHECKING:
 
     from .._ragged import RaggedIntervals, RaggedTracks
     from .._types import IntervalTrack
+    from ..genvarloader import Svar2Store
     from ._flat_variants import VarWindowOpt
     from ._insertion_fill import InsertionFill
+    from ._svar2_haps import _GatherInputs
     from ._track_stream import _TrackBackend
 
 # Wave B PR-B3a (#304): human-readable names for `with_seqs`' output kinds, used to
@@ -373,13 +375,13 @@ class _MixedRealign(Protocol):
     Mixed variants+tracks needs two things per window: state computed once
     (per-row genotype views, deletion diffs) and a per-batch kernel that turns
     that state plus the window's intervals into `RaggedTracks`. Different
-    variant sources need BOTH to differ -- SVAR1 and the record backends share
-    the fused `intervals_and_realign_track_fused` kernel over a CSR
+    variant sources need BOTH to differ -- SVAR1 and the record backends
+    share the fused `intervals_and_realign_track_fused` kernel over a CSR
     (`_RealignWindow`), while SVAR2 has no fused kernel and must split into
     `intervals_to_tracks` + `shift_and_realign_tracks_from_svar2_readbound`
-    (`_Svar2Realign` -- Track A, not yet landed). Bundling state with its
-    kernel is what keeps the drive loop free of `isinstance` dispatch: the
-    drive holds one optional and calls one method on it.
+    (`_Svar2Realign`). Bundling state with its kernel is what keeps the
+    drive loop free of `isinstance` dispatch: the drive holds one optional
+    and calls one method on it.
     """
 
     def realign_batch(
@@ -504,6 +506,181 @@ class _RealignWindow(NamedTuple):
             self.diffs[lo:hi],
             out_lengths,
             base_seed,
+        )
+
+
+class _Svar2Realign(NamedTuple):
+    """Split-kernel realign state: the SVAR2 backend (issue #375, Track A).
+
+    SVAR2 has no fused interval->realign kernel, so unlike
+    :class:`_RealignWindow` this holds the read-bound gather inputs
+    (`_Svar2Backend._gather_rows`' first seven elements, which are exactly
+    `_svar2_haps._GatherInputs`) and runs the same TWO kernels the written
+    path's `HapsTracks._call_svar2` runs (`_reconstruct.py:309`):
+    `intervals_to_tracks` to materialize the reference-space window, then
+    `shift_and_realign_tracks_from_svar2_readbound` to move it to haplotype
+    coordinates.
+
+    Single-contig by construction: `_Svar2Backend.read_window` raises on a
+    multi-contig window, so the per-contig grouping (and the inverse row
+    permutation) `Svar2Haps.realign_track_block` needs is unreachable here.
+    That is why this state carries a plain `contig` string rather than a
+    group list.
+    """
+
+    store: "Svar2Store"
+    contig: str
+    ploidy: int
+    #: `_gather_rows`' first seven elements for the WHOLE window's rows.
+    gi: "_GatherInputs"
+    #: `(n_rows, ploidy)` int32 per-hap reference-length diffs.
+    diffs: "NDArray[np.int32]"
+    #: `(n_rows, ploidy)` int32 all-zero shifts (streaming never sets
+    #: `deterministic=False`; see `_realigned_tracks_from_intervals`).
+    shifts: "NDArray[np.int32]"
+
+    def realign_batch(
+        self,
+        lo: int,
+        hi: int,
+        itvs: "list[_ItvArrays]",
+        names: list[str],
+        insertion_fill: "dict[str, InsertionFill] | None",
+        regions_batch: NDArray[np.int32],
+        row_lengths: NDArray[np.int64],
+        out_lengths: NDArray[np.int64],
+        base_seed: int,
+    ) -> "RaggedTracks":
+        """See :meth:`_MixedRealign.realign_batch`. Split-kernel implementation.
+
+        Mirrors `Svar2Haps.realign_track_block` (`_svar2_haps.py:702`) per
+        track, then reorders the track-major buffer into `(b, t, p)` order the
+        same way `_realigned_tracks_from_intervals` does -- see that function's
+        docstring for why streaming reorders and the written path does not
+        (issue #371).
+
+        `out_lengths` is used only to size `n_per_track`/`tm_offsets`, never
+        fed to the read-bound kernel: unlike the fused SVAR1 kernel, the SVAR2
+        read-bound kernel sizes each hap to `ref_len + diff` itself and cannot
+        be told a fixed length, mirroring the written path's own guard
+        (`if isinstance(output_length, int): raise NotImplementedError(...)`,
+        `_reconstruct.py:370-375`). `out_lengths` and the kernel's native
+        sizing therefore MUST agree, or this silently mis-labels the ragged
+        result; see the `block_data.size` check below for what happens when
+        they don't.
+        """
+        from .._ragged import RaggedTracks
+        from .._threads import should_parallelize
+        from .._utils import lengths_to_offsets
+        from ..genvarloader import shift_and_realign_tracks_from_svar2_readbound
+        from ._insertion_fill import Repeat5p
+        from ._insertion_fill import lower as _lower_insertion_fills
+        from ._intervals import intervals_to_tracks
+        from ._svar2_haps import _ragged_arange_gather
+
+        n_tracks = len(itvs)
+        batch = hi - lo
+        P = self.ploidy
+        fill_map = insertion_fill or {}
+
+        diffs_b = self.diffs[lo:hi]
+        track_lengths = row_lengths - diffs_b.clip(max=0).min(1)
+        track_ofsts = np.ascontiguousarray(
+            lengths_to_offsets(track_lengths, np.int64), np.int64
+        )
+        out_ofsts_per_t = np.ascontiguousarray(
+            lengths_to_offsets(out_lengths), np.int64
+        )
+        n_per_track = int(out_ofsts_per_t[-1])
+        out = np.empty(n_tracks * n_per_track, np.float32)
+
+        strat_list = [fill_map.get(name, Repeat5p()) for name in names]
+        strat_ids, strat_params = _lower_insertion_fills(strat_list)
+
+        # Slice the window's gather inputs down to this batch's rows. The
+        # first six entries are per-row (or per-row*P for the vk_* pairs);
+        # `region_bounds` is per-row too. Row order is C-order (region,
+        # sample), identical to the drive's.
+        # None of these depend on `t`: `intervals_to_tracks` fully overwrites
+        # `tracks_buf` each call (it is not accumulated across tracks), and
+        # the gather-input/`starts` arrays are the same per-row slices for
+        # every track. Hoisted out of the loop below.
+        region_starts = np.ascontiguousarray(self.gi[0][lo:hi], np.uint32)
+        orig_samples = np.ascontiguousarray(self.gi[1][lo:hi], np.int64)
+        vk_snp = np.ascontiguousarray(self.gi[2][lo * P : hi * P], np.int64)
+        vk_indel = np.ascontiguousarray(self.gi[3][lo * P : hi * P], np.int64)
+        dense_snp = np.ascontiguousarray(self.gi[4][lo:hi], np.int64)
+        dense_indel = np.ascontiguousarray(self.gi[5][lo:hi], np.int64)
+        region_bounds = np.ascontiguousarray(self.gi[6][lo:hi], np.int32)
+        shifts_b = np.ascontiguousarray(self.shifts[lo:hi], np.int32)
+        offset_idxs = np.arange(lo, hi, dtype=np.int64)
+        starts = np.ascontiguousarray(regions_batch[:, 1], np.int32)
+        g_total = int(track_ofsts[-1])
+        tracks_buf = np.empty(g_total, np.float32)
+        do_parallel = should_parallelize(g_total * 4)
+        # GLOBAL batch row per query. Single contig group here, so the
+        # group's rows ARE the batch's rows, in order.
+        batch_rows = np.arange(batch, dtype=np.int64)
+
+        for t, (name, itv) in enumerate(zip(names, itvs)):
+            intervals_to_tracks(
+                offset_idxs=offset_idxs,
+                starts=starts,
+                itv_starts=itv.starts,
+                itv_ends=itv.ends,
+                itv_values=itv.values,
+                itv_offsets=itv.offsets,
+                out=tracks_buf,
+                out_offsets=track_ofsts,
+            )
+            block_data, _block_off = shift_and_realign_tracks_from_svar2_readbound(
+                self.store,
+                self.contig,
+                region_starts,
+                orig_samples,
+                vk_snp,
+                vk_indel,
+                dense_snp,
+                dense_indel,
+                region_bounds,
+                shifts_b,
+                tracks_buf,
+                track_ofsts,
+                np.ascontiguousarray(strat_params[t], np.float64),
+                np.int64(strat_ids[t]),
+                np.uint64(base_seed),
+                batch_rows,
+                do_parallel,
+            )
+            if block_data.size != n_per_track:
+                raise NotImplementedError(
+                    "SVAR2 haplotype-realigned track block size does not match "
+                    "this batch's drained haplotype lengths (out_lengths): the "
+                    "read-bound kernel sizes each hap to ref_len + diff, which "
+                    "must agree with the haplotype lengths already produced for "
+                    "this batch. This indicates a haps-vs-tracks length drift, "
+                    "not a with_len(L) request (mirrors _reconstruct.py:370)."
+                )
+            out[t * n_per_track : (t + 1) * n_per_track] = np.asarray(
+                block_data, np.float32
+            )
+
+        # `out` is TRACK-major (flat order `(t, row, hap)`); a
+        # `(batch, n_tracks, ploidy, None)` Ragged wants `(row, t, hap)`.
+        # Identical reorder to `_realigned_tracks_from_intervals`.
+        n_bp = batch * P
+        tm_offsets = lengths_to_offsets(np.tile(out_lengths.reshape(-1), n_tracks))
+        perm = (
+            np.arange(n_tracks * n_bp)
+            .reshape(n_tracks, batch, P)
+            .transpose(1, 0, 2)
+            .reshape(-1)
+            .astype(np.intp)
+        )
+        data, out_offsets = _ragged_arange_gather(out, tm_offsets, perm)
+        return cast(
+            RaggedTracks,
+            Ragged.from_offsets(data, (batch, n_tracks, P, None), out_offsets),  # type: ignore[bad-argument-type, no-matching-overload]
         )
 
 
@@ -1518,9 +1695,39 @@ class StreamingDataset:
             ):
                 raise NotImplementedError(
                     "StreamingDataset tracks= combined with a variant source is "
-                    f"not supported for {type(self._backend).__name__} yet; only "
-                    "the SVAR1 (.svar), VCF/BCF, and PGEN backends support mixed "
-                    "variants+tracks today (issue #375); .svar2 does not yet."
+                    f"not supported for {type(self._backend).__name__}: it does "
+                    "not set supports_mixed_tracks / define mixed_realign_window. "
+                    "Every built-in backend (SVAR1 .svar, SVAR2 .svar2, VCF/BCF "
+                    "and PGEN) does (issue #375)."
+                )
+            # This fires ahead of the general SVAR2 jitter/`with_len` guard
+            # below, whose `_out_len != -1` clause covers the same case today.
+            # Keep both: that one is a temporary Wave A wiring gap and will be
+            # narrowed when `with_len` lands for SVAR2, whereas this rejection
+            # is permanent -- the written path refuses it too
+            # (`_reconstruct.py:369-376`).
+            #
+            # Issue #375 Track A: the SVAR2 read-bound track kernel always
+            # sizes each hap to `ref_len + diff` with no `output_length`
+            # override, so a fixed-length request cannot be honored
+            # byte-identically. The WRITTEN path refuses this too, in the same
+            # words (`_reconstruct.py:_call_svar2`) -- this is a mirrored
+            # semantic rejection, not a streaming gap. NOTE: unlike some of
+            # this backend's other guards, `realign_tracks=False` is NOT an
+            # escape hatch here -- the general SVAR2 `with_len` guard further
+            # below rejects a fixed `output_length` for this backend
+            # regardless of `realign_tracks`, so this message does not offer
+            # it (verified empirically: turning off re-alignment still hits
+            # that guard).
+            if (
+                self._track_backend is not None
+                and self._realign_tracks
+                and isinstance(self._output_length, int)
+                and isinstance(self._backend, _Svar2Backend)
+            ):
+                raise NotImplementedError(
+                    "Fixed-length (with_len) haplotype-realigned tracks are not "
+                    "supported for svar2 sources; use ragged output."
                 )
             # Task 8 (spec §3.3/§8): `with_seqs("variant-windows")` + tracks +
             # `realign_tracks=True` mirrors the WRITTEN path's own `ValueError`
@@ -1620,10 +1827,11 @@ class StreamingDataset:
                 )
             # Wave A output-mode knobs (issue #277) are wired only through the
             # SVAR1/VCF/PGEN engines. The SVAR2 drives ("sync"/"svar2_engine") read
-            # unjittered region bounds and emit ragged haplotypes only, so combining
-            # them with jitter, `with_len`, `with_seqs("annotated")`, or
-            # `with_seqs("variants")` would silently ignore the request. Fail fast
-            # rather than return wrong output; SVAR2 Wave A/B support is a follow-up.
+            # unjittered region bounds and emit ragged haplotypes (optionally with
+            # tracks), so combining them with jitter, `with_len`,
+            # `with_seqs("annotated")`, or `with_seqs("variants")` would silently
+            # ignore the request. Fail fast rather than return wrong output; SVAR2
+            # Wave A/B support is a follow-up.
             if isinstance(self._backend, _Svar2Backend) and (
                 self._jitter > 0 or _out_len != -1 or _annotated or _variants
             ):
@@ -2263,32 +2471,178 @@ class StreamingDataset:
                 backend = self._backend
                 buf = Svar2ReconBuf(backend.ploidy)  # one recycled buffer per iterator
                 sb_rows = backend._super_batch_rows
-                for r_idx, s_idx in self._plan():
-                    window = backend.read_window(r_idx, s_idx)
-                    n_s = len(s_idx)
-                    flat_r = np.repeat(self._sort_order[r_idx], n_s)
-                    flat_s = np.tile(s_idx, len(r_idx))
-                    n_rows = len(flat_r)
-                    for sb_lo, sb_hi in _super_batch_bounds(n_rows, sb_rows):
-                        # Estimated output bytes gate `parallel` *before* the fill
-                        # (the fill IS the reconstruct, so exact total_bytes is only
-                        # known after): a tiny tail stays serial (PR-1a), a
-                        # core-saturating super-batch parallelizes (PR-2). An
-                        # overestimate only flips the decision, never correctness.
-                        backend._fill_super_batch(
-                            r_idx,
-                            s_idx,
-                            window,
-                            sb_lo,
-                            sb_hi,
-                            buf,
-                            parallel=should_parallelize(
-                                backend._est_out_bytes(r_idx, sb_hi - sb_lo)
-                            ),
-                        )
-                        for lo, hi in _batch_bounds(sb_lo, sb_hi, batch_size):
-                            data = backend._drain(buf, lo - sb_lo, hi - sb_lo)
-                            yield data, flat_r[lo:hi], flat_s[lo:hi]
+                try:
+                    for r_idx, s_idx in self._plan():
+                        window = backend.read_window(r_idx, s_idx)
+                        n_s = len(s_idx)
+                        flat_r = np.repeat(self._sort_order[r_idx], n_s)
+                        flat_s = np.tile(s_idx, len(r_idx))
+                        n_rows = len(flat_r)
+                        # Issue #375 Track A: read this window's tracks once, here --
+                        # the same composition point the SVAR1 engine drive uses
+                        # (see that branch's identical comment). Guarded on `tb is
+                        # not None` so a haplotype-only SVAR2 stream pays nothing
+                        # extra. No jitter branch here (unlike the engine drive):
+                        # `_iter_batches` already rejects jitter for SVAR2
+                        # (the guard just above this "sync" branch), so region
+                        # bounds are always the raw `self._regions` slice.
+                        tb = self._track_backend
+                        if tb is not None:
+                            s_idx_w = np.asarray(s_idx, np.intp)
+                            t_starts = np.ascontiguousarray(
+                                self._regions[r_idx, 1], np.int32
+                            )
+                            t_ends = np.ascontiguousarray(
+                                self._regions[r_idx, 2], np.int32
+                            )
+                            row_starts_w = np.repeat(t_starts, n_s).astype(np.int32)
+                            row_ends_w = np.repeat(t_ends, n_s).astype(np.int32)
+                            row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
+                            if self._realign_tracks:
+                                # Same double narrowing the engine drive relies on
+                                # (see its identical comment): static, via
+                                # pyrefly's `unsafe-overlap` check against the
+                                # `_MixedTracksBackend` protocol; and at runtime, an
+                                # `isinstance` check against a `runtime_checkable`
+                                # protocol that catches a backend setting the flag
+                                # with no conforming `mixed_realign_window`.
+                                assert isinstance(backend, _MixedTracksBackend), (
+                                    f"{type(backend).__name__} sets "
+                                    "supports_mixed_tracks without a conforming "
+                                    "mixed_realign_window."
+                                )
+                                realign_w, t_ends_ext = backend.mixed_realign_window(
+                                    r_idx,
+                                    s_idx_w,
+                                    t_starts,
+                                    t_ends,
+                                    row_starts_w,
+                                    row_ends_w,
+                                )
+                            else:
+                                # Un-realigned tracks stay in reference coordinates
+                                # -- no deletion-extension read-ahead needed.
+                                realign_w = None
+                                t_ends_ext = t_ends
+                            per_track = tb.read_window(
+                                r_idx,
+                                s_idx_w,
+                                np.ascontiguousarray(t_starts, np.int32),
+                                np.ascontiguousarray(t_ends_ext, np.int32),
+                            )
+                            track_w = _TrackWindow(
+                                itvs=_coerce_window_itvs(per_track),
+                                names=tb.names,
+                                row_starts=row_starts_w,
+                                row_ends=row_ends_w,
+                                row_lengths=row_lengths_w,
+                                realign=realign_w,
+                            )
+                        else:
+                            track_w = None
+                        for sb_lo, sb_hi in _super_batch_bounds(n_rows, sb_rows):
+                            # Estimated output bytes gate `parallel` *before* the fill
+                            # (the fill IS the reconstruct, so exact total_bytes is only
+                            # known after): a tiny tail stays serial (PR-1a), a
+                            # core-saturating super-batch parallelizes (PR-2). An
+                            # overestimate only flips the decision, never correctness.
+                            backend._fill_super_batch(
+                                r_idx,
+                                s_idx,
+                                window,
+                                sb_lo,
+                                sb_hi,
+                                buf,
+                                parallel=should_parallelize(
+                                    backend._est_out_bytes(r_idx, sb_hi - sb_lo)
+                                ),
+                            )
+                            for lo, hi in _batch_bounds(sb_lo, sb_hi, batch_size):
+                                data = backend._drain(buf, lo - sb_lo, hi - sb_lo)
+                                if track_w is None:
+                                    yield data, flat_r[lo:hi], flat_s[lo:hi]
+                                    continue
+                                # Issue #380: the mixed drive yields BOTH halves,
+                                # `(haplotypes, tracks)`, matching the written
+                                # path's `HapsTracks.__call__` return order
+                                # (`_reconstruct.py:121-144`). Unlike the engine
+                                # drive, `data` here is already a `Ragged` (from
+                                # `backend._drain`), so the per-(row, hap) output
+                                # length comes from `.lengths` rather than raw
+                                # engine offsets.
+                                out_lengths = np.asarray(
+                                    data.lengths, np.int64
+                                ).reshape(hi - lo, backend.ploidy)
+                                if track_w.realign is not None:
+                                    regions_batch = np.stack(
+                                        [
+                                            np.zeros(hi - lo, np.int32),
+                                            track_w.row_starts[lo:hi],
+                                            track_w.row_ends[lo:hi],
+                                        ],
+                                        axis=1,
+                                    ).astype(np.int32)
+                                    # The written path's own formula, verbatim:
+                                    # xor-reduce of the dataset-global ravel index
+                                    # (`_reconstruct.py:216-218`). Only
+                                    # `FlankSample` reads this seed -- see the
+                                    # engine drive's identical comment for why
+                                    # exact `FlankSample` parity is unattainable in
+                                    # ANY batched path.
+                                    _idx = flat_r[lo:hi].astype(np.uint64) * np.uint64(
+                                        self.n_samples
+                                    ) + flat_s[lo:hi].astype(np.uint64)
+                                    base_seed = int(np.bitwise_xor.reduce(_idx))
+                                    tracks = track_w.realign.realign_batch(
+                                        lo,
+                                        hi,
+                                        track_w.itvs,
+                                        track_w.names,
+                                        self._insertion_fill,
+                                        regions_batch,
+                                        track_w.row_lengths[lo:hi],
+                                        out_lengths,
+                                        base_seed,
+                                    )
+                                else:
+                                    # Live, tested path: `realign_tracks=False`
+                                    # reaches here on SVAR2 today.
+                                    if isinstance(self._output_length, int):
+                                        # Unreachable on SVAR2 today (fix round
+                                        # 1, T1): `with_len(<int>)` (`_out_len
+                                        # != -1`) is rejected for the SVAR2
+                                        # backend before the drive ever runs
+                                        # (`:1593`, `:1706`). Kept for the
+                                        # textual parallel with the SVAR1
+                                        # engine drive's identical branch --
+                                        # do not "fix" the SVAR2 `with_len`
+                                        # guard on the strength of this branch
+                                        # existing.
+                                        _lengths = np.full(
+                                            hi - lo, self._output_length, np.int64
+                                        )
+                                    else:
+                                        _lengths = track_w.row_lengths[lo:hi]
+                                    tracks = _tracks_from_intervals(
+                                        track_w.itvs,
+                                        np.arange(lo, hi, dtype=np.int64),
+                                        track_w.row_starts[lo:hi],
+                                        _lengths,
+                                    )
+                                yield (data, tracks), flat_r[lo:hi], flat_s[lo:hi]
+                finally:
+                    # Fix round 1 (L2): clear the memo after the window
+                    # loop -- it is never useful past iteration (a fresh
+                    # `_plan()` pass starts a new sequence of windows) and
+                    # left uncleared it retains the LAST window
+                    # (`n_reg * n_s * ploidy * 32 B`, plus the key's
+                    # `tobytes()` copies) for the backend object's lifetime,
+                    # even on haplotype-only streams where
+                    # `mixed_realign_window` is never called and the cache
+                    # can never hit. `try/finally` so this also runs if the
+                    # generator is abandoned (e.g. `break`d out of) rather
+                    # than exhausted.
+                    backend._window_cache = None
             elif self._prefetch_strategy == "svar2_engine":
                 # PR-3 Task 3: drive a `Svar2StreamEngine` (Task 2) in lockstep with
                 # `_plan()`. The engine RESETS its batch boundaries at every
@@ -2312,6 +2666,12 @@ class StreamingDataset:
                 assert isinstance(self._backend, _Svar2Backend), (
                     '"svar2_engine" prefetch strategy requires the SVAR2 backend'
                 )
+                if self._track_backend is not None:
+                    raise NotImplementedError(
+                        "StreamingDataset tracks= is not wired for the test-only "
+                        '"svar2_engine" prefetch strategy; the default "sync" '
+                        "strategy supports it (issue #375)."
+                    )
                 backend = self._backend
                 sb_rows = backend._super_batch_rows
                 plan_jobs: list[tuple[int, NDArray[np.intp], int, int]] = []
@@ -3751,8 +4111,8 @@ class _Svar2Backend:
     readahead.
     """
 
-    #: Mixed variants+tracks not wired for this backend yet (issue #375).
-    supports_mixed_tracks: ClassVar[bool] = False
+    #: Mixed variants+tracks is wired for this backend (issue #375, Track A).
+    supports_mixed_tracks: ClassVar[bool] = True
 
     _default_strategy = "sync"
 
@@ -3818,6 +4178,16 @@ class _Svar2Backend:
         # Important 1 (Wave B PR-B3a review): placeholder, same as `available_var_fields`
         # above -- `with_seqs("variants")` is guarded to raise before this would matter.
         self.servable_var_fields = list(self.available_var_fields)
+        # Issue #375 Track A perf: the "sync" drive calls `read_window` once per
+        # window, then (when mixed tracks are on) `mixed_realign_window` calls
+        # `read_window` again for the SAME `(r_idx, s_idx)` to compute
+        # `t_ends_ext` -- a second live `svar2_read_window`/`find_ranges` Rust
+        # query that would otherwise duplicate the first. Memoize the single
+        # most recent window here so the second call is a cache hit instead of
+        # a second round-trip. Keyed on the coerced arrays' bytes, not
+        # identity, since the drive and the seam each build their own `s_idx`
+        # array with the same values but not the same object.
+        self._window_cache: tuple[tuple[bytes, bytes], dict[str, object]] | None = None
 
     def _contig_of(self, r_idx: NDArray[np.intp]) -> tuple[int, str]:
         contig_idxs = self._regions[r_idx, 0]
@@ -3892,6 +4262,24 @@ class _Svar2Backend:
 
         r_idx = np.asarray(r_idx, np.intp)
         s_idx = np.asarray(s_idx, np.intp)
+        # Issue #375 Track A perf: memoized so `mixed_realign_window`'s own
+        # `read_window(r_idx, s_idx)` call for the SAME window (the "sync"
+        # drive calls this once per window; the mixed seam calls it again to
+        # compute `t_ends_ext`) is a cache hit instead of a second live Rust
+        # `find_ranges` query. See `__init__`'s `_window_cache` comment.
+        cache_key = (r_idx.tobytes(), s_idx.tobytes())
+        # Snapshot into a local rather than reading `self._window_cache`
+        # twice (fix round 1, L1): two separate loads of a mutable attribute
+        # would let a writer landing between the key comparison and the
+        # value read hand back a window whose key was never actually
+        # checked. No such caller exists today (single-threaded generator),
+        # but a `read_window` memo is exactly what a future threaded drive
+        # would reuse, and the failure mode -- silently wrong data -- is not
+        # one to leave for that caller to discover. Also one fewer attribute
+        # load on the hot path.
+        cache = self._window_cache
+        if cache is not None and cache[0] == cache_key:
+            return cache[1]
         contig_idx, contig = self._contig_of(r_idx)
         rb = self._regions[r_idx, 1:3]  # (n_reg, 2) int
         starts = np.ascontiguousarray(rb[:, 0], np.uint32)
@@ -3901,7 +4289,7 @@ class _Svar2Backend:
         vk_snp, vk_indel, dense_snp, dense_indel, sample_cols = svar2_read_window(
             self._store, contig, starts, ends, phys
         )
-        return {
+        window = {
             "contig_idx": contig_idx,
             "region_bounds": np.ascontiguousarray(rb, np.int32),  # (n_reg, 2)
             "orig_samples": np.asarray(sample_cols, np.int64),  # (n_s,)
@@ -3910,6 +4298,8 @@ class _Svar2Backend:
             "dense_snp": np.asarray(dense_snp, np.int64).reshape(n_reg, 2),
             "dense_indel": np.asarray(dense_indel, np.int64).reshape(n_reg, 2),
         }
+        self._window_cache = (cache_key, window)
+        return window
 
     def _gather_rows(
         self,
@@ -4054,6 +4444,89 @@ class _Svar2Backend:
         widths = self._regions[r_idx, 2] - self._regions[r_idx, 1]
         mean_width = int(max(1, widths.mean())) if len(widths) else 1
         return int(n_rows) * self.ploidy * mean_width
+
+    def mixed_realign_window(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        t_starts: NDArray[np.int32],
+        t_ends: NDArray[np.int32],
+        row_starts: NDArray[np.int32],
+        row_ends: NDArray[np.int32],
+    ) -> tuple[_MixedRealign, NDArray[np.int32]]:
+        """One window's split-kernel realign state + deletion-extended track ends.
+
+        Same contract and the same deletion-extension formula as
+        `_Svar1Backend.mixed_realign_window` -- see that docstring for why the
+        extension exists and why it deliberately does not match the written
+        WRITER's `chromEnd`. The source of `diffs` differs: SVAR1 walks a CSR
+        in numpy (`get_diffs_sparse`), SVAR2 asks the read-bound kernel
+        (`hap_diffs_from_svar2_readbound`), which is the same call the written
+        SVAR2 path makes (`Svar2Haps._haplotype_diffs`).
+
+        Unlike SVAR1, this reads NEITHER `row_starts`/`row_ends` NOR
+        `t_starts`: the read-bound kernel takes its query bounds from
+        `read_window`'s `region_bounds`, i.e. the RAW unjittered
+        `self._regions` -- not the caller-supplied (possibly
+        jitter-translated) row/track bounds. That is equivalent to honoring
+        `row_starts`/`row_ends` ONLY while `jitter == 0`, which
+        `_iter_batches`' jitter+realign guard (`_streaming.py:1790`) enforces
+        today. Relaxing that guard requires threading `row_starts`/`row_ends`
+        into the gather here, mirroring how SVAR1's `get_diffs_sparse` call
+        takes `q_starts=row_starts, q_ends=row_ends`.
+        """
+        from .._threads import should_parallelize
+        from ..genvarloader import hap_diffs_from_svar2_readbound
+        from ._svar2_haps import _range_work_bytes
+
+        r_idx = np.asarray(r_idx, np.intp)
+        s_idx = np.asarray(s_idx, np.intp)
+        n_s = len(s_idx)
+        n_rows = len(r_idx) * n_s
+        P = self.ploidy
+
+        window = self.read_window(r_idx, s_idx)
+        gathered = self._gather_rows(r_idx, s_idx, window, 0, n_rows)
+        gi = tuple(gathered[:7])
+        shifts = np.asarray(gathered[7], np.int32)
+        contig_idx = cast(int, window["contig_idx"])
+        contig = self._contigs[contig_idx]
+
+        diffs = np.asarray(
+            hap_diffs_from_svar2_readbound(
+                self._store,
+                contig,
+                gi[0],
+                gi[1],
+                gi[2],
+                gi[3],
+                gi[4],
+                gi[5],
+                gi[6],
+                P,
+                False,
+                should_parallelize(_range_work_bytes(n_rows, P, gi)),
+                None,
+            ),
+            np.int32,
+        ).reshape(n_rows, P)
+
+        max_del_row = -diffs.clip(max=0).min(1)
+        region_max_del = max_del_row.reshape(len(r_idx), n_s).max(1)
+        t_ends_ext = np.ascontiguousarray(
+            t_ends.astype(np.int64) + region_max_del, np.int32
+        )
+        return (
+            _Svar2Realign(
+                store=self._store,
+                contig=contig,
+                ploidy=P,
+                gi=gi,
+                diffs=diffs,
+                shifts=shifts,
+            ),
+            t_ends_ext,
+        )
 
 
 class _VcfBackend:
