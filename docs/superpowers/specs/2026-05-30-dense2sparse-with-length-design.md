@@ -36,12 +36,12 @@ input types (VCF, PGEN, SVAR) agree on the per-region `chromEnd`.
 ```python
 # genoray._svar
 def _dense2sparse_with_length(
-    genos: NDArray[np.integer],      # (samples, ploidy, variants) — full window
-    var_idxs: NDArray[V_IDX_TYPE],   # (variants,) — global, window-aligned
-    q_start: int,                    # 0-based, original (unextended) query start
-    q_end: int,                      # 0-based exclusive, original query end
-    v_starts: NDArray[np.int32],     # POS - 1, window-aligned with var_idxs
-    ilens: NDArray[np.int32],        # ILEN (ALT - REF length), window-aligned
+    genos: NDArray[np.integer],  # (samples, ploidy, variants) — full window
+    var_idxs: NDArray[V_IDX_TYPE],  # (variants,) — global, window-aligned
+    q_start: int,  # 0-based, original (unextended) query start
+    q_end: int,  # 0-based exclusive, original query end
+    v_starts: NDArray[np.int32],  # POS - 1, window-aligned with var_idxs
+    ilens: NDArray[np.int32],  # ILEN (ALT - REF length), window-aligned
     dosages: NDArray | None = None,
 ) -> Ragged[V_IDX_TYPE] | tuple[Ragged, Ragged]:
     """Convert a dense with_length window into per-haplotype-minimal sparse output,
@@ -68,12 +68,12 @@ its current contract — it consumes `(list[Ragged], region_end, desc)` per regi
 
 ```python
 def _window_to_sparse(
-    genos: NDArray[np.integer],      # (samples, ploidy, variants) — full region window
-    var_idxs: NDArray[V_IDX_TYPE],   # (variants,) — global, window-aligned
+    genos: NDArray[np.integer],  # (samples, ploidy, variants) — full region window
+    var_idxs: NDArray[V_IDX_TYPE],  # (variants,) — global, window-aligned
     q_start: int,
     q_end: int,
-    v_starts: NDArray[np.int32],     # POS - 1, window-aligned
-    ilens: NDArray[np.int32],        # ILEN first-elem, window-aligned
+    v_starts: NDArray[np.int32],  # POS - 1, window-aligned
+    ilens: NDArray[np.int32],  # ILEN first-elem, window-aligned
     extend_to_length: bool,
 ) -> Ragged:
     if extend_to_length:
@@ -111,7 +111,7 @@ Keeping the yielded type as `list[Ragged]` for both paths leaves
 Each generator computes, once from its index:
 
 ```python
-v_ends = POS - ILEN_first.clip(upper_bound=0)   # = POS + deletion length
+v_ends = POS - ILEN_first.clip(upper_bound=0)  # = POS + deletion length
 ```
 
 For each region, `region_end = v_ends[max retained global v_idx]`, falling back to

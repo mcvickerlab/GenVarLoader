@@ -193,6 +193,7 @@ py-spy/perf attribute time to that path only.
 Prints: per_call_s=<median-ish mean over K warm calls>
 For svar1, the 3-region .gvl is written ONCE before the loop (we profile the
 query, not gvl.write)."""
+
 import sys
 import time
 
@@ -206,6 +207,7 @@ REGIONS = [(20_000_000, 20_001_000), (30_000_000, 30_000_500), (40_000_000, 40_0
 
 def _ref():
     import pysam
+
     rb = pysam.FastaFile(REF).fetch(CHROM).encode()
     return np.frombuffer(rb, np.uint8), np.array([0, len(rb)], np.int64)
 
@@ -213,12 +215,15 @@ def _ref():
 def make_svar2(cohort):
     from genoray import SparseVar2
     from genvarloader._dataset._svar2_source import SparseVar2Source
+
     src = SparseVar2Source(SparseVar2(f"{W}/{cohort}.svar2"))
     ru, ro = _ref()
 
     def call():
-        src.reconstruct(CHROM, REGIONS, ru, ro, pad_char=ord("N"),
-                        shifts=None, output_length=-1)
+        src.reconstruct(
+            CHROM, REGIONS, ru, ro, pad_char=ord("N"), shifts=None, output_length=-1
+        )
+
     return call
 
 
@@ -226,16 +231,22 @@ def make_svar1(cohort):
     import polars as pl
     import genvarloader as gvl
     from genoray import SparseVar2
+
     n_s = SparseVar2(f"{W}/{cohort}.svar2").n_samples
-    bed = pl.DataFrame({"chrom": [CHROM] * len(REGIONS),
-                        "chromStart": [s for s, _ in REGIONS],
-                        "chromEnd": [e for _, e in REGIONS]})
+    bed = pl.DataFrame(
+        {
+            "chrom": [CHROM] * len(REGIONS),
+            "chromStart": [s for s, _ in REGIONS],
+            "chromEnd": [e for _, e in REGIONS],
+        }
+    )
     ds_path = f"{W}/{cohort}.gvl"
     gvl.write(ds_path, bed, variants=f"{W}/{cohort}.svar", overwrite=True)  # ONCE
     ds_hap = gvl.Dataset.open(ds_path, reference=REF).with_seqs("haplotypes")
 
     def call():
-        ds_hap[:len(REGIONS), :n_s]
+        ds_hap[: len(REGIONS), :n_s]
+
     return call
 
 
@@ -290,6 +301,7 @@ self-time by LEAF frame. A leaf frame is Python iff it contains '.py:'.
 
   python split_folded.py <folded.txt>
 """
+
 import sys
 from collections import Counter
 
@@ -321,8 +333,11 @@ def main(path):
                 nat += n
     tot = py + nat
     if tot == 0:
-        print("no samples parsed"); return
-    print(f"python_pct={100 * py / tot:.1f} native_pct={100 * nat / tot:.1f} total_samples={tot}")
+        print("no samples parsed")
+        return
+    print(
+        f"python_pct={100 * py / tot:.1f} native_pct={100 * nat / tot:.1f} total_samples={tot}"
+    )
     print("top-15 leaf frames (self-time):")
     for leaf, n in leaves.most_common(15):
         print(f"  {100 * n / tot:5.1f}%  [{classed[leaf]:6s}]  {leaf}")
@@ -585,6 +600,7 @@ Fixed dataset family (subsampled somatic), same 3 regions, warm, median N=5.
 
   python e2_bench.py > tmp/svar2_mvp/prof_out/e2_curve.tsv
 """
+
 import time
 from statistics import median
 
@@ -627,6 +643,7 @@ def variants_at(S):
 
 def main():
     import pysam
+
     rb = pysam.FastaFile(REF).fetch(CHROM).encode()
     ru, ro = np.frombuffer(rb, np.uint8), np.array([0, len(rb)], np.int64)
     print("S\tvariants\tsvar1_hap_s\tsvar2_hap_s")
@@ -635,14 +652,21 @@ def main():
         sv2 = SparseVar2(f"{p}.svar2")
         src = SparseVar2Source(sv2)
         n_s = sv2.n_samples
-        svar2 = timed(lambda: src.reconstruct(CHROM, REGIONS, ru, ro,
-                                               pad_char=ord("N"), shifts=None, output_length=-1))
-        bed = pl.DataFrame({"chrom": [CHROM] * len(REGIONS),
-                            "chromStart": [s for s, _ in REGIONS],
-                            "chromEnd": [e for _, e in REGIONS]})
+        svar2 = timed(
+            lambda: src.reconstruct(
+                CHROM, REGIONS, ru, ro, pad_char=ord("N"), shifts=None, output_length=-1
+            )
+        )
+        bed = pl.DataFrame(
+            {
+                "chrom": [CHROM] * len(REGIONS),
+                "chromStart": [s for s, _ in REGIONS],
+                "chromEnd": [e for _, e in REGIONS],
+            }
+        )
         gvl.write(f"{p}.gvl", bed, variants=f"{p}.svar", overwrite=True)
         ds_hap = gvl.Dataset.open(f"{p}.gvl", reference=REF).with_seqs("haplotypes")
-        svar1 = timed(lambda: ds_hap[:len(REGIONS), :n_s])
+        svar1 = timed(lambda: ds_hap[: len(REGIONS), :n_s])
         print(f"{S}\t{variants_at(S)}\t{svar1:.4f}\t{svar2:.4f}", flush=True)
 
 
@@ -707,6 +731,7 @@ Germline (high-AF -> large n_dense_variants) is the stress cohort.
 
   python e3_probe.py > tmp/svar2_mvp/prof_out/e3.tsv
 """
+
 import time
 from statistics import median
 
@@ -727,7 +752,9 @@ def timed(fn):
     fn()
     ts = []
     for _ in range(N):
-        t0 = time.perf_counter(); fn(); ts.append(time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        fn()
+        ts.append(time.perf_counter() - t0)
     return median(ts)
 
 
@@ -743,8 +770,11 @@ def main():
         # dense variants actually spanned by this region (dense_range gives [lo,hi) per region)
         dr = np.asarray(d["dense_range"]).reshape(-1, 2)
         n_dense = int((dr[:, 1] - dr[:, 0]).sum())
-        t = timed(lambda: src.reconstruct(CHROM, regs, ru, ro,
-                                          pad_char=ord("N"), shifts=None, output_length=-1))
+        t = timed(
+            lambda: src.reconstruct(
+                CHROM, regs, ru, ro, pad_char=ord("N"), shifts=None, output_length=-1
+            )
+        )
         print(f"{w}\t{n_dense}\t{t:.4f}", flush=True)
 
 
@@ -796,6 +826,7 @@ Create `tmp/svar2_mvp/e4_convert_driver.py`:
   python e4_convert_driver.py <bcf> <chrom> <out_prefix> <max_threads>
 Prints: build_wall_s=<x>
 Set GENORAY_SAMPLE_INTERVAL in the environment to enable genoray's sampler."""
+
 import sys
 import time
 import subprocess
@@ -806,12 +837,20 @@ REF = "/carter/shared/data/gdc/resources/GRCh38.d1.vd1.fa"
 
 
 def main(bcf, chrom, out_prefix, max_threads):
-    samples = subprocess.run(["bcftools", "query", "-l", bcf],
-                             capture_output=True, text=True, check=True).stdout.split()
+    samples = subprocess.run(
+        ["bcftools", "query", "-l", bcf], capture_output=True, text=True, check=True
+    ).stdout.split()
     t0 = time.perf_counter()
     _core.run_conversion_pipeline(
-        bcf, REF, [chrom], f"{out_prefix}.svar2", samples,
-        25_000, 2, int(max_threads), 8 * 1024 * 1024,
+        bcf,
+        REF,
+        [chrom],
+        f"{out_prefix}.svar2",
+        samples,
+        25_000,
+        2,
+        int(max_threads),
+        8 * 1024 * 1024,
     )
     print(f"build_wall_s={time.perf_counter() - t0:.2f}")
 

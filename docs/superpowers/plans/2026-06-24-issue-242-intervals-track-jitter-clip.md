@@ -287,9 +287,7 @@ to:
 
 Change the first-start initialization (lines ~34-36):
 ```python
-        cur = qstart + draw(
-            st.integers(min_value=0, max_value=10)
-        )  # first start >= qstart
+cur = qstart + draw(st.integers(min_value=0, max_value=10))  # first start >= qstart
 ```
 to:
 ```python

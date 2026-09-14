@@ -1212,95 +1212,93 @@ class RangesStream:
 Then add the method to `_BatchQueryMixin`:
 
 ```python
-    def _find_ranges_chunked(
-        self,
-        contig: str,
-        starts: "ArrayLike",
-        ends: "ArrayLike",
-        samples: "ArrayLike | None" = None,
-        *,
-        max_mem: int | None = None,
-    ) -> RangesStream:
-        """Chunked, memory-bounded ``_find_ranges``.
+def _find_ranges_chunked(
+    self,
+    contig: str,
+    starts: "ArrayLike",
+    ends: "ArrayLike",
+    samples: "ArrayLike | None" = None,
+    *,
+    max_mem: int | None = None,
+) -> RangesStream:
+    """Chunked, memory-bounded ``_find_ranges``.
 
-        ``starts``/``ends`` and ``samples`` behave as in :meth:`read_ranges`.
+    ``starts``/``ends`` and ``samples`` behave as in :meth:`read_ranges`.
 
-        The var_key payload is ``n_regions * n_samples * ploidy * 2`` int64
-        pairs per channel, which is tens of GiB at cohort scale. This splits it
-        along the SAMPLE axis -- not the region axis -- because the search is
-        column-outer: chunking regions would re-sweep the whole packed store per
-        chunk, while chunking samples keeps a single sweep.
+    The var_key payload is ``n_regions * n_samples * ploidy * 2`` int64
+    pairs per channel, which is tens of GiB at cohort scale. This splits it
+    along the SAMPLE axis -- not the region axis -- because the search is
+    column-outer: chunking regions would re-sweep the whole packed store per
+    chunk, while chunking samples keeps a single sweep.
 
-        Args:
-            contig: Contig name.
-            starts: 0-based start positions of the query regions.
-            ends: 0-based, exclusive end positions of the query regions.
-            samples: Sample names selecting (and reordering) a subset.
-            max_mem: Approximate byte budget for one chunk's payload. ``None``
-                yields a single chunk covering every sample.
+    Args:
+        contig: Contig name.
+        starts: 0-based start positions of the query regions.
+        ends: 0-based, exclusive end positions of the query regions.
+        samples: Sample names selecting (and reordering) a subset.
+        max_mem: Approximate byte budget for one chunk's payload. ``None``
+            yields a single chunk covering every sample.
 
-        Returns:
-            A :class:`RangesStream` whose ``chunks`` generator yields
-            :class:`RangesChunk` in ascending ``sample_start`` order.
+    Returns:
+        A :class:`RangesStream` whose ``chunks`` generator yields
+        :class:`RangesChunk` in ascending ``sample_start`` order.
 
-        Raises:
-            ValueError: If ``max_mem`` cannot fit a single sample's payload, or
-                if the contig's largest deletion overflows the max-end key
-                packing width.
-        """
-        reg = self._regions(starts, ends)
-        sample_idxs = self._sample_idxs(samples)
-        reader = self._reader(contig)
-        header = reader.find_ranges_header(reg, sample_idxs)
+    Raises:
+        ValueError: If ``max_mem`` cannot fit a single sample's payload, or
+            if the contig's largest deletion overflows the max-end key
+            packing width.
+    """
+    reg = self._regions(starts, ends)
+    sample_idxs = self._sample_idxs(samples)
+    reader = self._reader(contig)
+    header = reader.find_ranges_header(reg, sample_idxs)
 
-        n_regions = int(header["n_regions"])
-        n_samples = int(header["n_samples"])
-        ploidy = int(header["ploidy"])
+    n_regions = int(header["n_regions"])
+    n_samples = int(header["n_samples"])
+    ploidy = int(header["ploidy"])
 
-        # Both channels, 2 endpoints, int64. The 2x is slop for the transient
-        # the binding holds while handing the arrays back.
-        bytes_per_sample = n_regions * ploidy * 2 * 8 * 2
-        if max_mem is None:
-            per = max(n_samples, 1)
-        else:
-            per = int(max_mem) // (2 * bytes_per_sample) if bytes_per_sample else n_samples
-            if per < 1:
-                raise ValueError(
-                    f"max_mem ({int(max_mem)} bytes) is too small for even one "
-                    f"sample of {n_regions} regions at ploidy {ploidy}: needs at "
-                    f"least {2 * bytes_per_sample} bytes."
-                )
-            per = min(per, max(n_samples, 1))
+    # Both channels, 2 endpoints, int64. The 2x is slop for the transient
+    # the binding holds while handing the arrays back.
+    bytes_per_sample = n_regions * ploidy * 2 * 8 * 2
+    if max_mem is None:
+        per = max(n_samples, 1)
+    else:
+        per = int(max_mem) // (2 * bytes_per_sample) if bytes_per_sample else n_samples
+        if per < 1:
+            raise ValueError(
+                f"max_mem ({int(max_mem)} bytes) is too small for even one "
+                f"sample of {n_regions} regions at ploidy {ploidy}: needs at "
+                f"least {2 * bytes_per_sample} bytes."
+            )
+        per = min(per, max(n_samples, 1))
 
-        def _gen() -> "Iterator[RangesChunk]":
-            for s0 in range(0, n_samples, per):
-                s1 = min(s0 + per, n_samples)
-                d = reader.find_ranges_chunk(
-                    reg, sample_idxs, s0 * ploidy, s1 * ploidy
-                )
-                cs = s1 - s0
-                shape = (cs, ploidy, n_regions, 2)
-                yield RangesChunk(
-                    sample_start=s0,
-                    n_samples=cs,
-                    vk_snp_range=np.asarray(d["vk_snp_range"]).reshape(shape),
-                    vk_indel_range=np.asarray(d["vk_indel_range"]).reshape(shape),
-                    max_end_keys=np.asarray(d["max_end_keys"], np.int64),
-                )
+    def _gen() -> "Iterator[RangesChunk]":
+        for s0 in range(0, n_samples, per):
+            s1 = min(s0 + per, n_samples)
+            d = reader.find_ranges_chunk(reg, sample_idxs, s0 * ploidy, s1 * ploidy)
+            cs = s1 - s0
+            shape = (cs, ploidy, n_regions, 2)
+            yield RangesChunk(
+                sample_start=s0,
+                n_samples=cs,
+                vk_snp_range=np.asarray(d["vk_snp_range"]).reshape(shape),
+                vk_indel_range=np.asarray(d["vk_indel_range"]).reshape(shape),
+                max_end_keys=np.asarray(d["max_end_keys"], np.int64),
+            )
 
-        return RangesStream(
-            n_regions=n_regions,
-            n_samples=n_samples,
-            ploidy=ploidy,
-            samples_per_chunk=per,
-            region_starts=np.asarray(header["region_starts"]),
-            dense_range=np.asarray(header["dense_range"]),
-            dense_snp_range=np.asarray(header["dense_snp_range"]),
-            dense_indel_range=np.asarray(header["dense_indel_range"]),
-            sample_cols=np.asarray(header["sample_cols"]),
-            dense_max_end_keys=np.asarray(header["dense_max_end_keys"], np.int64),
-            chunks=_gen(),
-        )
+    return RangesStream(
+        n_regions=n_regions,
+        n_samples=n_samples,
+        ploidy=ploidy,
+        samples_per_chunk=per,
+        region_starts=np.asarray(header["region_starts"]),
+        dense_range=np.asarray(header["dense_range"]),
+        dense_snp_range=np.asarray(header["dense_snp_range"]),
+        dense_indel_range=np.asarray(header["dense_indel_range"]),
+        sample_cols=np.asarray(header["sample_cols"]),
+        dense_max_end_keys=np.asarray(header["dense_max_end_keys"], np.int64),
+        chunks=_gen(),
+    )
 ```
 
 - [ ] **Step 4: Run the tests — expect PASS**
@@ -1454,9 +1452,7 @@ def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> in
     return 2 * n_regions * n_samples * ploidy * 2 * 8
 
 
-def _svar2_preflight(
-    out_dir: Path, n_regions: int, n_samples: int, ploidy: int
-) -> int:
+def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
     """Log the projected ``svar2_ranges`` cache size and warn if disk is short.
 
     Warns rather than raising: free-space reporting is unreliable on some
@@ -1682,54 +1678,50 @@ Remove the entire function at `python/genvarloader/_dataset/_write.py:1067-1121`
 Replace the loop body in `_write_from_svar2` (currently `_write.py:1178-1200`) with:
 
 ```python
-    max_ends = np.empty(R, np.int32)
-    contig_offset = 0
-    pbar = tqdm(total=R, unit=" region")
-    for (c,), df in bed.partition_by(
-        "chrom", as_dict=True, maintain_order=True
-    ).items():
-        c = cast(str, c)
-        pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
-        lo, hi = contig_offset, contig_offset + df.height
-        rc = df.height
-        starts = df["chromStart"].to_numpy()
-        ends = df["chromEnd"].to_numpy()
-        # extend_to_length is validated at function entry (False raises); the
-        # read-bound kernel sizes haplotype output at read time.
-        stream = svar2._find_ranges_chunked(
-            c, starts, ends, samples=samples, max_mem=max_mem
-        )
-        dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
-        dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(
-            rc, 2
-        )
+max_ends = np.empty(R, np.int32)
+contig_offset = 0
+pbar = tqdm(total=R, unit=" region")
+for (c,), df in bed.partition_by("chrom", as_dict=True, maintain_order=True).items():
+    c = cast(str, c)
+    pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
+    lo, hi = contig_offset, contig_offset + df.height
+    rc = df.height
+    starts = df["chromStart"].to_numpy()
+    ends = df["chromEnd"].to_numpy()
+    # extend_to_length is validated at function entry (False raises); the
+    # read-bound kernel sizes haplotype output at read time.
+    stream = svar2._find_ranges_chunked(
+        c, starts, ends, samples=samples, max_mem=max_mem
+    )
+    dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
+    dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(rc, 2)
 
-        # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity picks
-        # the highest-POSITION variant (ties by end), so a lower-position variant
-        # with a longer deletion must not win the cross-chunk reduction.
-        keys = stream.dense_max_end_keys.copy()
-        for ch in stream.chunks:
-            s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
-            # Chunks are hap-major (samples, ploidy, regions, 2); the cache is
-            # region-major. transpose() is a view -- numpy copies straight into
-            # the memmap with no intermediate array.
-            vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
-            vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
-            np.maximum(keys, ch.max_end_keys, out=keys)
-            # Bound the dirty page cache: at cohort scale these memmaps are tens
-            # of GiB and the kernel would otherwise reclaim at unpredictable times.
-            vk_snp.flush()
-            vk_indel.flush()
-            pbar.update(rc * ch.n_samples / S)
+    # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity picks
+    # the highest-POSITION variant (ties by end), so a lower-position variant
+    # with a longer deletion must not win the cross-chunk reduction.
+    keys = stream.dense_max_end_keys.copy()
+    for ch in stream.chunks:
+        s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
+        # Chunks are hap-major (samples, ploidy, regions, 2); the cache is
+        # region-major. transpose() is a view -- numpy copies straight into
+        # the memmap with no intermediate array.
+        vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
+        vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
+        np.maximum(keys, ch.max_end_keys, out=keys)
+        # Bound the dirty page cache: at cohort scale these memmaps are tens
+        # of GiB and the kernel would otherwise reclaim at unpredictable times.
+        vk_snp.flush()
+        vk_indel.flush()
+        pbar.update(rc * ch.n_samples / S)
 
-        mask = (1 << MAX_END_SHIFT) - 1
-        region_ends = np.asarray(ends, np.int64).copy()
-        has = keys > 0  # 0 is the "no variant in this region" sentinel
-        region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
-        max_ends[lo:hi] = region_ends.astype(np.int32)
+    mask = (1 << MAX_END_SHIFT) - 1
+    region_ends = np.asarray(ends, np.int64).copy()
+    has = keys > 0  # 0 is the "no variant in this region" sentinel
+    region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
+    max_ends[lo:hi] = region_ends.astype(np.int32)
 
-        contig_offset += df.height
-    pbar.close()
+    contig_offset += df.height
+pbar.close()
 ```
 
 Add the import near the other genoray imports at the top of `_write.py`:

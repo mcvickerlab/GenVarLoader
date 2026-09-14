@@ -421,16 +421,20 @@ Append to `tests/parity/strategies.py`:
 
 ```python
 @st.composite
-def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
-                 max_total_unique=12):
+def _sparse_geno(
+    draw, max_queries=4, max_ploidy=2, max_vars_per_group=5, max_total_unique=12
+):
     """Shared sparse-genotype layout: returns
     (geno_offset_idx (q,p) int64, geno_v_idxs int32, geno_offsets (n+1,) int64,
      v_starts int32, ilens int32, q_starts int32, q_ends int32).
     geno_offset_idx is arange so each (q,p) row maps to its own offset slice."""
     n_unique = draw(st.integers(min_value=1, max_value=max_total_unique))
     v_starts = np.sort(
-        draw(st.lists(st.integers(0, 1000), min_size=n_unique, max_size=n_unique)
-             .map(np.array))
+        draw(
+            st.lists(st.integers(0, 1000), min_size=n_unique, max_size=n_unique).map(
+                np.array
+            )
+        )
     ).astype(np.int32)
     ilens = np.array(
         draw(st.lists(st.integers(-5, 5), min_size=n_unique, max_size=n_unique)),
@@ -443,8 +447,9 @@ def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
     v_idx_list = []
     for c in counts:
         # sorted variant indices within a group (reconstruction assumes sorted pos)
-        idxs = sorted(draw(st.lists(st.integers(0, n_unique - 1),
-                                    min_size=c, max_size=c)))
+        idxs = sorted(
+            draw(st.lists(st.integers(0, n_unique - 1), min_size=c, max_size=c))
+        )
         v_idx_list.extend(idxs)
     geno_v_idxs = np.array(v_idx_list, dtype=np.int32)
     geno_offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
@@ -453,8 +458,15 @@ def _sparse_geno(draw, max_queries=4, max_ploidy=2, max_vars_per_group=5,
         draw(st.lists(st.integers(0, 800), min_size=n_q, max_size=n_q)), np.int32
     )
     q_ends = (q_starts + draw(st.integers(1, 200))).astype(np.int32)
-    return (geno_offset_idx, geno_v_idxs, geno_offsets, v_starts, ilens,
-            q_starts, q_ends)
+    return (
+        geno_offset_idx,
+        geno_v_idxs,
+        geno_offsets,
+        v_starts,
+        ilens,
+        q_starts,
+        q_ends,
+    )
 
 
 @st.composite
@@ -978,7 +990,9 @@ def _gather_rows_numba(geno_offset_idx, geno_offsets, geno_v_idxs):
     )
 
 
-register("gather_rows", numba=_gather_rows_numba, rust=_gather_rows_rust, default="rust")
+register(
+    "gather_rows", numba=_gather_rows_numba, rust=_gather_rows_rust, default="rust"
+)
 ```
 
 3. Replace the body of the existing `_gather_rows(...)` (line 538) with:
@@ -1019,7 +1033,9 @@ def gather_rows_inputs(draw):
         np.int64,
     )
     twod = draw(st.booleans())
-    off = offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
+    off = (
+        offsets if not twod else np.stack([offsets[:-1], offsets[1:]]).astype(np.int64)
+    )
     return (goi, off, data)
 ```
 
@@ -1160,7 +1176,12 @@ Expected: PASS.
 In `_flat_variants.py`: add `from ..genvarloader import gather_alleles as _gather_alleles_rust`; rename njit to `_gather_alleles_numba`; add a thin dispatch wrapper named `_gather_alleles` (preserving the existing internal call name) + register:
 
 ```python
-register("gather_alleles", numba=_gather_alleles_numba, rust=_gather_alleles_rust, default="rust")
+register(
+    "gather_alleles",
+    numba=_gather_alleles_numba,
+    rust=_gather_alleles_rust,
+    default="rust",
+)
 
 
 def _gather_alleles(v_idxs, allele_bytes, allele_offsets):
@@ -1323,8 +1344,18 @@ Expected: PASS.
 In `_flat_variants.py`: import both rust fns; rename njit → `_compact_keep_numba`; add:
 
 ```python
-register("compact_keep_i32", numba=_compact_keep_numba, rust=_compact_keep_i32_rust, default="rust")
-register("compact_keep_f32", numba=_compact_keep_numba, rust=_compact_keep_f32_rust, default="rust")
+register(
+    "compact_keep_i32",
+    numba=_compact_keep_numba,
+    rust=_compact_keep_i32_rust,
+    default="rust",
+)
+register(
+    "compact_keep_f32",
+    numba=_compact_keep_numba,
+    rust=_compact_keep_f32_rust,
+    default="rust",
+)
 
 
 def _compact_keep(v_idxs, row_offsets, keep):
@@ -1332,8 +1363,12 @@ def _compact_keep(v_idxs, row_offsets, keep):
     row_offsets = np.ascontiguousarray(row_offsets, np.int64)
     keep = np.ascontiguousarray(keep, np.bool_)
     if np.issubdtype(values.dtype, np.floating):
-        return get("compact_keep_f32")(values.astype(np.float32, copy=False), row_offsets, keep)
-    return get("compact_keep_i32")(values.astype(np.int32, copy=False), row_offsets, keep)
+        return get("compact_keep_f32")(
+            values.astype(np.float32, copy=False), row_offsets, keep
+        )
+    return get("compact_keep_i32")(
+        values.astype(np.int32, copy=False), row_offsets, keep
+    )
 ```
 
 If Step 1 found a float64 dosage/ccf dtype, the `.astype(np.float32)` would lose precision and break parity — in that case add a `compact_keep_f64` core/wrapper and route float64 to it instead of down-casting. The numba reference preserves the input dtype, so the parity test (which feeds the same dtype to both) will catch any mismatch.
@@ -1351,13 +1386,22 @@ def compact_keep_inputs(draw, dtype):
     total = int(row_offsets[-1])
     if np.issubdtype(np.dtype(dtype), np.floating):
         values = np.array(
-            draw(st.lists(st.floats(width=32, allow_nan=False, allow_infinity=False),
-                          min_size=total, max_size=total)), dtype)
+            draw(
+                st.lists(
+                    st.floats(width=32, allow_nan=False, allow_infinity=False),
+                    min_size=total,
+                    max_size=total,
+                )
+            ),
+            dtype,
+        )
     else:
         values = np.array(
-            draw(st.lists(st.integers(0, 1000), min_size=total, max_size=total)), dtype)
+            draw(st.lists(st.integers(0, 1000), min_size=total, max_size=total)), dtype
+        )
     keep = np.array(
-        draw(st.lists(st.booleans(), min_size=total, max_size=total)), np.bool_)
+        draw(st.lists(st.booleans(), min_size=total, max_size=total)), np.bool_
+    )
     return (values, row_offsets, keep)
 ```
 
@@ -1647,7 +1691,8 @@ def test_variants_getitem_parity_and_kernels_invoked(variants_dataset, monkeypat
     # rust + spy
     monkeypatch.setenv("GVL_BACKEND", "rust")
     monkeypatch.setattr(
-        _flat_variants, "get",
+        _flat_variants,
+        "get",
         lambda name: spy if name == "gather_rows" else _dispatch.get(name),
     )
     out_rust = _run_variants_getitem(variants_dataset)

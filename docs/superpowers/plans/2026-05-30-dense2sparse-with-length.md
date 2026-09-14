@@ -229,9 +229,7 @@ def _vcf_region_chunks(
         ends = df["chromEnd"].to_numpy()
         # unextended in-range variant indices, split per region
         v_idx, v_offsets = vcf._var_idxs(contig, starts, ends)
-        unextended_idxs = np.array_split(
-            v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
-        )
+        unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
 
         contig_desc = f"Processing genotypes for {df.height} regions on contig {contig}"
         first_in_contig = True
@@ -392,9 +390,7 @@ def _pgen_region_chunks(
             region_iter = pgen._chunk_ranges_with_length(contig, starts, ends, max_mem)
         else:
             v_idx, v_offsets = pgen.var_idxs(contig, starts, ends)
-            unextended_idxs = np.array_split(
-                v_idx.astype(V_IDX_TYPE), v_offsets[1:-1]
-            )
+            unextended_idxs = np.array_split(v_idx.astype(V_IDX_TYPE), v_offsets[1:-1])
             region_iter = pgen.chunk_ranges(contig, starts, ends, max_mem)
 
         for ri, range_ in enumerate(region_iter):
