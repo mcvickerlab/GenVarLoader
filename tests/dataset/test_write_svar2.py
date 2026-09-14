@@ -20,17 +20,21 @@ from genvarloader._dataset._svar2_link import Svar2Link
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6 (C>CAT),
 # DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both ploids.
-# Mirrors tests/test_svar2_reconstruct.py's svar2_store fixture exactly, so the
-# matched .svar (SVAR1) store built from the same VCF is a valid parity oracle.
+# S2 is 0|0 everywhere: an ENTIRELY EMPTY sample column, so the sparse cache's
+# "cell not present" branch is exercised. Variants stop at 0-based 13, so a
+# region past that (see test_write_svar2_emits_cache) is an entirely empty ROW.
+# Mirrors tests/test_svar2_reconstruct.py's svar2_store fixture (which keeps only
+# S0/S1), so the matched .svar (SVAR1) store built from the same VCF is still a
+# valid parity oracle.
 _REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
 _VCF = """\
 ##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=40>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
-chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1\tS2
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0\t0|0
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1\t0|0
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1\t0|0
 """
 
 
@@ -61,7 +65,7 @@ def svar2_store(vcf_and_ref, tmp_path_factory) -> Path:
         str(ref),
         ["chr1"],
         str(out),
-        ["S0", "S1"],
+        ["S0", "S1", "S2"],
         25_000,
         2,
         1,
@@ -87,9 +91,11 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     svar2 = SparseVar2(svar2_store)
     bed = pl.DataFrame(
         {
-            "chrom": ["chr1", "chr1"],
-            "chromStart": [0, 5],
-            "chromEnd": [20, 15],
+            # [25, 40) holds no variants at all: an entirely empty region row,
+            # which the sparse layout must round-trip as (0, 0) everywhere.
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 5, 25],
+            "chromEnd": [20, 15, 40],
         }
     )
     out = tmp_path / "ds.gvl"
@@ -548,3 +554,33 @@ def test_write_svar2_duplicate_store_samples_raises(
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [20]})
     with pytest.raises(ValueError, match="duplicate sample names"):
         gvl.write(tmp_path / "ds.gvl", bed, variants=svar2, overwrite=True)
+
+
+def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
+    """The fixture must NOT be 100% fill, or the sparse cache is untested.
+
+    Empty cells are the entire point of the sparse layout (#357): if every
+    (region, sample, ploid) window holds a variant, the "cell is absent" branch
+    never executes and a sparse/dense divergence there is invisible. S2 is 0|0
+    everywhere (empty column) and [25, 40) holds no variants (empty row).
+    """
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store)
+    sorted_samples = sorted(svar2.available_samples)
+    assert sorted_samples == ["S0", "S1", "S2"], "fixture lost its third sample"
+
+    d = svar2._find_ranges(
+        "chr1",
+        np.array([0, 5, 25]),
+        np.array([20, 15, 40]),
+        samples=sorted_samples,
+    )
+    snp = np.asarray(d["vk_snp_range"], np.int64)  # (R*S*P, 2)
+    indel = np.asarray(d["vk_indel_range"], np.int64)
+    nonempty = (snp[:, 1] > snp[:, 0]) | (indel[:, 1] > indel[:, 0])
+
+    n_cells = 3 * len(sorted_samples) * svar2.ploidy
+    assert len(nonempty) == n_cells
+    assert nonempty.any(), "fixture has no variants at all"
+    assert not nonempty.all(), "fixture is 100% fill; the empty-cell branch is dead"
