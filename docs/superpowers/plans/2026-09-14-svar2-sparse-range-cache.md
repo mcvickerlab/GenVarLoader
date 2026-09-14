@@ -1565,7 +1565,7 @@ Replace `test_write_svar2_emits_cache`'s meta-key block and layout oracle (`test
         )
         contig_offset += rc
 
-    assert n_empty_seen > 0, "fixture regressed to 100% fill (see Task 1)"
+    assert n_empty_seen > 0, "fixture lost its empty cells (see Task 1)"
 
     # Sparse must be smaller than the dense layout would have been, at this fill.
     n = meta["n_entries"]
