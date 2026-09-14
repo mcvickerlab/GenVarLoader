@@ -1601,6 +1601,197 @@ class StreamingDataset:
             np.ascontiguousarray(ends + jitter_off, np.uint32),
         )
 
+    def _mixed_track_window(
+        self,
+        tb: "_TrackBackend",
+        backend: "_Svar1Backend | _Svar2Backend | _VcfBackend | _PgenBackend",
+        r_idx: NDArray[np.intp],
+        s_idx_w: NDArray[np.intp],
+        region_offsets: "NDArray[np.int64] | None",
+    ) -> "_TrackWindow":
+        """Read one window's tracks, plus its realign state when re-aligning.
+
+        Issue #279 Task 7 put this at the per-window composition point each
+        drive already has, so no separate track cursor is needed. Issue #394
+        made it ONE copy: the `"engine"` and `"sync"` drives had composed it
+        identically, and after #375 each copy was reached by only one backend
+        family's parity suite -- so a shared-logic fix applied to one would
+        silently miss the other with both suites green. Callers guard on
+        ``tb is not None`` so a haplotype-only stream pays nothing extra.
+
+        Args:
+            tb: The track backend; the caller has already checked it is not
+                `None`.
+            backend: The variant backend. Deliberately annotated as the FULL
+                backend union rather than `_MixedTracksBackend`, so the
+                `isinstance` narrowing stays here instead of being pushed back
+                out to both call sites; see the comment on that narrowing.
+            r_idx: The window's region indices.
+            s_idx_w: The window's sample indices.
+            region_offsets: Per-region jitter offsets, or `None` when the drive
+                runs unjittered. The `"sync"` (SVAR2) drive always passes
+                `None` -- `_iter_batches` rejects jitter for SVAR2 before the
+                drive runs, so its bounds are always the raw `self._regions`
+                slice.
+
+        Returns:
+            The window's `_TrackWindow`; its `realign` is set only when
+            `realign_tracks` is on.
+        """
+        n_s = len(s_idx_w)
+        if region_offsets is not None:
+            # Tracks MUST use the SAME translated bounds the engine got
+            # (`region_offsets`, drawn once before the plan was built), or
+            # tracks and haplotypes silently disagree by up to `jitter` bases.
+            t_starts, t_ends = self._jitter_region_bounds(region_offsets, r_idx)
+        else:
+            t_starts = np.ascontiguousarray(self._regions[r_idx, 1], np.int32)
+            t_ends = np.ascontiguousarray(self._regions[r_idx, 2], np.int32)
+        row_starts_w = np.repeat(t_starts, n_s).astype(np.int32)
+        row_ends_w = np.repeat(t_ends, n_s).astype(np.int32)
+        row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
+
+        if self._realign_tracks:
+            # M2 (#375 review): narrow to `_MixedTracksBackend` here, at the one
+            # call site that matters, rather than trusting the
+            # `supports_mixed_tracks` guard in `_iter_batches` alone. `isinstance`
+            # against a `runtime_checkable` protocol checks attribute PRESENCE
+            # ONLY -- never signatures -- so what this buys is one specific
+            # thing: a backend that sets the flag with no `mixed_realign_window`
+            # at all (or a typo'd name) fails with a clear `AssertionError`
+            # naming the offending backend, instead of an `AttributeError` deep
+            # in the batch loop. The `supports_mixed_tracks` guard makes that
+            # unreachable through any built-in backend today; this is the net
+            # for the next one.
+            #
+            # The #375 review recorded a SECOND claim here -- that `pyrefly`
+            # statically reports `unsafe-overlap` on this line when a union
+            # member's `mixed_realign_window` disagrees with the protocol's
+            # shape. Re-tested during #394 (swapped return tuple, and a wrong
+            # parameter dtype, each on `_PgenBackend`): pyrefly reports NOTHING
+            # for either, both before and after this de-duplication. So the
+            # static half does not hold with this repo's current pyrefly
+            # version and config, and the runtime assert below is the only live
+            # check -- do not delete it believing a type check covers it.
+            #
+            # `backend` is still annotated as the full backend union rather than
+            # `_MixedTracksBackend`: narrowing the parameter would push this
+            # assert back out to both call sites, which is exactly the
+            # duplication #394 removed.
+            assert isinstance(backend, _MixedTracksBackend), (
+                f"{type(backend).__name__} sets supports_mixed_tracks without a "
+                "conforming mixed_realign_window."
+            )
+            realign_w, t_ends_ext = backend.mixed_realign_window(
+                r_idx,
+                s_idx_w,
+                np.ascontiguousarray(t_starts, np.int32),
+                np.ascontiguousarray(t_ends, np.int32),
+                row_starts_w,
+                row_ends_w,
+            )
+        else:
+            # Un-realigned tracks stay in reference coordinates -- no
+            # deletion-extension read-ahead needed.
+            realign_w = None
+            t_ends_ext = t_ends
+
+        per_track = tb.read_window(
+            r_idx,
+            s_idx_w,
+            np.ascontiguousarray(t_starts, np.int32),
+            np.ascontiguousarray(t_ends_ext, np.int32),
+        )
+        return _TrackWindow(
+            # Flattened AND FFI-coerced ONCE per window, not once per batch per
+            # track (see `_ItvArrays`).
+            itvs=_coerce_window_itvs(per_track),
+            names=tb.names,
+            row_starts=row_starts_w,
+            row_ends=row_ends_w,
+            row_lengths=row_lengths_w,
+            realign=realign_w,
+        )
+
+    def _mixed_tracks_batch(
+        self,
+        track_w: "_TrackWindow",
+        lo: int,
+        hi: int,
+        flat_r: NDArray[np.intp],
+        flat_s: NDArray[np.intp],
+        out_lengths: NDArray[np.int64],
+    ) -> "RaggedTracks":
+        """Produce window rows ``[lo, hi)``'s tracks from a `_TrackWindow`.
+
+        The per-batch half of the composition issue #394 de-duplicated; see
+        `_mixed_track_window` for why both drives share one copy.
+
+        Args:
+            track_w: The window state from `_mixed_track_window`.
+            lo: First window row of this batch.
+            hi: One past the last window row of this batch.
+            flat_r: The window's per-row region indices (window-global).
+            flat_s: The window's per-row sample indices (window-global).
+            out_lengths: `(hi-lo, ploidy)` int64 per-hap output lengths for THIS
+                batch, taken from the haplotype half the caller just produced --
+                raw engine offsets in the `"engine"` drive, `Ragged.lengths` in
+                the `"sync"` drive, which is the one thing the two drives cannot
+                compute the same way. Read only when re-aligning.
+
+        Returns:
+            `RaggedTracks` of shape `(hi-lo, n_tracks, ploidy, None)` when
+            re-aligning, `(hi-lo, n_tracks, None)` otherwise.
+        """
+        if track_w.realign is not None:
+            regions_batch = np.stack(
+                [
+                    np.zeros(hi - lo, np.int32),
+                    track_w.row_starts[lo:hi],
+                    track_w.row_ends[lo:hi],
+                ],
+                axis=1,
+            ).astype(np.int32)
+            # The written path's own formula, verbatim: xor-reduce of the
+            # dataset-global ravel index (`_reconstruct.py:216-218`). Only
+            # `FlankSample` reads this seed -- every strategy the parity tests
+            # exercise (Repeat5p, Repeat5pNormalized) ignores it -- but matching
+            # the formula costs nothing and removes a gratuitous divergence.
+            # Exact `FlankSample` parity remains unattainable in ANY batched
+            # path, written or streaming, because the kernel also mixes in the
+            # batch-local query index (`src/tracks/mod.rs:583-590`) and the
+            # `Dataset[r, s]` oracle always has query 0.
+            _r64 = flat_r[lo:hi].astype(np.uint64)
+            _s64 = flat_s[lo:hi].astype(np.uint64)
+            _idx = _r64 * np.uint64(self.n_samples) + _s64
+            base_seed = int(np.bitwise_xor.reduce(_idx))
+            return track_w.realign.realign_batch(
+                lo,
+                hi,
+                track_w.itvs,
+                track_w.names,
+                self._insertion_fill,
+                regions_batch,
+                track_w.row_lengths[lo:hi],
+                out_lengths,
+                base_seed,
+            )
+        # `realign_tracks=False`: a live, tested path on every backend.
+        if isinstance(self._output_length, int):
+            # Unreachable on SVAR2 (#375 Track A fix round 1, T1): `with_len(
+            # <int>)` is rejected for that backend before the drive ever runs.
+            # Live on the other backends -- do not "fix" the SVAR2 `with_len`
+            # guard on the strength of this branch existing.
+            _lengths = np.full(hi - lo, self._output_length, np.int64)
+        else:
+            _lengths = track_w.row_lengths[lo:hi]
+        return _tracks_from_intervals(
+            track_w.itvs,
+            np.arange(lo, hi, dtype=np.int64),
+            track_w.row_starts[lo:hi],
+            _lengths,
+        )
+
     def _iter_batches(self, batch_size: int) -> Iterator[tuple]:
         """Drive the plan; generate each window PER BATCH so output is batch-bounded.
 
@@ -1998,99 +2189,14 @@ class StreamingDataset:
                     flat_r = np.repeat(self._sort_order[r_idx], n_s)
                     flat_s = np.tile(np.arange(s_lo, s_hi, dtype=np.intp), len(r_idx))
                     n_rows = len(flat_r)
-                    # Issue #279 Task 7: read this window's tracks once, here --
-                    # the composition point the per-window loop already has, no
-                    # separate cursor needed. Guarded on `tb is not None` so a
-                    # haplotype-only stream pays nothing extra.
                     tb = self._track_backend
                     if tb is not None:
-                        s_idx_w = np.arange(s_lo, s_hi, dtype=np.intp)
-                        if region_offsets is not None:
-                            # Tracks MUST use the SAME translated bounds the
-                            # engine got (`region_offsets`, drawn once above,
-                            # before `plan_jobs` was built), or tracks and
-                            # haplotypes silently disagree by up to `jitter`
-                            # bases.
-                            t_starts, t_ends = self._jitter_region_bounds(
-                                region_offsets, r_idx
-                            )
-                        else:
-                            t_starts = np.ascontiguousarray(
-                                self._regions[r_idx, 1], np.int32
-                            )
-                            t_ends = np.ascontiguousarray(
-                                self._regions[r_idx, 2], np.int32
-                            )
-                        row_starts_w = np.repeat(t_starts, n_s).astype(np.int32)
-                        row_ends_w = np.repeat(t_ends, n_s).astype(np.int32)
-                        row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
-
-                        if self._realign_tracks:
-                            # M2 (#375 review): narrow to `_MixedTracksBackend`
-                            # here, at the one call site that matters, rather
-                            # than trusting the `supports_mixed_tracks` guard
-                            # above alone. The guard already makes this assert
-                            # unreachable in practice -- the point is what the
-                            # narrowing buys at CHECK time, and the two halves
-                            # catch different things:
-                            #
-                            # - Statically, `pyrefly` reports `unsafe-overlap`
-                            #   ON THIS LINE if ANY member of `backend`'s union
-                            #   defines `mixed_realign_window` with a shape that
-                            #   disagrees with the protocol -- swapped return
-                            #   tuple, wrong parameter types, either one.
-                            #   Verified empirically against this repo's
-                            #   pyrefly config, not assumed. This is the half
-                            #   that protects Tracks A and B: the moment SVAR2
-                            #   or VCF/PGEN grows a mis-shaped
-                            #   `mixed_realign_window`, the type check fails
-                            #   here instead of the drive failing at runtime.
-                            # - At runtime, `isinstance` against a
-                            #   `runtime_checkable` protocol checks attribute
-                            #   PRESENCE ONLY -- never signatures. So it catches
-                            #   exactly one thing the static half cannot: a
-                            #   backend that sets the flag with no
-                            #   `mixed_realign_window` at all (or a typo'd
-                            #   name), turning an `AttributeError` deep in the
-                            #   batch loop into a clear `AssertionError` naming
-                            #   the offending backend.
-                            #
-                            # Neither half alone is sufficient; do not drop
-                            # either one believing the other covers it.
-                            assert isinstance(backend, _MixedTracksBackend), (
-                                f"{type(backend).__name__} sets "
-                                "supports_mixed_tracks without a conforming "
-                                "mixed_realign_window."
-                            )
-                            realign_w, t_ends_ext = backend.mixed_realign_window(
-                                r_idx,
-                                s_idx_w,
-                                np.ascontiguousarray(t_starts, np.int32),
-                                np.ascontiguousarray(t_ends, np.int32),
-                                row_starts_w,
-                                row_ends_w,
-                            )
-                        else:
-                            # Un-realigned tracks stay in reference coordinates
-                            # -- no deletion-extension read-ahead needed.
-                            realign_w = None
-                            t_ends_ext = t_ends
-
-                        per_track = tb.read_window(
+                        track_w = self._mixed_track_window(
+                            tb,
+                            backend,
                             r_idx,
-                            s_idx_w,
-                            np.ascontiguousarray(t_starts, np.int32),
-                            np.ascontiguousarray(t_ends_ext, np.int32),
-                        )
-                        track_w = _TrackWindow(
-                            # Flattened AND FFI-coerced ONCE per window, not
-                            # once per batch per track (see `_ItvArrays`).
-                            itvs=_coerce_window_itvs(per_track),
-                            names=tb.names,
-                            row_starts=row_starts_w,
-                            row_ends=row_ends_w,
-                            row_lengths=row_lengths_w,
-                            realign=realign_w,
+                            np.arange(s_lo, s_hi, dtype=np.intp),
+                            region_offsets,
                         )
                     else:
                         track_w = None
@@ -2270,60 +2376,12 @@ class StreamingDataset:
                                     (hi - lo, backend.ploidy, None),
                                     offsets,
                                 )
-                                if track_w.realign is not None:
-                                    out_lengths = np.diff(offsets).reshape(
-                                        hi - lo, backend.ploidy
-                                    )
-                                    regions_batch = np.stack(
-                                        [
-                                            np.zeros(hi - lo, np.int32),
-                                            track_w.row_starts[lo:hi],
-                                            track_w.row_ends[lo:hi],
-                                        ],
-                                        axis=1,
-                                    ).astype(np.int32)
-                                    # The written path's own formula, verbatim:
-                                    # xor-reduce of the dataset-global ravel
-                                    # index (`_reconstruct.py:216-218`). Only
-                                    # `FlankSample` reads this seed -- every
-                                    # strategy the parity tests exercise
-                                    # (Repeat5p, Repeat5pNormalized) ignores it
-                                    # -- but matching the formula costs nothing
-                                    # and removes a gratuitous divergence. Exact
-                                    # `FlankSample` parity remains unattainable
-                                    # in ANY batched path, written or streaming,
-                                    # because the kernel also mixes in the
-                                    # batch-local query index
-                                    # (`src/tracks/mod.rs:583-590`) and the
-                                    # `Dataset[r, s]` oracle always has query 0.
-                                    _idx = flat_r[lo:hi].astype(np.uint64) * np.uint64(
-                                        self.n_samples
-                                    ) + flat_s[lo:hi].astype(np.uint64)
-                                    base_seed = int(np.bitwise_xor.reduce(_idx))
-                                    tracks = track_w.realign.realign_batch(
-                                        lo,
-                                        hi,
-                                        track_w.itvs,
-                                        track_w.names,
-                                        self._insertion_fill,
-                                        regions_batch,
-                                        track_w.row_lengths[lo:hi],
-                                        out_lengths,
-                                        base_seed,
-                                    )
-                                else:
-                                    if isinstance(self._output_length, int):
-                                        _lengths = np.full(
-                                            hi - lo, self._output_length, np.int64
-                                        )
-                                    else:
-                                        _lengths = track_w.row_lengths[lo:hi]
-                                    tracks = _tracks_from_intervals(
-                                        track_w.itvs,
-                                        np.arange(lo, hi, dtype=np.int64),
-                                        track_w.row_starts[lo:hi],
-                                        _lengths,
-                                    )
+                                out_lengths = np.diff(offsets).reshape(
+                                    hi - lo, backend.ploidy
+                                )
+                                tracks = self._mixed_tracks_batch(
+                                    track_w, lo, hi, flat_r, flat_s, out_lengths
+                                )
                                 out = (haps, tracks)
                             else:
                                 out = Ragged.from_offsets(
@@ -2478,65 +2536,14 @@ class StreamingDataset:
                         flat_r = np.repeat(self._sort_order[r_idx], n_s)
                         flat_s = np.tile(s_idx, len(r_idx))
                         n_rows = len(flat_r)
-                        # Issue #375 Track A: read this window's tracks once, here --
-                        # the same composition point the SVAR1 engine drive uses
-                        # (see that branch's identical comment). Guarded on `tb is
-                        # not None` so a haplotype-only SVAR2 stream pays nothing
-                        # extra. No jitter branch here (unlike the engine drive):
-                        # `_iter_batches` already rejects jitter for SVAR2
-                        # (the guard just above this "sync" branch), so region
-                        # bounds are always the raw `self._regions` slice.
                         tb = self._track_backend
                         if tb is not None:
-                            s_idx_w = np.asarray(s_idx, np.intp)
-                            t_starts = np.ascontiguousarray(
-                                self._regions[r_idx, 1], np.int32
-                            )
-                            t_ends = np.ascontiguousarray(
-                                self._regions[r_idx, 2], np.int32
-                            )
-                            row_starts_w = np.repeat(t_starts, n_s).astype(np.int32)
-                            row_ends_w = np.repeat(t_ends, n_s).astype(np.int32)
-                            row_lengths_w = (row_ends_w - row_starts_w).astype(np.int64)
-                            if self._realign_tracks:
-                                # Same double narrowing the engine drive relies on
-                                # (see its identical comment): static, via
-                                # pyrefly's `unsafe-overlap` check against the
-                                # `_MixedTracksBackend` protocol; and at runtime, an
-                                # `isinstance` check against a `runtime_checkable`
-                                # protocol that catches a backend setting the flag
-                                # with no conforming `mixed_realign_window`.
-                                assert isinstance(backend, _MixedTracksBackend), (
-                                    f"{type(backend).__name__} sets "
-                                    "supports_mixed_tracks without a conforming "
-                                    "mixed_realign_window."
-                                )
-                                realign_w, t_ends_ext = backend.mixed_realign_window(
-                                    r_idx,
-                                    s_idx_w,
-                                    t_starts,
-                                    t_ends,
-                                    row_starts_w,
-                                    row_ends_w,
-                                )
-                            else:
-                                # Un-realigned tracks stay in reference coordinates
-                                # -- no deletion-extension read-ahead needed.
-                                realign_w = None
-                                t_ends_ext = t_ends
-                            per_track = tb.read_window(
+                            track_w = self._mixed_track_window(
+                                tb,
+                                backend,
                                 r_idx,
-                                s_idx_w,
-                                np.ascontiguousarray(t_starts, np.int32),
-                                np.ascontiguousarray(t_ends_ext, np.int32),
-                            )
-                            track_w = _TrackWindow(
-                                itvs=_coerce_window_itvs(per_track),
-                                names=tb.names,
-                                row_starts=row_starts_w,
-                                row_ends=row_ends_w,
-                                row_lengths=row_lengths_w,
-                                realign=realign_w,
+                                np.asarray(s_idx, np.intp),
+                                None,
                             )
                         else:
                             track_w = None
@@ -2573,62 +2580,9 @@ class StreamingDataset:
                                 out_lengths = np.asarray(
                                     data.lengths, np.int64
                                 ).reshape(hi - lo, backend.ploidy)
-                                if track_w.realign is not None:
-                                    regions_batch = np.stack(
-                                        [
-                                            np.zeros(hi - lo, np.int32),
-                                            track_w.row_starts[lo:hi],
-                                            track_w.row_ends[lo:hi],
-                                        ],
-                                        axis=1,
-                                    ).astype(np.int32)
-                                    # The written path's own formula, verbatim:
-                                    # xor-reduce of the dataset-global ravel index
-                                    # (`_reconstruct.py:216-218`). Only
-                                    # `FlankSample` reads this seed -- see the
-                                    # engine drive's identical comment for why
-                                    # exact `FlankSample` parity is unattainable in
-                                    # ANY batched path.
-                                    _idx = flat_r[lo:hi].astype(np.uint64) * np.uint64(
-                                        self.n_samples
-                                    ) + flat_s[lo:hi].astype(np.uint64)
-                                    base_seed = int(np.bitwise_xor.reduce(_idx))
-                                    tracks = track_w.realign.realign_batch(
-                                        lo,
-                                        hi,
-                                        track_w.itvs,
-                                        track_w.names,
-                                        self._insertion_fill,
-                                        regions_batch,
-                                        track_w.row_lengths[lo:hi],
-                                        out_lengths,
-                                        base_seed,
-                                    )
-                                else:
-                                    # Live, tested path: `realign_tracks=False`
-                                    # reaches here on SVAR2 today.
-                                    if isinstance(self._output_length, int):
-                                        # Unreachable on SVAR2 today (fix round
-                                        # 1, T1): `with_len(<int>)` (`_out_len
-                                        # != -1`) is rejected for the SVAR2
-                                        # backend before the drive ever runs
-                                        # (`:1593`, `:1706`). Kept for the
-                                        # textual parallel with the SVAR1
-                                        # engine drive's identical branch --
-                                        # do not "fix" the SVAR2 `with_len`
-                                        # guard on the strength of this branch
-                                        # existing.
-                                        _lengths = np.full(
-                                            hi - lo, self._output_length, np.int64
-                                        )
-                                    else:
-                                        _lengths = track_w.row_lengths[lo:hi]
-                                    tracks = _tracks_from_intervals(
-                                        track_w.itvs,
-                                        np.arange(lo, hi, dtype=np.int64),
-                                        track_w.row_starts[lo:hi],
-                                        _lengths,
-                                    )
+                                tracks = self._mixed_tracks_batch(
+                                    track_w, lo, hi, flat_r, flat_s, out_lengths
+                                )
                                 yield (data, tracks), flat_r[lo:hi], flat_s[lo:hi]
                 finally:
                     # Fix round 1 (L2): clear the memo after the window
