@@ -177,9 +177,21 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     # regresses alone, which is exactly the regression this guard exists to catch.
     grid = nonempty.reshape(3, S, P)
     s2 = sorted_samples.index("S2")
-    assert not grid[:, s2].any(), "S2 is no longer all-reference; the empty COLUMN is gone"
-    assert not grid[2].any(), "region [25, 40) now holds variants; the empty ROW is gone"
-    assert grid[:2, :2].any(), "fixture has no variants at all"
+    assert not grid[:, s2].any(), (
+        "S2 is no longer all-reference; the empty COLUMN is gone"
+    )
+    assert not grid[2].any(), (
+        "region [25, 40) now holds variants; the empty ROW is gone"
+    )
+    # Discriminating pair: S2 empty AND at least one of S0/S1 non-empty. Together
+    # these can only hold if the sample axis is ordered as `sorted_samples` --
+    # a transposed or mis-ordered reshape would land `s2` on a sample that
+    # carries variants and fail the assertion above. This is why the column
+    # half of the guard needs no separate hand-run break test.
+    assert grid[:, :2].any(), (
+        "no variants in S0 or S1; the guard can no longer tell an empty column "
+        "from a mis-ordered sample axis"
+    )
 ```
 
 - [ ] **Step 6: Run it**

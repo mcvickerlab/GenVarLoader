@@ -595,4 +595,12 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     assert not grid[2].any(), (
         "region [25, 40) now holds variants; the empty ROW is gone"
     )
-    assert grid[:2, :2].any(), "fixture has no variants at all"
+    # Discriminating pair: S2 empty AND at least one of S0/S1 non-empty. Together
+    # these can only hold if the sample axis is ordered as `sorted_samples` --
+    # a transposed or mis-ordered reshape would land `s2` on a sample that
+    # carries variants and fail the assertion above. This is why the column
+    # half of the guard needs no separate hand-run break test.
+    assert grid[:, :2].any(), (
+        "no variants in S0 or S1; the guard can no longer tell an empty column "
+        "from a mis-ordered sample axis"
+    )
