@@ -563,6 +563,17 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     (region, sample, ploid) window holds a variant, the "cell is absent" branch
     never executes and a sparse/dense divergence there is invisible. S2 is 0|0
     everywhere (empty column) and [25, 40) holds no variants (empty row).
+
+    genoray also routes each variant to the per-sample SPARSE (vk) channel or
+    the per-region DENSE channel by carrier-call count (see
+    `choose_representation` in genoray's cost model), and only the sparse
+    channel reaches this grid. This fixture's single-carrier SNP stays sparse
+    but both three-carrier indels route dense, so the grid this test inspects
+    is already 1/18 fill by construction, not 8/8 -- exactly one cell
+    (region 0, S0, ploid 0) is occupied. A cost-model shift that pushed that
+    last SNP dense too would empty the grid entirely and make every
+    sparse/dense parity test built on this fixture pass vacuously; guard
+    against that directly rather than assuming any occupancy at all.
     """
     from genoray import SparseVar2
 
@@ -595,12 +606,19 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     assert not grid[2].any(), (
         "region [25, 40) now holds variants; the empty ROW is gone"
     )
-    # Discriminating pair: S2 empty AND at least one of S0/S1 non-empty. Together
-    # these can only hold if the sample axis is ordered as `sorted_samples` --
-    # a transposed or mis-ordered reshape would land `s2` on a sample that
-    # carries variants and fail the assertion above. This is why the column
-    # half of the guard needs no separate hand-run break test.
-    assert grid[:, :2].any(), (
-        "no variants in S0 or S1; the guard can no longer tell an empty column "
-        "from a mis-ordered sample axis"
+    # Non-vacuity. genoray routes each variant to the per-sample SPARSE (vk)
+    # channel or the per-region DENSE channel by carrier-call count, and only
+    # the sparse channel lands in this grid: the fixture's single-carrier SNP
+    # stays sparse, both three-carrier indels route dense. Exactly one cell is
+    # therefore occupied -- (region 0, S0, ploid 0). If a cost-model change
+    # pushed that last variant dense too, this grid would be ALL empty and
+    # every sparse/dense parity test built on this fixture would pass
+    # trivially against an empty table, green and meaningless. Pin it.
+    assert grid.any(), (
+        "vk channel is entirely empty: genoray routed every variant to the "
+        "dense channel, so all sparse-cache parity tests on this fixture are "
+        "now vacuous"
+    )
+    assert grid[0, sorted_samples.index("S0"), 0], (
+        "the fixture's one sparse-channel cell (region 0, S0, ploid 0) is gone"
     )
