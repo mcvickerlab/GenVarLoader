@@ -684,6 +684,134 @@ class _Svar2Realign(NamedTuple):
         )
 
 
+def _record_mixed_realign_window(
+    backend: "_VcfBackend | _PgenBackend",
+    r_idx: NDArray[np.intp],
+    s_idx: NDArray[np.intp],
+    t_starts: NDArray[np.int32],
+    t_ends: NDArray[np.int32],
+    row_starts: NDArray[np.int32],
+    row_ends: NDArray[np.int32],
+) -> "tuple[_MixedRealign, NDArray[np.int32]]":
+    """One record-stream window's fused-kernel realign state (issue #375, Track B).
+
+    Shared by `_VcfBackend` and `_PgenBackend`: the two differ only in their
+    Rust `WindowFiller`, so the Python side is one function, not two.
+
+    Produces exactly the same `_RealignWindow` shape `_Svar1Backend` produces,
+    with two differences the kernel cannot observe:
+
+    - The variant tables (`v_starts`/`ilens`) and the CSR values
+      (`geno_v_idxs`) are WINDOW-LOCAL, not dataset-global. The kernel only
+      ever indexes the tables through `geno_v_idxs`, so a consistent local
+      pair behaves identically to a consistent global pair. This is precisely
+      why Task 1 moved those three arrays onto `_RealignWindow` instead of
+      reading them off the backend.
+    - The engine's CSR is per HAP of the window's sample sub-range
+      (`h = si * ploidy + p`), because every region in a window shares one
+      decoded genotype table (`RecordBackend::kept_v_idxs`). The fused kernel
+      wants per (region, sample, ploid) rows, so the CSR is replicated across
+      the window's regions here.
+
+    The engine is queried with `t_starts`/`t_ends` -- the bounds the DRIVE
+    actually used -- not with `backend._regions[r_idx, 1:3]`. Under jitter the
+    two differ: the drive draws `region_offsets` once and translates the track
+    bounds through `_jitter_region_bounds`, and the same translated bounds went
+    to the haplotype engine. Re-deriving raw bounds here would silently
+    disagree with the haplotypes by up to `jitter` bases.
+
+    The deletion-extension formula for `t_ends_ext` is `_Svar1Backend`'s,
+    verbatim -- see that method's docstring for why it exists and why it
+    deliberately does not match the written WRITER's `chromEnd`. On every path
+    this branch's tests reach, `t_ends_ext` is a no-op (the default ragged
+    output and every `with_len(L)` case exercised here stay within the
+    unextended `t_ends`); it becomes load-bearing only under the `with_len`
+    parity gap `_Svar1Backend.mixed_realign_window` documents.
+    """
+    from ._genotypes import get_diffs_sparse
+
+    r_idx = np.asarray(r_idx, np.intp)
+    s_idx = np.asarray(s_idx, np.intp)
+    n_reg, n_s = len(r_idx), len(s_idx)
+    n_rows = n_reg * n_s
+    P = backend.ploidy
+
+    contig_idx = int(backend._regions[r_idx[0], 0])
+    if not np.all(backend._regions[r_idx, 0] == contig_idx):
+        raise ValueError(
+            "_record_mixed_realign_window: window spans multiple contigs; "
+            "every engine call must be single-contig."
+        )
+
+    # `_MixedTracksBackend.mixed_realign_window`'s contract accepts an
+    # arbitrary `(n_samples,)` array of public sample indices, but this
+    # implementation narrows it to the contiguous range
+    # `[s_idx[0], s_idx[-1] + 1)` below and then indexes the returned CSR
+    # POSITIONALLY via `hap_of_row` -- a non-contiguous `s_idx` would silently
+    # read the wrong samples' data, and a descending one would underflow the
+    # `usize` range `window_realign_inputs` does not itself validate. `_plan()`
+    # only ever emits `np.arange(s_lo, s_hi)`, so this is unreachable today;
+    # assert it rather than assume it (final review, M4).
+    if n_s > 0 and not np.array_equal(
+        s_idx, np.arange(s_idx[0], s_idx[-1] + 1, dtype=s_idx.dtype)
+    ):
+        raise ValueError(
+            "_record_mixed_realign_window: s_idx must be a contiguous "
+            f"ascending range, per the _MixedTracksBackend.mixed_realign_window "
+            f"contract narrowed by this record-backend implementation; got {s_idx!r}."
+        )
+
+    engine = backend._mixed_engine()
+    v_starts, ilens, geno_v_idxs, csr = engine.window_realign_inputs(
+        contig_idx,
+        np.ascontiguousarray(t_starts, np.uint32).tolist(),
+        np.ascontiguousarray(t_ends, np.uint32).tolist(),
+        int(s_idx[0]),
+        int(s_idx[-1]) + 1,
+    )
+    v_starts = np.ascontiguousarray(v_starts, np.int32)
+    ilens = np.ascontiguousarray(ilens, np.int32)
+    geno_v_idxs = np.ascontiguousarray(geno_v_idxs, np.int32)
+    csr = np.ascontiguousarray(csr, np.int64)
+
+    # Replicate the per-(sample, ploid) CSR across the window's regions,
+    # C-order (region, sample, ploid): row bi has si = bi % n_s.
+    hap_of_row = (
+        np.tile(np.arange(n_s, dtype=np.int64), n_reg)[:, None] * P
+        + np.arange(P, dtype=np.int64)[None, :]
+    ).reshape(-1)
+    o_starts = csr[hap_of_row]
+    o_stops = csr[hap_of_row + 1]
+    geno_offsets_w = np.stack([o_starts, o_stops])
+    geno_offset_idx_w = np.arange(n_rows * P, dtype=np.intp).reshape(n_rows, P)
+
+    diffs_w = get_diffs_sparse(
+        geno_offset_idx_w,
+        geno_v_idxs,
+        geno_offsets_w,
+        ilens,
+        q_starts=row_starts,
+        q_ends=row_ends,
+        v_starts=v_starts,
+    )
+    max_del_row = -diffs_w.clip(max=0).min(1)
+    region_max_del = max_del_row.reshape(n_reg, n_s).max(1)
+    t_ends_ext = np.ascontiguousarray(
+        t_ends.astype(np.int64) + region_max_del, np.int32
+    )
+    return (
+        _RealignWindow(
+            diffs=diffs_w,
+            geno_offsets=geno_offsets_w,
+            geno_offset_idx=geno_offset_idx_w,
+            geno_v_idxs=geno_v_idxs,
+            v_starts=v_starts,
+            ilens=ilens,
+        ),
+        t_ends_ext,
+    )
+
+
 class _TrackWindow(NamedTuple):
     """One window's track state, computed once and consumed per batch.
 
@@ -1567,9 +1695,10 @@ class StreamingDataset:
             ):
                 raise NotImplementedError(
                     "StreamingDataset tracks= combined with a variant source is "
-                    f"not supported for {type(self._backend).__name__} yet; only "
-                    "the SVAR1 (.svar) and SVAR2 (.svar2) backends support mixed "
-                    "variants+tracks today (issue #375)."
+                    f"not supported for {type(self._backend).__name__}: it does "
+                    "not set supports_mixed_tracks / define mixed_realign_window. "
+                    "Every built-in backend (SVAR1 .svar, SVAR2 .svar2, VCF/BCF "
+                    "and PGEN) does (issue #375)."
                 )
             # This fires ahead of the general SVAR2 jitter/`with_len` guard
             # below, whose `_out_len != -1` clause covers the same case today.
@@ -3794,11 +3923,13 @@ class _Svar1Backend:
 
         It deliberately does NOT match the written WRITER's `chromEnd`
         extension (`_write.py:1084`), which stores less than its own reader
-        asks for. That asymmetry can only leave the written path with zeros in
-        a tail streaming fills with real values, and is unobservable today
-        because ragged re-alignment never reads past reference index
-        `region_len - 1` and `with_len(L)` is bounded by the minimum region
-        length on both sides. An `extend_to_length` follow-up must revisit both.
+        asks for. On the default ragged output that asymmetry is inert
+        (re-alignment never reads past reference index `region_len - 1`), but
+        it IS observable when `with_len(L)` exceeds a deletion-shrunk
+        haplotype's natural length: streaming then fills the track's tail with
+        real signal read past the region end, while a written `Dataset`
+        zero-pads it. See `docs/source/dataset.md`'s "Known parity gap"
+        warning for the user-facing writeup; tracked as a follow-up.
 
         Args:
             r_idx: `(n_regions,)` indices into `self._regions` -- region SORT
@@ -4339,7 +4470,7 @@ class _Svar2Backend:
         `self._regions` -- not the caller-supplied (possibly
         jitter-translated) row/track bounds. That is equivalent to honoring
         `row_starts`/`row_ends` ONLY while `jitter == 0`, which
-        `_iter_batches`' jitter+realign guard (`_streaming.py:1661`) enforces
+        `_iter_batches`' jitter+realign guard (`_streaming.py:1790`) enforces
         today. Relaxing that guard requires threading `row_starts`/`row_ends`
         into the gather here, mirroring how SVAR1's `get_diffs_sparse` call
         takes `q_starts=row_starts, q_ends=row_ends`.
@@ -4415,8 +4546,8 @@ class _VcfBackend:
     not read/cached here.
     """
 
-    #: Mixed variants+tracks not wired for this backend yet (issue #375).
-    supports_mixed_tracks: ClassVar[bool] = False
+    #: Mixed variants+tracks wired via `_record_mixed_realign_window` (issue #375, Track B).
+    supports_mixed_tracks: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -4473,13 +4604,19 @@ class _VcfBackend:
         # so servable == available here -- unlike SVAR1 (see `_Svar1Backend.__init__`).
         self.servable_var_fields = list(self.available_var_fields)
 
-        # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
-        # (the public ladder branch constructs both the same way) but unused
-        # here: `build_engine`'s `jobs` already carry each window's
-        # (contig_idx, region_starts, region_ends) directly from
-        # `StreamingDataset._plan`/`_regions`, so this backend never needs its
-        # own region table the way `_Svar1Backend` does for its readahead path.
-        del bed
+        # Same region-bounds derivation `_Svar1Backend` uses (`:2900`) and that
+        # `StreamingDataset` itself uses: a batch's `r_idx` indexes into this
+        # same sorted table, so the two stay aligned when both are built from
+        # the same `bed`. Needed by `_record_mixed_realign_window` to resolve
+        # the window's contig index -- the `_MixedTracksBackend` protocol
+        # deliberately does not carry `contig_idx`, since widening it would
+        # force a rebase of the already-shipped SVAR2 track.
+        bed_df = bed if isinstance(bed, pl.DataFrame) else sp.bed.read(bed)
+        self._regions = bed_to_regions(
+            sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
+        )
+
+        self._mixed_engine_obj = None
 
     @property
     def has_cached_af(self) -> bool:
@@ -4489,6 +4626,43 @@ class _VcfBackend:
         the written .gvi, so streaming <-> written agree on AF availability.
         """
         return self._has_cached_af
+
+    def _mixed_engine(self) -> object:
+        """A zero-job engine kept solely for `window_realign_inputs` calls.
+
+        `window_realign_inputs` decodes the window it is handed and never
+        touches the engine's own plan, so a plan-less engine is enough -- and
+        keeping it separate from the drive's engine means the mixed track read
+        cannot perturb the producer/consumer lockstep. Built lazily and cached
+        on the backend, paid once per `StreamingDataset`, not once per window.
+        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
+        #307 placeholder optimization makes this call allocate no reference
+        bytes at all -- without it, this would otherwise pull the whole
+        reference (and, for PGEN, a full second `.pvar` scan) into a second
+        Rust engine (issue #375 Track B final review, H1).
+        """
+        if self._mixed_engine_obj is None:
+            self._mixed_engine_obj = self.build_engine([], 1, 1)
+        return self._mixed_engine_obj
+
+    def mixed_realign_window(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        t_starts: NDArray[np.int32],
+        t_ends: NDArray[np.int32],
+        row_starts: NDArray[np.int32],
+        row_ends: NDArray[np.int32],
+    ) -> tuple[_MixedRealign, NDArray[np.int32]]:
+        """See `_Svar1Backend.mixed_realign_window` for the full contract.
+
+        Both record backends delegate to the shared
+        `_record_mixed_realign_window`: they differ only in their Rust
+        `WindowFiller`, which the engine hides.
+        """
+        return _record_mixed_realign_window(
+            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+        )
 
     def build_engine(
         self,
@@ -4552,8 +4726,21 @@ class _VcfBackend:
         ]
 
         contig_names = list(self._contigs)
+        # Materialize reference bytes ONLY for contigs some job touches (#307),
+        # mirroring `_Svar1Backend.build_engine`: the engine indexes
+        # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
+        # Materializing every contig would pull the whole reference into
+        # Python (and again into the Rust engine) on every `build_engine` call
+        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # `touched_contigs` is empty and this now allocates nothing at all.
+        # Untouched contigs get an empty placeholder to keep the per-contig
+        # arrays index-aligned (the engine requires equal per-contig lengths).
+        touched_contigs = {int(j[0]) for j in jobs}
         contig_ref_bytes = [
-            self._ref._contig_slice(i)[0] for i in range(len(contig_names))
+            self._ref._contig_slice(i)[0]
+            if i in touched_contigs
+            else np.empty(0, np.uint8)
+            for i in range(len(contig_names))
         ]
 
         job_contig_idx = [int(j[0]) for j in jobs]
@@ -4616,8 +4803,8 @@ class _PgenBackend:
     read/cached here.
     """
 
-    #: Mixed variants+tracks not wired for this backend yet (issue #375).
-    supports_mixed_tracks: ClassVar[bool] = False
+    #: Mixed variants+tracks wired via `_record_mixed_realign_window` (issue #375, Track B).
+    supports_mixed_tracks: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -4673,12 +4860,19 @@ class _PgenBackend:
         # is `ref`, and it IS wired through `build_engine` below -- servable == available.
         self.servable_var_fields = list(self.available_var_fields)
 
-        # `bed` is accepted for interface symmetry with `_Svar1Backend.__init__`
-        # (the public ladder branch constructs every backend the same way) but
-        # unused here, same as `_VcfBackend`: `build_engine`'s `jobs` already
-        # carry each window's (contig_idx, region_starts, region_ends) directly
-        # from `StreamingDataset._plan`/`_regions`.
-        del bed
+        # Same region-bounds derivation `_Svar1Backend` uses (`:2900`) and that
+        # `StreamingDataset` itself uses: a batch's `r_idx` indexes into this
+        # same sorted table, so the two stay aligned when both are built from
+        # the same `bed`. Needed by `_record_mixed_realign_window` to resolve
+        # the window's contig index -- the `_MixedTracksBackend` protocol
+        # deliberately does not carry `contig_idx`, since widening it would
+        # force a rebase of the already-shipped SVAR2 track.
+        bed_df = bed if isinstance(bed, pl.DataFrame) else sp.bed.read(bed)
+        self._regions = bed_to_regions(
+            sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
+        )
+
+        self._mixed_engine_obj = None
 
     @property
     def has_cached_af(self) -> bool:
@@ -4687,6 +4881,43 @@ class _PgenBackend:
         AF filtering on PGEN is guarded upstream; always False.
         """
         return False
+
+    def _mixed_engine(self) -> object:
+        """A zero-job engine kept solely for `window_realign_inputs` calls.
+
+        `window_realign_inputs` decodes the window it is handed and never
+        touches the engine's own plan, so a plan-less engine is enough -- and
+        keeping it separate from the drive's engine means the mixed track read
+        cannot perturb the producer/consumer lockstep. Built lazily and cached
+        on the backend, paid once per `StreamingDataset`, not once per window.
+        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
+        #307 placeholder optimization makes this call allocate no reference
+        bytes at all -- without it, this would otherwise pull the whole
+        reference (and, for PGEN, a full second `.pvar` scan) into a second
+        Rust engine (issue #375 Track B final review, H1).
+        """
+        if self._mixed_engine_obj is None:
+            self._mixed_engine_obj = self.build_engine([], 1, 1)
+        return self._mixed_engine_obj
+
+    def mixed_realign_window(
+        self,
+        r_idx: NDArray[np.intp],
+        s_idx: NDArray[np.intp],
+        t_starts: NDArray[np.int32],
+        t_ends: NDArray[np.int32],
+        row_starts: NDArray[np.int32],
+        row_ends: NDArray[np.int32],
+    ) -> tuple[_MixedRealign, NDArray[np.int32]]:
+        """See `_Svar1Backend.mixed_realign_window` for the full contract.
+
+        Both record backends delegate to the shared
+        `_record_mixed_realign_window`: they differ only in their Rust
+        `WindowFiller`, which the engine hides.
+        """
+        return _record_mixed_realign_window(
+            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+        )
 
     def build_engine(
         self,
@@ -4736,8 +4967,21 @@ class _PgenBackend:
         want_ref = "ref" in _active_fields
 
         contig_names = list(self._contigs)
+        # Materialize reference bytes ONLY for contigs some job touches (#307),
+        # mirroring `_Svar1Backend.build_engine`: the engine indexes
+        # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
+        # Materializing every contig would pull the whole reference into
+        # Python (and again into the Rust engine) on every `build_engine` call
+        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # `touched_contigs` is empty and this now allocates nothing at all.
+        # Untouched contigs get an empty placeholder to keep the per-contig
+        # arrays index-aligned (the engine requires equal per-contig lengths).
+        touched_contigs = {int(j[0]) for j in jobs}
         contig_ref_bytes = [
-            self._ref._contig_slice(i)[0] for i in range(len(contig_names))
+            self._ref._contig_slice(i)[0]
+            if i in touched_contigs
+            else np.empty(0, np.uint8)
+            for i in range(len(contig_names))
         ]
 
         job_contig_idx = [int(j[0]) for j in jobs]

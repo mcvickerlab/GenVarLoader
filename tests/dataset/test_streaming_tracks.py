@@ -22,12 +22,22 @@ from genvarloader._dataset._streaming import (
 )
 from genvarloader._dataset._track_stream import _TrackBackend
 
+from tests.dataset._mixed_assertions import _assert_cell_equal, _assert_haps_cell_equal
+
 # Backends that implement the `_MixedTracksBackend` protocol (issue #375) vs.
-# those that don't yet. Move a name between these two tuples as backends gain
-# (or lose) mixed variants+tracks support -- `test_supports_mixed_tracks_flags_
-# match_mixed_realign_window_protocol` below iterates both.
-_MIXED_TRACKS_CONFORMING_BACKENDS = (_Svar1Backend, _Svar2Backend)
-_MIXED_TRACKS_NONCONFORMING_BACKENDS = (_VcfBackend, _PgenBackend)
+# those that don't. Both tracks of #375 have landed, so every built-in backend
+# conforms today and the second tuple is empty; it is kept so that a backend
+# added without mixed support moves ONE name between these two tuples instead
+# of editing assertions in the test body --
+# `test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol` below
+# iterates both.
+_MIXED_TRACKS_CONFORMING_BACKENDS = (
+    _Svar1Backend,
+    _Svar2Backend,
+    _VcfBackend,
+    _PgenBackend,
+)
+_MIXED_TRACKS_NONCONFORMING_BACKENDS = ()
 
 
 def test_fixture_builds(streaming_tracks_fixture):
@@ -441,88 +451,6 @@ def test_tracks_only_rejects_jitter(streaming_tracks_fixture):
 # --- Issue #279 Task 7: mixed SVAR1 variants + re-aligned tracks -----------
 
 
-def _assert_cell_equal(streamed, expected, ctx=""):
-    """Assert one ``(region, sample)`` cell is byte-identical to the oracle.
-
-    Compares a streamed cell against ``Dataset[r, s]``'s tracks half through
-    the Ragged's own ``shape`` / ``lengths`` / packed values, NOT by indexing
-    down to leaves. Two accessor traps make the obvious spelling wrong:
-
-    1. Chained integer indexing (``cell[t][h]``) does NOT return a sub-Ragged.
-       seqpro CONCATENATES the indexed group, so ``cell[0]`` on a
-       ``(t, p, None)`` Ragged yields one flat array holding BOTH haplotypes
-       and ``cell[0][0]`` collapses to a 0-d scalar -- comparing a scalar
-       against an 18-element array and reporting a value diff for what is
-       really a bad accessor.
-    2. ``.data`` on a cell sliced out of a batch is the WHOLE batch's backing
-       buffer, not the cell's slice of it, so its length is the batch total
-       (80) rather than the cell's (38) even when ``.lengths`` already agrees.
-       ``.to_packed()`` trims it to just this cell's values.
-
-    ``with_len(L)`` returns a dense ndarray rather than a Ragged, so handle
-    that shape-only case separately instead of demanding a ``.lengths``.
-
-    The ragged assertions are ordered so the most diagnostic one fails first,
-    matching the spec's three required parity axes:
-
-    1. ``shape[:-1]`` -- rank plus the track and ploidy sizes. A spurious
-       squeeze or a missing ploidy axis fails HERE, as a shape error, rather
-       than silently broadcasting into a value diff.
-    2. ``lengths`` -- per-(track, hap) output length. A mismatch is the
-       signature of the extend_to_length span bug and must fail loudly and
-       separately from a value diff.
-    3. packed values -- the flat values in ``(track, ploidy)`` order. This is
-       the byte oracle, and comparing the FLAT buffer is what makes the
-       assertion sensitive to the ``(t, b, p)`` vs ``(b, t, p)`` assembly
-       ordering: a mis-ordered buffer has identical shape and identical
-       lengths, and differs only here.
-    """
-    if not hasattr(streamed, "lengths") or not hasattr(expected, "lengths"):
-        # `with_len(L)` yields dense arrays on both sides; shape carries the
-        # track and ploidy axes directly, so one comparison covers everything.
-        s, e = np.asarray(streamed), np.asarray(expected)
-        assert s.shape == e.shape, f"{ctx}shape {s.shape} != oracle {e.shape}"
-        np.testing.assert_array_equal(s, e, err_msg=f"{ctx}track values differ")
-        return
-
-    s_shape, e_shape = streamed.shape[:-1], expected.shape[:-1]
-    assert s_shape == e_shape, f"{ctx}shape {s_shape} != oracle {e_shape}"
-    np.testing.assert_array_equal(
-        np.asarray(streamed.lengths),
-        np.asarray(expected.lengths),
-        err_msg=f"{ctx}per-(track, hap) lengths differ",
-    )
-    np.testing.assert_array_equal(
-        np.asarray(streamed.to_packed().data),
-        np.asarray(expected.to_packed().data),
-        err_msg=f"{ctx}track values differ",
-    )
-
-
-def _assert_haps_cell_equal(streamed, expected, ploidy: int, ctx="") -> None:
-    """Assert the HAPLOTYPE half of one mixed cell matches ``Dataset[r, s][0]``.
-
-    Issue #380: before the mixed drive returned both halves, streaming
-    reconstructed these bytes and discarded them, so no mixed fixture could
-    ever check them -- the haplotype half of the mixed path was un-oracled.
-
-    Compared per haplotype (the spelling ``test_streaming_with_len.py`` and
-    ``test_streaming_vcf_parity.py`` already use) rather than through
-    ``to_packed()``: it is the one form that works unchanged for BOTH the
-    ragged output and the dense ndarray ``with_len(L)`` yields, on either
-    side, and it names the offending haplotype when it fails.
-    """
-    for h in range(ploidy):
-        got = np.asarray(streamed[h])
-        exp = np.asarray(expected[h])
-        assert got.shape == exp.shape, (
-            f"{ctx}hap {h}: shape {got.shape} != oracle {exp.shape}"
-        )
-        np.testing.assert_array_equal(
-            got, exp, err_msg=f"{ctx}hap {h}: haplotype bytes differ"
-        )
-
-
 def test_mixed_parity_with_indels(streaming_tracks_fixture):
     """Tracks re-aligned to haplotype coordinates -- the case #279 calls out.
 
@@ -783,22 +711,24 @@ def test_realign_false_drops_ploidy_axis(streaming_tracks_fixture):
     _assert_haps_cell_equal(haps[0], exp_haps, sds.ploidy, ctx=f"cell (r={r}, s={s}): ")
 
 
-@pytest.mark.parametrize("src", ["vcf", "pgen"])
-def test_mixed_tracks_non_svar1_raises(streaming_case, src):
-    """Mixed variants+tracks raises for the VCF/PGEN backends.
+def test_mixed_tracks_guard_fires_for_a_nonconforming_backend(
+    streaming_case, monkeypatch
+):
+    """The `supports_mixed_tracks` capability guard still rejects a backend without it.
 
-    Combining ``tracks=`` with a VCF or PGEN variant source must raise
-    ``NotImplementedError`` at ``to_iter`` time, not silently ignore the tracks
-    or produce wrong output. Parametrized across both variant sources this
-    guard still covers (SVAR1 and SVAR2 both declare the mixed
-    variants+tracks capability today -- issue #375 -- so neither fires this
-    guard; they are exercised by the parity tests instead).
+    Both tracks of issue #375 have landed, so every BUILT-IN backend declares
+    the mixed variants+tracks capability and no real source reaches this guard
+    any more. The guard is not dead code -- it is the contract a future
+    backend must satisfy before `to_iter` will feed it tracks -- so drop the
+    flag on one backend and assert the rejection still fires at `to_iter`
+    time, rather than the tracks being silently ignored or wrongly produced.
 
     Sample ids come from the written oracle's own ``samples`` (not a
     hand-typed guess) so the ``Table`` construction here can't drift out of
-    sync with whichever fixture ``src`` selects.
+    sync with the fixture.
     """
-    bed, reference, variants, written = streaming_case(src)
+    bed, reference, variants, written = streaming_case("vcf")
+    monkeypatch.setattr(_VcfBackend, "supports_mixed_tracks", False)
     samples = list(written.samples)
     table = gvl.Table(
         "t",
@@ -815,18 +745,17 @@ def test_mixed_tracks_non_svar1_raises(streaming_case, src):
     sds = gvl.StreamingDataset(
         bed, reference=reference, variants=variants, tracks=table
     )
-    with pytest.raises(NotImplementedError, match="SVAR1|\\.svar"):
+    with pytest.raises(NotImplementedError, match="supports_mixed_tracks"):
         next(iter(sds.to_iter(batch_size=1)))
 
 
 def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """Pin the data the `to_iter` capability guard actually reads (issue #375).
 
-    `test_mixed_tracks_non_svar1_raises` above already pins the guard's
-    user-visible BEHAVIOR (VCF/PGEN + ``tracks=`` raises `NotImplementedError`
-    at `to_iter` time) -- constructing another `StreamingDataset` over one of
-    those sources would only repeat that, not add coverage. What that test
-    can't see is the guard's SOURCE OF TRUTH: each backend's
+    `test_mixed_tracks_guard_fires_for_a_nonconforming_backend` above already
+    pins the guard's user-visible BEHAVIOR (a backend that does not declare
+    the capability raises `NotImplementedError` at `to_iter` time). What that
+    test can't see is the guard's SOURCE OF TRUTH: each backend's
     `supports_mixed_tracks` `ClassVar[bool]`,
     and -- since the #375 fix round -- whether a backend that sets it `True`
     actually shapes `mixed_realign_window` to match the `_MixedTracksBackend`
@@ -844,8 +773,8 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     """
     import inspect
 
-    # SVAR1 and SVAR2 are wired for mixed variants+tracks today (issue #375);
-    # VCF/PGEN are not yet.
+    # Every built-in backend is wired for mixed variants+tracks now that both
+    # tracks of issue #375 have landed.
     for backend in _MIXED_TRACKS_CONFORMING_BACKENDS:
         assert backend.supports_mixed_tracks is True
     for backend in _MIXED_TRACKS_NONCONFORMING_BACKENDS:
@@ -864,13 +793,19 @@ def test_supports_mixed_tracks_flags_match_mixed_realign_window_protocol():
     # `mixed_realign_window` disagrees with the protocol. This test is the
     # runtime backstop for a checker that is not run, or is run permissively.
     # `eval_str=True` RESOLVES the string annotations rather than comparing
-    # them textually. Both declarations are `from __future__`-style strings,
-    # and the two spell the same type differently -- the protocol quotes the
-    # whole return (`"tuple[_MixedRealign, NDArray[np.int32]]"`), the backend
-    # quotes only the forward reference (`tuple["_MixedRealign", ...]`). Those
-    # are the same type, and a textual comparison would fail on the quoting
-    # alone, which is exactly the kind of false alarm that gets a test deleted
-    # instead of heeded.
+    # them textually. The rule every conforming `mixed_realign_window` must
+    # follow: annotate its return UNQUOTED, as
+    # `tuple[_MixedRealign, NDArray[np.int32]]`, exactly like the protocol.
+    # `eval_str=True` does not unwrap a quoted forward reference nested
+    # inside a subscript -- `tuple["_MixedRealign", ...]` evaluates to a
+    # tuple whose first argument is the *string* `"_MixedRealign"`, which
+    # compares UNEQUAL to `tuple[_MixedRealign, ...]`. Quoting only the inner
+    # name therefore fails this comparison with a confusing message; quoting
+    # nothing (as `_MixedTracksBackend.mixed_realign_window` itself does, at
+    # `_streaming.py:448`) or quoting the WHOLE annotation (as the
+    # module-level `_record_mixed_realign_window` helper does, at
+    # `_streaming.py:695`) both pass -- only a partial quote inside the
+    # subscript fails.
     expected_sig = inspect.signature(
         _MixedTracksBackend.mixed_realign_window, eval_str=True
     )

@@ -471,10 +471,19 @@ for (haps, tracks), region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 ```
 ````
 
-**Mixed variants + tracks streaming is supported for `.svar` (SVAR1) and `.svar2` sources.** VCF
-and PGEN sources still raise `NotImplementedError` (issue #375) when combined with `tracks=` —
-neither backend exposes the genotype seam the re-alignment kernel needs. Tracks alone (no
-`variants=`) work on every backend combination, since there is nothing to re-align against.
+**Mixed variants + tracks is supported on every variant backend**: `.svar` (SVAR1), `.svar2`
+(SVAR2), VCF/BCF and PGEN. Tracks alone (no `variants=`) work on every backend combination too,
+since there is nothing to re-align against.
+
+```{warning}
+**Known parity gap: re-aligned tracks under a long `with_len(L)`.** When `L` exceeds a
+deletion-shrunk haplotype's natural length, streaming fills the track's trailing region with real
+signal read from beyond the region's end, while a written `Dataset` zero-pads that tail — so the
+two disagree there. This affects every backend that re-aligns tracks rather than any one of them
+(confirmed on SVAR1, VCF/BCF and PGEN). The default ragged output is unaffected, as is any `L` at
+or below the natural length. Tracked as
+[#398](https://github.com/mcvickerlab/GenVarLoader/issues/398).
+```
 
 `with_seqs` combined with tracks only wires the default `"haplotypes"` kind; the written path
 supports more, and streaming's gaps raise rather than silently degrade:
