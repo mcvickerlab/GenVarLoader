@@ -580,7 +580,19 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     indel = np.asarray(d["vk_indel_range"], np.int64)
     nonempty = (snp[:, 1] > snp[:, 0]) | (indel[:, 1] > indel[:, 0])
 
-    n_cells = 3 * len(sorted_samples) * svar2.ploidy
-    assert len(nonempty) == n_cells
-    assert nonempty.any(), "fixture has no variants at all"
-    assert not nonempty.all(), "fixture is 100% fill; the empty-cell branch is dead"
+    S, P = len(sorted_samples), svar2.ploidy
+    assert len(nonempty) == 3 * S * P
+    # Row-major (R, S, P) -- pinned by the layout oracle in
+    # test_write_svar2_emits_cache, which asserts this same reshape against the
+    # cache memmaps. Assert each empty structure SEPARATELY: a single
+    # `not nonempty.all()` is a disjunction that stays green when either one
+    # regresses alone, which is exactly the regression this guard exists to catch.
+    grid = nonempty.reshape(3, S, P)
+    s2 = sorted_samples.index("S2")
+    assert not grid[:, s2].any(), (
+        "S2 is no longer all-reference; the empty COLUMN is gone"
+    )
+    assert not grid[2].any(), (
+        "region [25, 40) now holds variants; the empty ROW is gone"
+    )
+    assert grid[:2, :2].any(), "fixture has no variants at all"
