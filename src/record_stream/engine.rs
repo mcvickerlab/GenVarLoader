@@ -1011,6 +1011,7 @@ impl RecordStreamEngine {
     #[allow(clippy::too_many_arguments)]
     fn debug_decode_window(
         &self,
+        py: Python<'_>,
         contig_idx: usize,
         region_starts: Vec<u32>,
         region_ends: Vec<u32>,
@@ -1030,14 +1031,97 @@ impl RecordStreamEngine {
             s_hi,
         };
         let backend = Arc::clone(self.core.backend());
-        let slot = backend
-            .debug_fill(&job)
+        // Release the GIL before decoding -- see `PgenWindowFiller::reader_lock`'s
+        // lock-before-GIL ordering rule. Without this, a call made while a producer is
+        // live would block on that lock while holding the GIL the producer needs to
+        // proceed: the same deadlock `window_realign_inputs` avoids via `py.detach`.
+        let slot = py
+            .detach(|| backend.debug_fill(&job))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok((
             slot.v_starts,
             slot.ilens,
             slot.alt_alleles,
             slot.alt_offsets,
+        ))
+    }
+
+    /// Decode one window's genotype table + CSR for the Python mixed
+    /// variants+tracks path (issue #375, Track B).
+    ///
+    /// Returns `(v_starts, ilens, geno_v_idxs, geno_offsets)`, all WINDOW-LOCAL:
+    /// `geno_v_idxs` holds column indices into `v_starts`/`ilens`, and
+    /// `geno_offsets` is the per-hap CSR of the window's sample sub-range
+    /// (length `(s_hi - s_lo) * ploidy + 1`), NOT per (region, sample) row --
+    /// every region in a window shares one decoded genotype table, exactly as
+    /// [`RecordBackend::kept_v_idxs`] assumes (`h = si * ploidy + p`). The
+    /// caller replicates rows across regions.
+    ///
+    /// Python needs these BEFORE the window's first batch, to size the
+    /// deletion-extended track query, so this cannot ride along on
+    /// `next_batch` (which is sub-window) and cannot read the producer's slot
+    /// (which the consumer owns). It therefore does its own synchronous decode
+    /// in the calling thread via `debug_fill`, the same path
+    /// `debug_decode_window` uses. That means a mixed VCF/PGEN stream decodes
+    /// each window TWICE: once here for the track sizing, once in the producer
+    /// for the haplotypes.
+    ///
+    /// As shipped, Python's `_mixed_engine()` gives this call its OWN engine
+    /// (a separate `PgenWindowFiller`/`reader_lock` or `VcfWindowFiller` from
+    /// the drive's), so in production this decode never actually contends
+    /// with the producer -- the two run against independent fillers with no
+    /// shared mutable state. `PgenWindowFiller`'s `reader_lock` (see its doc
+    /// comment) would still serialize this call against a producer sharing
+    /// the SAME filler, which is why it stays: `debug_fill` is a genuine
+    /// production entry point (not test-only), and the lock is what makes the
+    /// obvious future consolidation onto one engine safe. Today only
+    /// `test_window_realign_inputs_matches_before_and_during_producer`
+    /// exercises that pairing (final review, M1). VCF needs no lock either
+    /// way -- `VcfWindowFiller::fill` opens a fresh record source per call, so
+    /// there is no shared mutable reader to race. Net cost: roughly 2x decode
+    /// on the mixed path (one per engine); folding this into a single shared
+    /// engine is a tracked follow-up, not a v1 requirement.
+    #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
+    #[allow(clippy::too_many_arguments)]
+    fn window_realign_inputs<'py>(
+        &self,
+        py: Python<'py>,
+        contig_idx: usize,
+        region_starts: Vec<u32>,
+        region_ends: Vec<u32>,
+        s_lo: usize,
+        s_hi: usize,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i64>>,
+    )> {
+        if region_starts.len() != region_ends.len() {
+            return Err(PyValueError::new_err(
+                "window_realign_inputs: region_starts and region_ends must have the same length",
+            ));
+        }
+        let regions: Vec<(u32, u32)> = region_starts.into_iter().zip(region_ends).collect();
+        let job = RecordJob {
+            contig_idx,
+            regions,
+            s_lo,
+            s_hi,
+        };
+        let backend = Arc::clone(self.core.backend());
+        // Release the GIL for the decode: `PgenWindowFiller::fill` takes its `reader_lock`
+        // before re-acquiring the GIL internally, and the producer thread does the same, so
+        // holding the GIL across this call would deadlock the two against each other. Also
+        // lets the producer keep making progress while this synchronous decode runs.
+        let slot = py
+            .detach(|| backend.debug_fill(&job))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok((
+            Array1::from_vec(slot.v_starts).into_pyarray(py),
+            Array1::from_vec(slot.ilens).into_pyarray(py),
+            Array1::from_vec(slot.geno_v_idxs).into_pyarray(py),
+            Array1::from_vec(slot.geno_offsets).into_pyarray(py),
         ))
     }
 }

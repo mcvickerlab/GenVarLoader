@@ -471,10 +471,19 @@ for (haps, tracks), region_idxs, sample_idxs in sds.to_iter(batch_size=32):
 ```
 ````
 
-**Mixed variants + tracks is SVAR1-only in v1.** Combining `tracks=` with a VCF/BCF, PGEN, or
-`.svar2` variant source raises `NotImplementedError` — none of those three backends exposes the
-genotype seam the re-alignment kernel needs. Tracks alone (no `variants=`) work on every backend
-combination, since there is nothing to re-align against.
+**Mixed variants + tracks supports SVAR1, VCF/BCF, and PGEN.** Combining `tracks=` with a
+`.svar2` variant source raises `NotImplementedError` — SVAR2 uses a different written-path track
+kernel and does not yet expose the genotype seam the re-alignment kernel needs. Tracks alone (no
+`variants=`) work on every backend combination, since there is nothing to re-align against.
+
+```{warning}
+**Known parity gap: re-aligned tracks under a long `with_len(L)`.** When `L` exceeds a
+deletion-shrunk haplotype's natural length, streaming fills the track's trailing region with real
+signal read from beyond the region's end, while a written `Dataset` zero-pads that tail — so the
+two disagree there. This affects every backend that re-aligns tracks (SVAR1, VCF/BCF and PGEN
+alike) and is not specific to any one of them. The default ragged output is unaffected, as is any
+`L` at or below the natural length. Tracked as a follow-up.
+```
 
 `with_seqs` combined with tracks only wires the default `"haplotypes"` kind; the written path
 supports more, and streaming's gaps raise rather than silently degrade:
