@@ -4,7 +4,7 @@
 
 **Goal:** Replace the dense `(R, S, P, 2)` `svar2_ranges` var-key memmaps with a region-CSR sparse table holding only non-empty cells, and replace the dense `(R, S, P)` `n_variants` allocation with a zero-stride view.
 
-**Architecture:** A new module `_svar2_ranges.py` owns both on-disk layouts behind one `_RangeLookup` protocol (`lookup` for reads, `iter_entries` for concat), resolved by a path-level `_ranges_reader(ranges_dir)` factory. The reader, writer and concat all go through that seam, so the layout swap never leaks into the FFI, the kernels, or `Svar2Haps`'s query code. Sparse entries are 28 bytes (`cell_id` int32 + a 24-byte `(start, len)` record) against dense's 32 bytes per cell, so sparse is strictly smaller at every fill level.
+**Architecture:** A new module `_svar2_ranges.py` owns both on-disk layouts behind one `_RangeLookup` protocol (`lookup` for reads, `entries_for_regions` for concat), resolved by a path-level `_ranges_reader(ranges_dir)` factory. The reader, writer and concat all go through that seam, so the layout swap never leaks into the FFI, the kernels, or `Svar2Haps`'s query code. Sparse entries are 28 bytes (`cell_id` int32 + a 24-byte `(start, len)` record) against dense's 32 bytes per cell, so sparse is strictly smaller at every fill level.
 
 **Tech Stack:** Python 3.10+, numpy (structured arrays, memmap, vectorized binary search), polars, pytest + Hypothesis, `pixi -e dev`. No Rust changes.
 
@@ -18,17 +18,35 @@
 - **Raw headerless files.** `region_ptr.npy`, `cell_id.npy` and `cell_vk.npy` are raw `tofile` dumps with their shape recorded in `svar2_meta.json`, matching the existing `vk_*_range.npy` / `dense_*_range.npy` convention. Only `sample_cols.npy` is a real `.npy`.
 - **`S * P < 2**31`** — asserted at write; `cell_id` is int32.
 - **`genoray_core` is pinned** at `d-laub/genoray` rev `d66ec0e` (`Cargo.toml:31-32`). The whole design rests on `gather_haps_readbound_impl` never reading an empty range's `start` (`genoray:src/query/gather.rs:772`). Do not bump genoray in this PR.
+- **Pure Python/numpy. No Rust, no numba.** `Cargo.toml` (`0.2.1`) is untouched; `src/` does not change. numba is not available either — gvl's own source is numba-free and `tests/parity/test_import_no_numba.py` enforces it (the `pixi.toml:94-99` pin exists only because seqpro imports it eagerly). Two measured kernel opportunities are deliberately deferred to follow-up issues; see Task 10 Step 9.
+- **The Rust-migration roadmap no longer exists.** `docs/roadmaps/rust-migration.md` was retired in `8f9d3c99` and `python/genvarloader/_dispatch.py` (the backend dispatch registry) went with it. Do not cite either. The surviving convention, if a kernel ever lands, is a `#[pyfunction]` in `src/ffi/mod.rs` over a kernel in a domain module, registered in `src/lib.rs`'s `#[pymodule]`, with frozen `.npz` goldens under `tests/parity/` — note that means parity needs a hand-written numpy oracle, since there is no longer a dual-backend harness to diff against.
 - **Conventional commits**, enforced by a commitizen prek hook. Prefix each commit `feat:`, `test:`, `refactor:`, `docs:` or `perf:` as the step says.
 - **Every command runs under pixi:** `pixi run -e dev pytest ...`, `pixi run -e dev ruff ...`.
 - **`np.multiply(..., dtype=np.int64)` for every key computation.** int32 `r_q * S` wraps silently and the later `+ arange(P)` promotes the already-wrapped value, so the dtype gives no tell.
 
-## Deviations from the spec (decided while planning, apply these)
+## Deviations from the spec (measured — apply these)
 
-Three points where the spec's prose does not survive contact with the code. The spec's *intent* is preserved; the mechanism changed.
+Points where the spec's prose does not survive contact with the code or a stopwatch. Every number below was measured under `pixi -e dev` on an M4 Pro with numpy 1.26.4. Re-measure on the deployment machine before quoting any of them in the PR.
 
-1. **No `argsort` in the sparse probe.** The spec's "Probe sorting" section justifies `argsort` by numpy's galloping fast path for sorted needles in `np.searchsorted`. The two-level probe does not call `searchsorted` per query — it is a manual vectorized binary search, where sorting buys only cache locality in the `cell_id[mid]` gathers, an unmeasured and different effect. Task 9's benchmark measures a sorted variant; keep it only if it wins. Default: no sort.
-2. **The zero-search fast path is table-side, not query-side.** The spec describes it as "the queried slots cover the whole block". Detecting that generically is awkward; detecting `region_ptr[r+1] - region_ptr[r] == S * P` (the region is fully occupied) is one vectorized comparison and captures the high-fill regime the 28-byte entry exists for. A query-side scatter for the all-samples case is recorded as future work, not built.
-3. **Per-contig sort, kept.** The spec already argues for one stable radix sort per contig over a `bincount` interleave (the interleave degrades to a 535k-row counts matrix when `samples_per_chunk == 1`). This plan implements the sort. No change — restated because it contradicts the superseded first draft.
+1. **No `argsort` in the sparse probe — settled, not deferred.** The spec's "Probe sorting" section justifies `argsort` by numpy's galloping fast path for sorted needles in `np.searchsorted`. The two-level probe never calls `searchsorted` per query, so that justification does not transfer. Measured: **0.894 ms sorted vs 0.894 ms unsorted** at All of Us chr22, and *slower* sorted at `N = 1e6`. Strike the spec's section rather than leaving a benchmark column keeping the decision open.
+
+2. **The zero-search fast path is table-side, not query-side.** `region_ptr[r+1] - region_ptr[r] == S * P` (region fully occupied) is one vectorized comparison and captures the high-fill regime the 28-byte entry exists for. Measured 0.35 ms vs 0.89 ms. A query-side scatter for the all-samples case is future work, not built.
+
+3. **`np.argsort(kind="stable")` on int64 is NOT radix — the central claim about the write path is false.** numpy wires radix only for integer types of 16 bits or less; numpy's own docstring says otherwise and is wrong. Measured, N = 4e6 random:
+
+   | dtype | ns/element | sort actually used |
+   |---|---|---|
+   | int16 | 2.9 | radix |
+   | int32 | 98.3 | comparison |
+   | int64 | 136.3 | comparison |
+
+   The per-contig sort only *looked* linear because timsort's run detection fired on the already-sorted per-chunk runs — and it degrades as chunks shrink, which is exactly the regime the sort was chosen to survive (measured 914 ms at k=30 chunks, 1369 ms at k=500). Task 5 replaces it with a genuine O(N) counting-sort scatter whose auxiliary state is O(regions), never (chunks × regions): **532 ms, flat in k, byte-identical output, 0.56× the peak RSS.**
+
+4. **The streaming k-way merge in concat is replaced by a region-batched gather+sort.** The first draft claimed its Python loop "runs once per block boundary". Wrong: merged keys are `r*span + slot*ploidy + ploid`, so on `axis="samples"` the ownership pattern repeats *inside every region* and the loop runs once per alternation. Two shards with interleaved sample IDs — the normal case for biobank release batches — give ~N/2 iterations, i.e. **~29 minutes of pure Python at the genome projection**, against the ~3 ms the framing predicted. The replacement is simpler *and* interleaving-independent; see Task 8.
+
+5. **No Rust kernel in this PR, on measurement rather than principle.** The probe is 93% numpy-pass-bound and 7% memory-bound, so a fused kernel would win 3–5× single-threaded — worth **0.5% of a 171 ms batch**. On the write path the real hot spot is `np.nonzero` (71% of the chunk kernel), not the four gathers, and even that sits behind genoray materializing a 128 GB dense block per chr22 contig. Both are filed as follow-ups in Task 10 Step 9, with the genoray one flagged as the larger prize.
+
+6. **`0.43.0` is a commitizen outcome** of a `feat:` commit under `version_provider = "pep621"`, not a hand-edit.
 
 ---
 
@@ -352,7 +370,7 @@ Pure numpy, no genoray, no fixtures. This is the load-bearing algorithm; it gets
 - Consumes: nothing.
 - Produces:
   - `ENTRY_DTYPE: np.dtype` — 24 bytes, fields `snp_start` `<i8`, `indel_start` `<i8`, `snp_len` `<i4`, `indel_len` `<i4`.
-  - `class _RangeLookup(Protocol)` with attributes `n_regions: int`, `n_samples: int`, `ploidy: int` and methods `lookup(r_q, si_q, P) -> tuple[NDArray[np.int64], NDArray[np.int64]]` and `iter_entries() -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]`.
+  - `class _RangeLookup(Protocol)` with attributes `n_regions: int`, `n_samples: int`, `ploidy: int` and methods `lookup(r_q, si_q, P) -> tuple[NDArray[np.int64], NDArray[np.int64]]`, `entries_for_regions(r0, r1) -> tuple[NDArray[np.int64], NDArray[np.void]]` and `iter_entries() -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]`.
   - `class _SparseRanges` with constructor `_SparseRanges(region_ptr, cell_id, cell_vk, n_regions, n_samples, ploidy)`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -427,19 +445,31 @@ def _random_dense(rng: np.random.Generator, R: int, S: int, P: int, fill: float)
 
 
 def _assert_parity(dense, sparse, r_q, si_q, P):
-    """Sparse == dense on non-empty cells; sparse == (0, 0) on empty ones."""
+    """Sparse == dense on PRESENT cells; sparse == (0, 0) on absent ones.
+
+    Presence is a property of the CELL, not of one channel. A cell is stored when
+    the SNP range OR the indel range is non-empty, so a present cell whose SNP
+    range happens to be empty carries the real `snp_start` with `snp_len == 0` and
+    `lookup` returns the true insertion point `(x, x)` -- NOT `(0, 0)`. Only an
+    absent cell returns zeros.
+
+    Keying this off `d[:, 1] == d[:, 0]` per channel is wrong and fails on any
+    table with mixed per-channel emptiness: 400/400 randomized grids. It is
+    invisible at fill 0.0 and fill 1.0, which is exactly why a full-fill test
+    would pass and mask it.
+    """
     d_snp, d_indel = _dense_reference(dense, r_q, si_q, P)
     s_snp, s_indel = sparse.lookup(r_q, si_q, P)
 
     assert s_snp.dtype == np.int64 and s_snp.flags.c_contiguous
     assert s_snp.shape == d_snp.shape
 
+    present = (d_snp[:, 1] > d_snp[:, 0]) | (d_indel[:, 1] > d_indel[:, 0])
     for d, s in ((d_snp, s_snp), (d_indel, s_indel)):
-        empty = d[:, 1] == d[:, 0]
-        np.testing.assert_array_equal(s[~empty], d[~empty])
+        np.testing.assert_array_equal(s[present], d[present])
         # An absent cell must be exactly (0, 0): unconditionally in bounds for
         # the Rust slicing in gather_haps_readbound_impl.
-        np.testing.assert_array_equal(s[empty], 0)
+        np.testing.assert_array_equal(s[~present], 0)
 
 
 def test_lookup_parity_partial_fill():
@@ -451,15 +481,49 @@ def test_lookup_parity_partial_fill():
     _assert_parity(dense, sparse, r_q, si_q, P)
 
 
-def test_lookup_parity_full_fill_uses_contiguous_path():
-    """100% fill: every region block is complete, so no binary search runs."""
+def test_lookup_parity_full_fill_uses_contiguous_path(monkeypatch):
+    """100% fill: every region block is complete, so no binary search runs.
+
+    Asserted, not assumed: this is the whole high-fill regime (sequence-model
+    windows run at ~100% fill), measured at 0.35 ms against 0.89 ms, and a fast
+    path that silently stopped firing would cost 2.5x with every test still
+    green.
+    """
     rng = np.random.default_rng(1)
     R, S, P = 4, 6, 2
     dense = _random_dense(rng, R, S, P, fill=1.0)
     sparse = _sparse_from_dense(dense, R, S, P)
     assert len(sparse.cell_id) == R * S * P, "fill=1.0 did not produce a full table"
+
+    def boom(*a, **k):
+        raise AssertionError("the full-block fast path did not fire")
+
+    monkeypatch.setattr(_SparseRanges, "_lower_bound", boom)
     r_q, si_q = np.unravel_index(np.arange(R * S), (R, S))
     _assert_parity(dense, sparse, r_q, si_q, P)
+
+
+def test_lookup_parity_mixed_full_and_partial_regions():
+    """One partial region must not break the full ones sharing the query.
+
+    The fast path is all-or-nothing per CALL -- `(hi - lo) == span` has to hold
+    for every queried region -- so a mixed table sends full regions through the
+    search too. They must come out identical either way; a search that assumed
+    "not full" would be off by the block's own width.
+    """
+    rng = np.random.default_rng(12)
+    R, S, P = 5, 4, 2
+    dense = _random_dense(rng, R, S, P, fill=1.0)
+    # Empty out one cell in region 2 only: regions 0, 1, 3, 4 stay complete.
+    dense[0][2, 1, 0] = (0, 0)
+    dense[1][2, 1, 0] = (0, 0)
+    sparse = _sparse_from_dense(dense, R, S, P)
+    assert len(sparse.cell_id) == R * S * P - 1
+    r_q, si_q = np.unravel_index(np.arange(R * S), (R, S))
+    _assert_parity(dense, sparse, r_q, si_q, P)
+    # And the full regions alone must still take the fast path.
+    keep = r_q != 2
+    _assert_parity(dense, sparse, r_q[keep], si_q[keep], P)
 
 
 def test_lookup_empty_table():
@@ -585,7 +649,7 @@ definition of what these files mean.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator, Protocol
 
 import numpy as np
@@ -648,14 +712,37 @@ class _RangeLookup(Protocol):
         """
         ...
 
+    def entries_for_regions(
+        self, r0: int, r1: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.void]]:
+        """Non-empty cells of regions ``[r0, r1)``, in ascending global-key order.
+
+        The one primitive ``concat`` and :meth:`iter_entries` are both built on.
+        Region-bounded rather than entry-bounded because ``concat`` merges by
+        *merged region batch*: it needs "everything these regions hold", and a
+        reader cannot answer that from an entry-count-bounded stream.
+
+        Args:
+            r0: First region, inclusive. Must be in ``[0, n_regions]``.
+            r1: Last region, exclusive. Must be in ``[r0, n_regions]``.
+
+        Returns:
+            ``(key, entries)`` where ``key`` is int64
+            ``r * (n_samples * ploidy) + slot * ploidy + ploid`` and ``entries``
+            is a parallel :data:`ENTRY_DTYPE` array. Both are empty if the
+            region range holds no non-empty cell.
+        """
+        ...
+
     def iter_entries(self) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
         """Non-empty cells in ascending global-key order, in blocks.
 
+        A thin region-batched loop over :meth:`entries_for_regions`. Used by
+        ``concat``'s dense-input path and by tests; never by the read path.
+
         Yields:
-            ``(key, entries)`` where ``key`` is int64
-            ``r * (n_samples * ploidy) + slot * ploidy + ploid`` and ``entries``
-            is a parallel :data:`ENTRY_DTYPE` array. Used by ``concat``'s
-            streaming merge; never by the read path.
+            ``(key, entries)``, as :meth:`entries_for_regions` returns them.
+            Empty blocks are skipped.
         """
         ...
 
@@ -698,6 +785,8 @@ class _SparseRanges:
     n_regions: int
     n_samples: int
     ploidy: int
+    _cell_span: int = field(init=False, repr=False, default=0)
+    _depth: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self):
         if len(self.region_ptr) != self.n_regions + 1:
@@ -710,16 +799,21 @@ class _SparseRanges:
                 f"cell_id ({len(self.cell_id)}) and cell_vk ({len(self.cell_vk)})"
                 " must be parallel"
             )
-
-    @property
-    def _cell_span(self) -> int:
-        return self.n_samples * self.ploidy
+        self._cell_span = self.n_samples * self.ploidy
+        # Hoisted out of the probe. Computing this per lookup() is an O(R) pass
+        # over a memmap-backed array: measured 1.5 us at R = 3,734 but 98 us at a
+        # genome-scale R = 202,053, i.e. 2.9% of the whole 3.42 ms lookup budget
+        # spent recomputing a constant.
+        w = self.region_ptr[1:] - self.region_ptr[:-1]
+        widest = int(w.max()) if len(w) else 0
+        # partition_point halves `size` to 1 in exactly ceil(log2(widest)) steps.
+        self._depth = max(1, (widest - 1).bit_length())
 
     def lookup(self, r_q, si_q, P):
         if P != self.ploidy:
             raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
-        r_q = np.asarray(r_q)
-        si_q = np.asarray(si_q)
+        r_q = np.atleast_1d(np.asarray(r_q))
+        si_q = np.atleast_1d(np.asarray(si_q))
         _check_bounds(r_q, si_q, self.n_regions, self.n_samples)
 
         n = len(r_q)
@@ -728,82 +822,120 @@ class _SparseRanges:
         if n == 0 or len(self.cell_id) == 0:
             return vk_snp, vk_indel
 
-        # int64 throughout: r_q * S on int32 wraps silently, and the later
-        # promotion to int64 hides it because the *wrapped* value is promoted.
-        rr = np.repeat(np.asarray(r_q, np.int64), P)
-        target = np.repeat(np.multiply(si_q, P, dtype=np.int64), P) + np.tile(
-            np.arange(P, dtype=np.int64), n
-        )
+        cid = self.cell_id
+        last = len(cid) - 1
 
-        lo = self.region_ptr[rr]
-        hi = self.region_ptr[rr + 1]
+        # int64 throughout: int32 si_q * P wraps silently and the later promotion
+        # hides it, because the *wrapped* value is what gets promoted.
+        # One broadcast rather than repeat + tile + add.
+        target = (
+            np.multiply(si_q, P, dtype=np.int64)[:, None]
+            + np.arange(P, dtype=np.int64)
+        ).reshape(-1)
+        # region_ptr is gathered n times, not n * P times, then broadcast.
+        r64 = np.asarray(r_q, np.int64)
+        lo1 = self.region_ptr[r64]
+        hi1 = self.region_ptr[r64 + 1]
+        lo = np.repeat(lo1, P)
 
-        # Fast path: a region whose block holds every cell needs no search --
-        # cell_id is exactly arange(S * P) there, so position = lo + target.
-        # This is the whole high-fill regime (sequence-model windows run at
-        # ~100% fill), where searching a huge table would hurt most.
-        full = (hi - lo) == self._cell_span
-        if full.all():
-            pos = lo + target
-            hit = np.ones(len(pos), bool)
-        else:
-            pos = self._search(lo, hi, target)
-            hit = (pos < hi) & (self.cell_id[np.minimum(pos, len(self.cell_id) - 1)] == target)
-            np.copyto(pos, lo + target, where=full)
-            np.copyto(hit, True, where=full)
+        if ((hi1 - lo1) == self._cell_span).all():
+            # Every queried region block holds every cell, so cell_id is exactly
+            # arange(S * P) there and position = lo + target with no search and no
+            # hit test. This is the whole high-fill regime -- sequence-model
+            # windows run at ~100% fill -- measured at 0.35 ms against 0.89 ms.
+            pos = lo
+            pos += target
+            e = self.cell_vk[pos]
+            vk_snp[:, 0] = e["snp_start"]
+            np.add(e["snp_start"], e["snp_len"], out=vk_snp[:, 1])
+            vk_indel[:, 0] = e["indel_start"]
+            np.add(e["indel_start"], e["indel_len"], out=vk_indel[:, 1])
+            return vk_snp, vk_indel
 
-        pos = np.minimum(pos, len(self.cell_id) - 1)
-        e = self.cell_vk[pos]
+        hi = np.repeat(hi1, P)
+        pos = self._lower_bound(lo, hi, target)
+        # `lo <= pos` is what makes an empty trailing block (lo == hi == N, where
+        # `base` had to be clamped) report a miss rather than matching the
+        # previous region's last entry.
+        hit = (lo <= pos) & (pos < hi)
+        clamped = np.minimum(pos, last)
+        np.logical_and(hit, cid[clamped] == target, out=hit)
+
+        e = self.cell_vk[clamped]
         for out, start, length in (
             (vk_snp, e["snp_start"], e["snp_len"]),
             (vk_indel, e["indel_start"], e["indel_len"]),
         ):
-            s = np.where(hit, start, 0).astype(np.int64)
+            s = np.where(hit, start, 0)  # already int64; no .astype
             out[:, 0] = s
-            out[:, 1] = s + np.where(hit, length, 0)
+            np.add(s, np.where(hit, length, 0), out=out[:, 1])
         return vk_snp, vk_indel
 
-    def _search(
+    def _lower_bound(
         self, lo: NDArray[np.int64], hi: NDArray[np.int64], target: NDArray[np.int64]
     ) -> NDArray[np.int64]:
         """Per-element ``lower_bound`` of ``target`` in ``cell_id[lo:hi]``.
 
         ``np.searchsorted`` cannot express per-element bounds, so this is a
-        manually vectorized binary search: the loop is over bit-depth, never over
-        queries. Iterations are fixed at ``bit_length`` of the widest region
-        block, which is >= ``ceil(log2(width))`` for every block.
+        manually vectorized search: the loop is over bit-depth, never over
+        queries. It is the branchless ``std::partition_point`` form rather than
+        the textbook ``(lo, hi)`` form for one reason -- it is *self-stabilizing*.
+        Once a block's ``size`` reaches 1, ``half == 0``, ``mid == base`` and the
+        update is a no-op, so extra iterations are free and no ``active = lo < hi``
+        guard is needed. That drops the loop from twelve O(n) temporaries per
+        iteration to two, and the whole probe by 1.13%.
+
+        (The textbook form genuinely *needs* that guard: once ``lo == hi`` you get
+        ``mid == lo``, and a true ``go`` sets ``lo = mid + 1 > hi``, so ``lo``
+        drifts upward by one per remaining iteration. Do not delete the guard from
+        that formulation -- this one removes the need for it instead.)
+
+        The single ``np.minimum`` is needed only when the table's *last* region
+        block is empty, which puts ``lo == len(cell_id)``; for every other block
+        ``base`` stays within ``[lo, hi - 1]`` by construction. Padding ``cell_id``
+        with a sentinel instead would force a full RAM copy of a memmap -- 27 GB
+        genome-wide -- to avoid one clamp.
         """
-        lo = lo.copy()
-        hi = hi.copy()
-        last = len(self.cell_id) - 1
-        widest = int((self.region_ptr[1:] - self.region_ptr[:-1]).max())
-        for _ in range(max(1, widest.bit_length())):
-            mid = np.minimum((lo + hi) >> 1, last)
-            go = self.cell_id[mid] < target
-            active = lo < hi
-            lo = np.where(active & go, mid + 1, lo)
-            hi = np.where(active & ~go, mid, hi)
-        return lo
+        size = hi - lo
+        base = np.minimum(lo, len(self.cell_id) - 1)
+        cid = self.cell_id
+        half = np.empty_like(size)
+        mid = np.empty_like(size)
+        go = np.empty(len(size), bool)
+        for _ in range(self._depth):
+            np.right_shift(size, 1, out=half)
+            np.add(base, half, out=mid)
+            np.less(cid[mid], target, out=go)
+            base = np.where(go, mid, base)
+            np.subtract(size, half, out=size)
+        np.less(cid[base], target, out=go)
+        base += go
+        return base
+
+    def entries_for_regions(self, r0: int, r1: int):
+        """Non-empty cells of regions ``[r0, r1)``, key-ascending.
+
+        The primitive both :meth:`iter_entries` and ``concat``'s region-batched
+        merge are built on. Keys are dataset-global
+        ``r * (n_samples * ploidy) + slot * ploidy + ploid``.
+        """
+        a, b = int(self.region_ptr[r0]), int(self.region_ptr[r1])
+        if b <= a:
+            return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
+        rows = np.repeat(
+            np.arange(r0, r1, dtype=np.int64), np.diff(self.region_ptr[r0 : r1 + 1])
+        )
+        return (
+            rows * self._cell_span + self.cell_id[a:b].astype(np.int64),
+            np.asarray(self.cell_vk[a:b]),
+        )
 
     def iter_entries(self):
-        span = self._cell_span
-        ptr = self.region_ptr
-        r0 = 0
-        while r0 < self.n_regions:
-            a = int(ptr[r0])
-            # region_ptr IS the cumsum, so the block end is one searchsorted --
-            # no O(R) rescan per block.
-            r1 = int(np.searchsorted(ptr, a + ITER_BLOCK_ENTRIES, "right")) - 1
-            r1 = min(max(r1, r0 + 1), self.n_regions)
-            b = int(ptr[r1])
-            if b > a:
-                rows = np.repeat(
-                    np.arange(r0, r1, dtype=np.int64), np.diff(ptr[r0 : r1 + 1])
-                )
-                yield rows * span + self.cell_id[a:b].astype(np.int64), np.asarray(
-                    self.cell_vk[a:b]
-                )
-            r0 = r1
+        rows = max(1, ITER_BLOCK_ENTRIES // max(self._cell_span, 1))
+        for r0 in range(0, self.n_regions, rows):
+            key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
+            if len(key):
+                yield key, ent
 ```
 
 - [ ] **Step 4: Run the tests**
@@ -957,6 +1089,34 @@ def test_dense_and_sparse_iter_entries_agree(tmp_path):
     np.testing.assert_array_equal(d_keys, s_keys)
 
 
+def test_entries_for_regions_agree_on_subranges(tmp_path):
+    """concat asks for arbitrary [r0, r1); both layouts must answer identically.
+
+    iter_entries only ever exercises the block boundaries the reader picks for
+    itself. concat picks its own, so a dense/sparse disagreement on a partial
+    region range -- an off-by-one in the region offset, say -- would slip past the
+    test above and corrupt only merged datasets.
+    """
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    rng = np.random.default_rng(8)
+    R, S, P = 7, 3, 2
+    dense = _random_dense(rng, R, S, P, fill=0.4)
+    _write_dense_layout(tmp_path, dense, R, S, P)
+    d_reader = _ranges_reader(tmp_path)
+    sparse = _sparse_from_dense(dense, R, S, P)
+
+    for r0, r1 in ((0, 0), (0, 1), (2, 5), (3, 3), (0, R), (R, R)):
+        d_key, d_ent = d_reader.entries_for_regions(r0, r1)
+        s_key, s_ent = sparse.entries_for_regions(r0, r1)
+        assert d_key.dtype == np.int64 and s_key.dtype == np.int64
+        assert d_ent.dtype == ENTRY_DTYPE and s_ent.dtype == ENTRY_DTYPE
+        np.testing.assert_array_equal(d_key, s_key)
+        np.testing.assert_array_equal(d_ent, s_ent)
+        # Keys must ascend; concat's merge and _SparseWriter both assume it.
+        assert np.all(np.diff(d_key) > 0)
+
+
 def test_dense_reader_bounds_check(tmp_path):
     """Both layouts must raise on a bad index, so callers behave identically."""
     from genvarloader._dataset._svar2_ranges import _ranges_reader
@@ -1010,31 +1170,44 @@ class _DenseRanges:
         )
         return snp, indel
 
-    def iter_entries(self):
-        """Block-scan the dense arrays, emitting non-empty cells in key order.
+    def entries_for_regions(self, r0: int, r1: int):
+        """Scan the dense arrays over ``[r0, r1)``, emitting non-empty cells.
 
-        This has no analogue in the old code and is not free: it reads the entire
-        dense array once, which at All of Us chr22 is 128 GB. It exists solely so
-        ``concat`` can merge a legacy dense shard into a sparse output.
+        This has no analogue in the old code and is not free: a full pass reads
+        the entire dense array once, which at All of Us chr22 is 128 GB. It
+        exists solely so ``concat`` can merge a legacy dense shard into a sparse
+        output, and it is region-bounded so ``concat`` can ask for exactly the
+        merged batch it is assembling rather than driving a stream.
         """
+        span = self.n_samples * self.ploidy
+        if r1 <= r0:
+            return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
+        snp = np.asarray(self.vk_snp_range[r0:r1])
+        indel = np.asarray(self.vk_indel_range[r0:r1])
+        ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+        # C-order nonzero => already ascending in (r, slot, ploid) = key order.
+        ri, sj, pj = np.nonzero(ne)
+        if len(ri) == 0:
+            return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
+        key = (
+            (r0 + ri).astype(np.int64) * span
+            + sj.astype(np.int64) * self.ploidy
+            + pj
+        )
+        ent = np.empty(len(ri), ENTRY_DTYPE)
+        ent["snp_start"] = snp[ri, sj, pj, 0]
+        ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
+        ent["indel_start"] = indel[ri, sj, pj, 0]
+        ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
+        return key, ent
+
+    def iter_entries(self):
         span = self.n_samples * self.ploidy
         rows = max(1, ITER_BLOCK_ENTRIES // max(span, 1))
         for r0 in range(0, self.n_regions, rows):
-            r1 = min(r0 + rows, self.n_regions)
-            snp = np.asarray(self.vk_snp_range[r0:r1])
-            indel = np.asarray(self.vk_indel_range[r0:r1])
-            ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
-            # C-order nonzero => already ascending in (r, slot, ploid) = key order.
-            ri, sj, pj = np.nonzero(ne)
-            if len(ri) == 0:
-                continue
-            key = (r0 + ri).astype(np.int64) * span + sj.astype(np.int64) * self.ploidy + pj
-            ent = np.empty(len(ri), ENTRY_DTYPE)
-            ent["snp_start"] = snp[ri, sj, pj, 0]
-            ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
-            ent["indel_start"] = indel[ri, sj, pj, 0]
-            ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
-            yield key, ent
+            key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
+            if len(key):
+                yield key, ent
 
 
 def _raw(path: Path, dtype, shape) -> NDArray:
@@ -1109,7 +1282,12 @@ def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
 
     n = int(meta["n_entries"])
     return _SparseRanges(
-        region_ptr=np.asarray(
+        # np.array, not np.asarray: np.asarray(memmap, np.int64) returns a VIEW
+        # still backed by the mmap (np.shares_memory is True), so every lookup
+        # would fancy-index through page faults and __post_init__ would scan the
+        # file. region_ptr is 1.6 MB genome-wide against a 27 GB table -- read it
+        # into RAM once.
+        region_ptr=np.array(
             _raw(ranges_dir / "region_ptr.npy", np.int64, (R + 1,)), np.int64
         ),
         cell_id=_raw(ranges_dir / "cell_id.npy", np.int32, (n,)),
@@ -1364,7 +1542,7 @@ Expected: FAIL with `KeyError: 'layout'` — the writer still emits dense.
 
 - [ ] **Step 3: Add the sparse writer helper**
 
-Append to `python/genvarloader/_dataset/_svar2_ranges.py` (add `"_SparseWriter"` to `__all__`):
+Append to `python/genvarloader/_dataset/_svar2_ranges.py` (add `"_SparseWriter"` and `"nonempty_entries"` to `__all__`, and `IO` to the `typing` import — `_SparseWriter` declares its two file handles as fields, which `slots=True` requires):
 
 ```python
 @dataclass(slots=True)
@@ -1380,12 +1558,24 @@ class _SparseWriter:
     *after* the loop, so an aborted write leaves data files with no meta. That is
     safe only because ``write`` builds into an ``atomic_dir`` tmp that is
     discarded on failure.
+
+    Use it as a context manager. ``region_ptr`` is published only on clean exit,
+    because a ``region_ptr`` written from a ``finally`` would index a truncated
+    ``cell_id``/``cell_vk`` -- a dataset that opens and silently returns garbage
+    rather than one that fails.
     """
 
     ranges_dir: "Path"
     n_samples: int
     ploidy: int
     n_entries: int = 0
+    # Every attribute must be declared: `slots=True` gives the class no __dict__,
+    # so an undeclared `self._span = ...` in __post_init__ raises AttributeError.
+    _span: int = field(init=False, repr=False, default=0)
+    _ptr: "list[NDArray[np.int64]]" = field(init=False, repr=False, default_factory=list)
+    _regions_done: int = field(init=False, repr=False, default=0)
+    _f_cell: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
+    _f_vk: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
 
     def __post_init__(self):
         span = self.n_samples * self.ploidy
@@ -1395,13 +1585,45 @@ class _SparseWriter:
                 " range cache cannot address a cell. Shard the samples."
             )
         self._span = span
-        self._ptr: list[NDArray[np.int64]] = [np.zeros(1, np.int64)]
-        self._regions_done = 0
+        self._ptr = [np.zeros(1, np.int64)]
         self._f_cell = open(self.ranges_dir / "cell_id.npy", "wb")
         self._f_vk = open(self.ranges_dir / "cell_vk.npy", "wb")
 
+    def __enter__(self) -> "_SparseWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Close the handles unconditionally: `atomic_dir` discards the tmp tree on
+        # failure, but the handles are pinned by the propagating traceback's frame
+        # until GC, which on a long write is an open-fd leak per shard.
+        if exc_type is None:
+            self.close()
+        else:
+            self._close_files()
+        return False
+
+    def _counts(self, r: NDArray[np.integer], rc: int) -> NDArray[np.int64]:
+        """Per-region entry counts, with the overshoot guard.
+
+        ``np.bincount(x, minlength=rc)`` silently returns a **longer** array when
+        an index exceeds ``rc`` (index 9 with ``minlength=5`` gives 10 bins).
+        Unchecked, that lengthens ``region_ptr`` past ``R + 1`` while the meta
+        still declares ``[R + 1]``, and the reader memmaps a truncated prefix --
+        a silently corrupt dataset rather than a crash. Keys must be contig-local.
+        """
+        cnt = np.bincount(r, minlength=rc)
+        if len(cnt) != rc:
+            raise ValueError(
+                f"svar2 range cache got region index {len(cnt) - 1} for a contig"
+                f" of {rc} regions; indices must be contig-local."
+            )
+        return cnt.astype(np.int64, copy=False)
+
     def append(self, key: NDArray[np.int64], ent: NDArray[np.void], lo: int, rc: int):
-        """Append one contig's entries.
+        """Append one already-ordered block of entries.
+
+        The key-based entry point, used by ``concat``'s merge. The write path
+        calls :meth:`append_contig` instead, which does the ordering itself.
 
         Args:
             key: Strictly ascending **region-local** keys,
@@ -1411,36 +1633,117 @@ class _SparseWriter:
             rc: The contig's region count.
 
         Raises:
-            ValueError: If the caller's regions are not contiguous and in order.
-                This is the one load-bearing invariant of the write path: blocks
-                from ``bed.partition_by`` must partition ``[0, R)`` in the same
-                order as the running ``contig_offset``. Asserting it directly
-                covers every way a future bed could break it.
+            ValueError: If the caller's regions are not contiguous and in order,
+                if the keys are not strictly ascending, or if a key is out of
+                range for this block. Contiguity is the one load-bearing
+                invariant of the write path: blocks from ``bed.partition_by``
+                must partition ``[0, R)`` in the same order as the running
+                ``contig_offset``. Asserting it directly covers every way a
+                future bed could break it.
         """
+        self._check_lo(lo)
+        if len(key) and not np.all(np.diff(key) > 0):
+            raise ValueError("svar2 range cache entries are not strictly ascending")
+
+        ri = (key // self._span).astype(np.int64)
+        cnt = self._counts(ri, rc)
+        np.asarray(key % self._span, np.int32).tofile(self._f_cell)
+        np.asarray(ent, ENTRY_DTYPE).tofile(self._f_vk)
+
+        self._ptr.append(self.n_entries + cnt.cumsum())
+        self.n_entries += len(key)
+        self._regions_done += rc
+
+    def append_contig(
+        self,
+        regions: "list[NDArray[np.int32]]",
+        cells: "list[NDArray[np.int32]]",
+        ents: "list[NDArray[np.void]]",
+        lo: int,
+        rc: int,
+    ) -> None:
+        """Merge one contig's per-chunk blocks into region-major order and append.
+
+        Each block from :func:`nonempty_entries` is already region-major, and
+        chunk ``i``'s sample slots lie entirely below chunk ``i + 1``'s, so the
+        merged order is fixed by region alone. That makes this a stable counting
+        sort with ``O(rc)`` of auxiliary state, not a comparison sort.
+
+        This is not a micro-optimization over ``np.argsort(key, kind="stable")``:
+        numpy maps ``kind="stable"`` to radix **only** for integer types of 16
+        bits or fewer, whatever its docstring says. int32 and int64 get timsort,
+        ``O(N log N)`` -- measured 98 and 136 ns/element on random input against
+        2.9 ns for int16. An int64 key sort only *looks* linear here because
+        timsort's run detection fires on the per-chunk runs, and that degrades as
+        chunks get smaller, which is exactly the regime the sort was chosen to
+        survive. Measured at ``N = 18e6``: 914 ms (k=30) / 1369 ms (k=500) for the
+        sort against 532 / 528 ms here, byte-identical output.
+
+        Args:
+            regions: Per-chunk contig-local region indices, chunks in ascending
+                sample order.
+            cells: Parallel ``slot * ploidy + ploid`` values.
+            ents: Parallel :data:`ENTRY_DTYPE` entries.
+            lo: The contig's first region index in the dataset.
+            rc: The contig's region count.
+
+        Raises:
+            ValueError: If the caller's regions are not contiguous and in order,
+                or if a region index is out of range for this contig.
+        """
+        self._check_lo(lo)
+
+        # Pass 1: per-region totals. O(rc) of state -- never (n_chunks x rc),
+        # which is what makes this safe at samples_per_chunk == 1 (535k chunks at
+        # cohort scale).
+        total = np.zeros(rc, np.int64)
+        for r in regions:
+            total += self._counts(r, rc)
+
+        n = int(total.sum())
+        cursor = np.empty(rc, np.int64)
+        cursor[0] = 0
+        np.cumsum(total[:-1], out=cursor[1:])
+
+        # Pass 2: scatter each chunk to its final offsets. `arange - start[r]` is
+        # the within-region rank, valid because each block is region-grouped.
+        out_cell = np.empty(n, np.int32)
+        out_ent = np.empty(n, ENTRY_DTYPE)
+        for r, c, e in zip(regions, cells, ents):
+            cnt = self._counts(r, rc)
+            start = np.empty(rc, np.int64)
+            start[0] = 0
+            np.cumsum(cnt[:-1], out=start[1:])
+            dst = cursor[r]
+            dst += np.arange(len(r), dtype=np.int64)
+            dst -= start[r]
+            out_cell[dst] = c
+            out_ent[dst] = e
+            cursor += cnt
+
+        out_cell.tofile(self._f_cell)
+        out_ent.tofile(self._f_vk)
+        self._ptr.append(self.n_entries + total.cumsum())
+        self.n_entries += n
+        self._regions_done += rc
+
+    def _check_lo(self, lo: int) -> None:
         if lo != self._regions_done:
             raise ValueError(
                 f"svar2 range cache requires contiguous region blocks in order:"
                 f" got a block starting at region {lo} after {self._regions_done}"
                 f" regions. Is the bed still contig-grouped (sp.bed.sort)?"
             )
-        if len(key) and not np.all(np.diff(key) > 0):
-            raise ValueError("svar2 range cache entries are not strictly ascending")
 
-        ri = (key // self._span).astype(np.int64)
-        np.asarray(key % self._span, np.int32).tofile(self._f_cell)
-        np.asarray(ent, ENTRY_DTYPE).tofile(self._f_vk)
-        # Bound dirty pages the way the old per-chunk memmap flush() did.
-        self._f_cell.flush()
-        self._f_vk.flush()
-
-        self._ptr.append(self.n_entries + np.bincount(ri, minlength=rc).cumsum())
-        self.n_entries += len(key)
-        self._regions_done += rc
+    def _close_files(self) -> None:
+        try:
+            self._f_cell.close()
+        finally:
+            self._f_vk.close()
 
     def close(self) -> int:
-        """Flush ``region_ptr`` and return the entry count."""
-        self._f_cell.close()
-        self._f_vk.close()
+        """Close the data files, publish ``region_ptr``, and return ``N``."""
+        self._close_files()
         np.concatenate(self._ptr).astype(np.int64).tofile(
             self.ranges_dir / "region_ptr.npy"
         )
@@ -1448,43 +1751,50 @@ class _SparseWriter:
 
 
 def nonempty_entries(
-    snp: NDArray[np.int64], indel: NDArray[np.int64], slot0: int, ploidy: int, span: int
-) -> tuple[NDArray[np.int64], NDArray[np.void]]:
+    snp: NDArray[np.int64], indel: NDArray[np.int64], slot0: int, ploidy: int
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.void]]:
     """Extract non-empty cells from a ``(rc, ns, P, 2)`` pair of range blocks.
 
     Args:
-        snp: SNP ranges, ``(rc, ns, P, 2)``.
+        snp: SNP ranges, ``(rc, ns, P, 2)`` -- normally a ``transpose(2, 0, 1, 3)``
+            view of a hap-major genoray chunk.
         indel: Indel ranges, same shape.
         slot0: Dataset sample slot of this block's first column.
         ploidy: ``P``.
-        span: ``n_samples * ploidy`` -- the key stride per region.
 
     Returns:
-        ``(region_local_key, entries)``, ascending.
+        ``(region, cell, entries)``, region-major: ``region`` is **contig-local**
+        and non-decreasing, ``cell`` is ``slot * ploidy + ploid`` and ascends
+        within each region. Split rather than combined into one key because
+        :meth:`_SparseWriter.append_contig` needs the region axis on its own to
+        count, and ``cell`` is what lands on disk -- combining them would only be
+        undone again.
     """
     ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
-    ri, sj, pj = np.nonzero(ne)  # C-order => ascending in (r, slot, ploid)
-    key = (
-        ri.astype(np.int64) * span
-        + (slot0 + sj).astype(np.int64) * ploidy
-        + pj.astype(np.int64)
-    )
+    # np.nonzero walks the LOGICAL shape in C order, so (r, slot, ploid) comes
+    # out ascending even though `ne` is NOT C-contiguous: the `>` above inherits
+    # the transposed view's stride permutation, because numpy allocates ufunc
+    # output with NPY_KEEPORDER. Do not "fix" that with ascontiguousarray --
+    # materializing (rc, ns, P) in C order is a strided scatter costing ~11x the
+    # comparison itself (97.7 ms vs 8.8 ms on a 15e6-cell chunk).
+    ri, sj, pj = np.nonzero(ne)
     ent = np.empty(len(ri), ENTRY_DTYPE)
     ent["snp_start"] = snp[ri, sj, pj, 0]
     ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
     ent["indel_start"] = indel[ri, sj, pj, 0]
     ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
-    return key, ent
+    return ri.astype(np.int32), ((slot0 + sj) * ploidy + pj).astype(np.int32), ent
 ```
 
 - [ ] **Step 4: Rewrite `_write_from_svar2`'s cache emission**
 
 In `python/genvarloader/_dataset/_write.py`, add `from ._svar2_ranges import ENTRY_DTYPE, _SparseWriter, nonempty_entries` at the top.
 
-(a) Replace the `vk_snp` / `vk_indel` memmap creation (`:1163-1167`) with:
+(a) Replace the `vk_snp` / `vk_indel` memmap creation (`:1163-1167`) with a `with` block wrapping the contig loop — the writer owns two open file handles, so it must close them on the failure path too:
 
 ```python
-    writer = _SparseWriter(out_dir, n_samples=S, ploidy=P)
+    with _SparseWriter(out_dir, n_samples=S, ploidy=P) as writer:
+        ...  # the existing `for (c,), df in bed.partition_by(...)` loop, re-indented
 ```
 
 (b) Delete the `svar2_meta.json` block at `:1199-1211` entirely — `N` and `fill` are unknown until the loop ends, so the meta moves after it.
@@ -1492,48 +1802,44 @@ In `python/genvarloader/_dataset/_write.py`, add `from ._svar2_ranges import ENT
 (c) Replace the per-chunk scatter loop (`:1241-1250`) with per-contig accumulation:
 
 ```python
-        span = S * P
-        acc_key: list[NDArray[np.int64]] = []
-        acc_ent: list[NDArray[np.void]] = []
-        for ch in stream.chunks:
-            s0 = ch.sample_start
-            # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
-            # region-major (regions, samples, ploidy, 2). transpose() is a view.
-            key, ent = nonempty_entries(
-                ch.vk_snp_range.transpose(2, 0, 1, 3),
-                ch.vk_indel_range.transpose(2, 0, 1, 3),
-                slot0=s0,
-                ploidy=P,
-                span=span,
-            )
-            acc_key.append(key)
-            acc_ent.append(ent)
-            np.maximum(keys, ch.max_end_keys, out=keys)
-            pbar.update(rc * ch.n_samples / S)
+            acc_r: list[NDArray[np.int32]] = []
+            acc_c: list[NDArray[np.int32]] = []
+            acc_e: list[NDArray[np.void]] = []
+            for ch in stream.chunks:
+                # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
+                # region-major (regions, samples, ploidy, 2). transpose() is a
+                # view, and nonempty_entries relies on that -- see its comment on
+                # np.nonzero and NPY_KEEPORDER.
+                r, cell, ent = nonempty_entries(
+                    ch.vk_snp_range.transpose(2, 0, 1, 3),
+                    ch.vk_indel_range.transpose(2, 0, 1, 3),
+                    slot0=ch.sample_start,
+                    ploidy=P,
+                )
+                acc_r.append(r)
+                acc_c.append(cell)
+                acc_e.append(ent)
+                np.maximum(keys, ch.max_end_keys, out=keys)
+                pbar.update(rc * ch.n_samples / S)
 
-        if acc_key:
-            ckey = np.concatenate(acc_key)
-            cent = np.concatenate(acc_ent)
-            del acc_key, acc_ent
-            # One stable sort per contig. Each chunk is already key-sorted (region
-            # outer, a contiguous slot block, ploid innermost), so this is in
-            # principle a pure interleave -- but `samples_per_chunk` can be 1, and
-            # at cohort scale that is 535k chunks and an (n_chunks x rc) counts
-            # matrix. A radix sort is O(N) regardless and is the one obvious way.
-            perm = np.argsort(ckey, kind="stable")
-            ckey = ckey[perm]
-            cent = cent[perm]
-        else:
-            ckey = np.empty(0, np.int64)
-            cent = np.empty(0, ENTRY_DTYPE)
-        writer.append(ckey, cent, lo=lo, rc=rc)
+            # Merge the contig's chunks into region-major order and append. Each
+            # chunk is already region-major over a contiguous, ascending slot
+            # block, so the merge is a counting sort keyed on region alone -- see
+            # _SparseWriter.append_contig for why this is not an argsort.
+            writer.append_contig(acc_r, acc_c, acc_e, lo=lo, rc=rc)
+            del acc_r, acc_c, acc_e
 ```
 
 (d) Replace the trailing flush block (`:1260-1262`) with:
 
 ```python
+    # Outside the `with`: the writer has closed its handles and published
+    # region_ptr, so n_entries is final.
     pbar.close()
-    n_entries = writer.close()
+    n_entries = writer.n_entries
+    # dense_snp/dense_indel are still memmaps (dense_abs_row uses .start as an
+    # index base, so those two stay dense); flush them before the meta claims
+    # they exist.
     for mm in (dense_snp, dense_indel):
         mm.flush()
 
@@ -1628,6 +1934,79 @@ def test_sparse_writer_rejects_noncontiguous_regions(tmp_path):
     with pytest.raises(ValueError, match="contiguous region blocks"):
         w.append(np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE), lo=7, rc=2)
     w.close()
+
+
+def test_sparse_writer_rejects_global_region_indices(tmp_path):
+    """bincount overshoot would silently lengthen region_ptr past R + 1.
+
+    `np.bincount(x, minlength=rc)` returns MORE than `rc` bins when an index
+    exceeds `rc` rather than raising, so a caller that passed dataset-global
+    region indices would write a longer `region_ptr` than the meta declares and
+    the reader would memmap a truncated prefix -- garbage lookups, no error.
+    """
+    import numpy as np
+
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=2)
+    with pytest.raises(ValueError, match="contig-local"):
+        w.append_contig(
+            [np.array([7], np.int32)],
+            [np.zeros(1, np.int32)],
+            [np.zeros(1, ENTRY_DTYPE)],
+            lo=0,
+            rc=3,
+        )
+    w.close()
+```
+
+(d) Add the counting-sort equivalence test. This one goes in **`tests/unit/dataset/test_svar2_ranges.py`** (Task 3's file), not in `test_write_svar2.py`, because it reuses that file's `_random_dense` helper and needs no dataset fixture:
+
+```python
+def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
+    """append_contig's counting sort must equal the stable key sort it replaced.
+
+    The chunks deliberately interleave: chunk 0 holds slots [0, 2) and chunk 1
+    slots [2, 4), so every region draws from both and the merge is a real
+    interleave rather than a concatenation.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    rng = np.random.default_rng(11)
+    rc, S, P = 6, 4, 2
+    dense = _random_dense(rng, rc, S, P, fill=0.5)  # (2, rc, S, P, 2)
+
+    regions, cells, ents, keys = [], [], [], []
+    for s0, s1 in ((0, 2), (2, 4)):
+        snp = dense[0][:, s0:s1]
+        indel = dense[1][:, s0:s1]
+        ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+        ri, sj, pj = np.nonzero(ne)
+        ent = np.empty(len(ri), ENTRY_DTYPE)
+        ent["snp_start"] = snp[ri, sj, pj, 0]
+        ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
+        ent["indel_start"] = indel[ri, sj, pj, 0]
+        ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
+        cell = ((s0 + sj) * P + pj).astype(np.int32)
+        regions.append(ri.astype(np.int32))
+        cells.append(cell)
+        ents.append(ent)
+        keys.append(ri.astype(np.int64) * (S * P) + cell)
+
+    w = _SparseWriter(tmp_path, n_samples=S, ploidy=P)
+    w.append_contig(regions, cells, ents, lo=0, rc=rc)
+    n = w.close()
+
+    key = np.concatenate(keys)
+    ent = np.concatenate(ents)
+    perm = np.argsort(key, kind="stable")
+    assert n == len(key)
+    got_cell = np.fromfile(tmp_path / "cell_id.npy", np.int32)
+    got_ent = np.fromfile(tmp_path / "cell_vk.npy", ENTRY_DTYPE)
+    np.testing.assert_array_equal(got_cell, (key[perm] % (S * P)).astype(np.int32))
+    np.testing.assert_array_equal(got_ent, ent[perm])
+    ptr = np.fromfile(tmp_path / "region_ptr.npy", np.int64)
+    assert len(ptr) == rc + 1 and ptr[0] == 0 and ptr[-1] == n
 ```
 
 - [ ] **Step 7: Add the test-only dense-layout writer**
@@ -1843,11 +2222,34 @@ def test_svar2_fill_projection_warns_when_disk_is_short(tmp_path, monkeypatch):
     assert any("free" in m for m in msgs), msgs
 
 
-def test_svar2_fill_projection_is_quiet_before_any_contig(tmp_path):
-    """Zero regions done => no data to extrapolate from => no projection."""
+def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypatch):
+    """A variant-free first contig must not project 0 bytes and call it a day.
+
+    This is the failure mode the `projected` latch at the call site exists for: a
+    leading contig that happens to hold no variant extrapolates to 0, which would
+    pass any free-space check and, without the latch, suppress the projection for
+    the whole build. The helper is honest about having nothing to say; the caller
+    is responsible for asking again.
+    """
+    from collections import namedtuple
+
+    from loguru import logger
+
     from genvarloader._dataset import _write
 
-    assert _write._svar2_fill_projection(tmp_path, 0, 0, 100, 500, 2) == 0
+    Usage = namedtuple("Usage", "total used free")
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        monkeypatch.setattr(
+            _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
+        )
+        assert _write._svar2_fill_projection(tmp_path, 0, 0, 100, 500, 2) == 0
+        assert _write._svar2_fill_projection(tmp_path, 0, 10, 100, 500, 2) == 0
+    finally:
+        logger.remove(sink)
+
+    assert not msgs, f"an empty projection must not warn about free space: {msgs}"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1937,9 +2339,13 @@ def _svar2_fill_projection(
         ploidy: Ploidy of the variant source.
 
     Returns:
-        Projected total bytes, or ``0`` if no contig has finished yet.
+        Projected total bytes, or ``0`` if there is nothing to extrapolate from
+        yet -- no finished contig, or a finished contig that held no variant.
     """
-    if regions_done <= 0:
+    if regions_done <= 0 or n_entries <= 0:
+        # Nothing to extrapolate from. Returning 0 rather than warning about a
+        # 0-byte projection is what lets the caller's latch ask again after the
+        # next contig; see _write_from_svar2.
         return 0
     per_region = n_entries / regions_done
     n_bytes = int(28 * per_region * n_regions)
@@ -1961,19 +2367,25 @@ def _svar2_fill_projection(
     return n_bytes
 ```
 
-(c) Call it once, after the first contig completes. Immediately after `writer.append(...)` in the contig loop (Task 5, Step 4c), add:
+(c) Call it once, after the first contig that actually produced entries. Immediately after `writer.append_contig(...)` in the contig loop (Task 5, Step 4c), add:
 
 ```python
-        if contig_idx == 0:
-            _svar2_fill_projection(out_dir, writer.n_entries, hi, R, S, P)
+            # Project from the first contig that produced anything, not from the
+            # first contig full stop. A variant-free leading contig -- a small or
+            # unplaced one, or a region set whose first contig happens to miss
+            # every variant -- would otherwise project 0 bytes, log "0.0000% of
+            # windows hold a variant", and permanently suppress the free-space
+            # check for the rest of the build. `projected` latches, so this still
+            # runs exactly once.
+            if not projected and writer.n_entries:
+                _svar2_fill_projection(out_dir, writer.n_entries, hi, R, S, P)
+                projected = True
 ```
 
-and give the loop an index by changing `for (c,), df in bed.partition_by(...).items():` to:
+and initialize the latch just above the contig loop:
 
 ```python
-    for contig_idx, ((c,), df) in enumerate(
-        bed.partition_by("chrom", as_dict=True, maintain_order=True).items()
-    ):
+    projected = False
 ```
 
 - [ ] **Step 4: Run the preflight tests**
@@ -2108,7 +2520,7 @@ Closes #355"
 
 **Interfaces:**
 - Consumes: `_ranges_reader`, `_SparseWriter`, `ENTRY_DTYPE` (Tasks 3-5); `rewrite_as_dense` (Task 5); the two shard fixtures (Task 2).
-- Produces: `def merge_entry_streams(streams, writer, n_regions, span)` in `_svar2_ranges.py`, and a `_concat_svar2_ranges` with an unchanged signature that emits the sparse layout.
+- Produces: `def merge_region_blocks(readers, r_maps, s_maps, writer, n_regions, span, ploidy)` in `_svar2_ranges.py`, and a `_concat_svar2_ranges` with an unchanged signature that emits the sparse layout.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2148,58 +2560,179 @@ def test_concat_svar2_dense_input_reads_like_single_write(
         np.testing.assert_array_equal(a, b)
 
 
-def test_merge_entry_streams_interleaves(tmp_path: Path):
-    """The k-way merge must interleave, not concatenate, and stay ascending."""
+def test_concat_svar2_regions_fast_path_matches_general_merge(
+    svar2_shards_by_regions, tmp_path: Path
+):
+    """The all-sparse axis="regions" copy_runs path must equal the general merge.
+
+    Rewriting one shard as dense is what forces the general path (the fast path
+    requires every reader to be sparse), so the two outputs are produced by two
+    genuinely different code paths from the same data and must agree byte for
+    byte -- region_ptr included, since that is what the fast path computes
+    itself rather than accumulating.
+    """
+    from tests._oracles.svar2_dense_layout import rewrite_as_dense
+
+    shards, _ = svar2_shards_by_regions
+    fast = tmp_path / "fast.gvl"
+    gvl.concat(fast, shards, axis="regions", overwrite=True)
+
+    mixed = [rewrite_as_dense(shards[0], tmp_path / "dense_shard.gvl"), shards[1]]
+    slow = tmp_path / "slow.gvl"
+    gvl.concat(slow, mixed, axis="regions", overwrite=True)
+
+    for name in ("region_ptr.npy", "cell_id.npy", "cell_vk.npy"):
+        a = (fast / "genotypes" / "svar2_ranges" / name).read_bytes()
+        b = (slow / "genotypes" / "svar2_ranges" / name).read_bytes()
+        assert a == b, name
+
+
+def test_concat_svar2_rejects_grid_disagreement(
+    svar2_shards_by_samples, tmp_path: Path
+):
+    """svar2_meta.json and metadata.json must agree about the grid.
+
+    They are decoded against each other -- the reader's n_samples sets the key
+    stride, `shapes` places the result -- so a disagreement scrambles keys rather
+    than producing a wrong-sized output, which nothing downstream would catch.
+    """
+    import json
+    import shutil
+
+    shards, _ = svar2_shards_by_samples
+    bad = tmp_path / "bad_shard.gvl"
+    shutil.copytree(shards[0], bad)
+    mp = bad / "genotypes" / "svar2_ranges" / "svar2_meta.json"
+    meta = json.loads(mp.read_text())
+    meta["n_samples"] += 1
+    mp.write_text(json.dumps(meta))
+
+    with pytest.raises(ValueError, match="disagree about the dataset's shape"):
+        gvl.concat(tmp_path / "out.gvl", [bad, shards[1]], axis="samples", overwrite=True)
+
+
+def test_concat_svar2_rejects_unsorted_input_samples(
+    svar2_shards_by_samples, tmp_path: Path
+):
+    """An unsorted input breaks the ascending-remap the merge depends on."""
+    import json
+    import shutil
+
+    shards, _ = svar2_shards_by_samples
+    bad = tmp_path / "unsorted_shard.gvl"
+    shutil.copytree(shards[0], bad)
+    mp = bad / "metadata.json"
+    md = json.loads(mp.read_text())
+    md["samples"] = list(reversed(md["samples"]))
+    mp.write_text(json.dumps(md))
+
+    with pytest.raises(ValueError, match="samples are not sorted"):
+        gvl.concat(tmp_path / "out2.gvl", [bad, shards[1]], axis="samples", overwrite=True)
+
+
+def test_merge_region_blocks_interleaves(tmp_path: Path):
+    """The merge must interleave inputs INSIDE a region, not concatenate them.
+
+    Two shards whose sample slots interleave in the merged order (A owns merged
+    slots 0 and 2, B owns slot 1) with entries in the same regions. Region 0 must
+    come out A, B, A. A merge that appended one input's block after the other's
+    would still be ascending *per input* and would still write the right count,
+    so only the interleaved key order catches it.
+    """
     import numpy as np
 
     from genvarloader._dataset._svar2_ranges import (
         ENTRY_DTYPE,
+        _SparseRanges,
         _SparseWriter,
-        _ranges_reader,
-        merge_entry_streams,
+        merge_region_blocks,
     )
 
-    R, S, P = 3, 4, 2
-    span = S * P
+    R, P = 3, 2
 
-    def stream(keys):
-        k = np.asarray(keys, np.int64)
-        e = np.empty(len(k), ENTRY_DTYPE)
-        e["snp_start"] = k
-        e["snp_len"] = 1
-        e["indel_start"] = 0
-        e["indel_len"] = 0
-        yield k, e
-
-    # Interleaved, disjoint, each ascending -- exactly what the remapped inputs
-    # look like after _concat_validate's no-overlap + sorted-union invariants.
-    a = [0, 3, 9, 20]
-    b = [1, 2, 10, 21]
-    w = _SparseWriter(tmp_path, n_samples=S, ploidy=P)
-    merge_entry_streams([stream(a), stream(b)], w, n_regions=R, span=span)
-    w.close()
-
-    import json
-
-    (tmp_path / "svar2_meta.json").write_text(
-        json.dumps(
-            {
-                "layout": "sparse",
-                "ploidy": P,
-                "n_regions": R,
-                "n_samples": S,
-                "n_entries": w.n_entries,
-                "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
-            }
+    def mk(region_ptr, cell_id, n_samples):
+        cid = np.asarray(cell_id, np.int32)
+        ent = np.zeros(len(cid), ENTRY_DTYPE)
+        # Tag each entry so a scrambled merge is visible in the payload too.
+        ent["snp_start"] = np.arange(len(cid)) + 100 * n_samples
+        ent["snp_len"] = 1
+        return _SparseRanges(
+            region_ptr=np.asarray(region_ptr, np.int64),
+            cell_id=cid,
+            cell_vk=ent,
+            n_regions=R,
+            n_samples=n_samples,
+            ploidy=P,
         )
-    )
-    np.save(tmp_path / "sample_cols.npy", np.arange(S, dtype=np.int64))
-    np.zeros((R, 2), np.int64).tofile(tmp_path / "dense_snp_range.npy")
-    np.zeros((R, 2), np.int64).tofile(tmp_path / "dense_indel_range.npy")
 
-    reader = _ranges_reader(tmp_path)
-    keys = np.concatenate([k for k, _ in reader.iter_entries()])
-    np.testing.assert_array_equal(keys, sorted(a + b))
+    # A: 2 samples. region 0 holds cells {0, 3}, region 1 none, region 2 {1}.
+    a = mk([0, 2, 2, 3], [0, 3, 1], n_samples=2)
+    # B: 1 sample. region 0 holds cell {1}, region 1 {0}, region 2 none.
+    b = mk([0, 1, 2, 2], [1, 0], n_samples=1)
+
+    n_samples = 3
+    span = n_samples * P
+    r_maps = [np.arange(R, dtype=np.int64)] * 2
+    s_maps = [np.array([0, 2], np.int64), np.array([1], np.int64)]
+
+    w = _SparseWriter(tmp_path, n_samples=n_samples, ploidy=P)
+    merge_region_blocks([a, b], r_maps, s_maps, w, n_regions=R, span=span, ploidy=P)
+    n = w.close()
+
+    # region 0: A slot0/p0 -> cell 0; B slot1/p1 -> cell 3; A slot2/p1 -> cell 5.
+    # region 1: B slot1/p0 -> cell 2.   region 2: A slot0/p1 -> cell 1.
+    assert n == 5
+    np.testing.assert_array_equal(
+        np.fromfile(tmp_path / "region_ptr.npy", np.int64), [0, 3, 4, 5]
+    )
+    np.testing.assert_array_equal(
+        np.fromfile(tmp_path / "cell_id.npy", np.int32), [0, 3, 5, 2, 1]
+    )
+    got = np.fromfile(tmp_path / "cell_vk.npy", ENTRY_DTYPE)
+    np.testing.assert_array_equal(
+        got["snp_start"], [200, 100, 201, 101, 202]
+    )
+
+
+def test_merge_region_blocks_handles_empty_regions(tmp_path: Path):
+    """A merged region no input contributes to still needs a region_ptr entry.
+
+    Trailing and leading empty regions are the case where an off-by-one in
+    `lo`/`rc` produces a region_ptr of the wrong LENGTH, which the reader then
+    memmaps as a truncated prefix.
+    """
+    import numpy as np
+
+    from genvarloader._dataset._svar2_ranges import (
+        ENTRY_DTYPE,
+        _SparseRanges,
+        _SparseWriter,
+        merge_region_blocks,
+    )
+
+    R, P, S = 4, 2, 1
+    empty = _SparseRanges(
+        region_ptr=np.zeros(R + 1, np.int64),
+        cell_id=np.empty(0, np.int32),
+        cell_vk=np.empty(0, ENTRY_DTYPE),
+        n_regions=R,
+        n_samples=S,
+        ploidy=P,
+    )
+    w = _SparseWriter(tmp_path, n_samples=S, ploidy=P)
+    merge_region_blocks(
+        [empty],
+        [np.arange(R, dtype=np.int64)],
+        [np.arange(S, dtype=np.int64)],
+        w,
+        n_regions=R,
+        span=S * P,
+        ploidy=P,
+    )
+    assert w.close() == 0
+    np.testing.assert_array_equal(
+        np.fromfile(tmp_path / "region_ptr.npy", np.int64), np.zeros(R + 1, np.int64)
+    )
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -2209,139 +2742,84 @@ Expected: FAIL — `_concat_svar2_ranges` still calls `gather_fixed` on `vk_snp_
 
 - [ ] **Step 3: Add the merge helper**
 
-Append to `python/genvarloader/_dataset/_svar2_ranges.py` (add `"merge_entry_streams"`, `"remap_entry_stream"` to `__all__`):
+Append to `python/genvarloader/_dataset/_svar2_ranges.py` (add `"merge_region_blocks"` to `__all__`, and `from ._concat_plan import CONCAT_CHUNK_BYTES` to the module's imports):
 
 ```python
-def remap_entry_stream(
-    it: Iterator[tuple[NDArray[np.int64], NDArray[np.void]]],
-    r_map: NDArray[np.int64],
-    s_map: NDArray[np.int64],
-    src_span: int,
-    out_span: int,
-    ploidy: int,
-) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
-    """Rewrite one input's keys into the merged dataset's keyspace.
-
-    Args:
-        it: Blocks from :meth:`_RangeLookup.iter_entries`.
-        r_map: Source region index -> merged region index. The **scatter-inverse**
-            of ``provenance``'s ``order``, which is merged -> source; using
-            ``order[:, 1]`` directly is the inverse permutation and silently
-            scrambles regions.
-        s_map: Source sample slot -> merged sample slot, likewise.
-        src_span: ``S_src * ploidy``.
-        out_span: ``S_out * ploidy``.
-        ploidy: ``P`` (identical across inputs; ``_concat_validate`` enforces it).
-
-    Yields:
-        ``(key, entries)`` in the merged keyspace. Still ascending: ``r_map`` and
-        ``s_map`` are strictly increasing on their respective axes (samples are
-        ``sorted(union)`` of non-overlapping sorted inputs; regions come from
-        ``_region_order``'s running-count construction).
-    """
-    for key, ent in it:
-        r_src, rest = np.divmod(key, src_span)
-        s_src, p = np.divmod(rest, ploidy)
-        yield r_map[r_src] * out_span + s_map[s_src] * ploidy + p, ent
-
-
-def merge_entry_streams(
-    streams: "list[Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]]",
+def merge_region_blocks(
+    readers: "list[_RangeLookup]",
+    r_maps: "list[NDArray[np.int64]]",
+    s_maps: "list[NDArray[np.int64]]",
     writer: "_SparseWriter",
     n_regions: int,
     span: int,
+    ploidy: int,
 ) -> None:
-    """Merge k ascending, disjoint key streams into ``writer``, in bounded memory.
+    """Merge k range caches into ``writer``, one merged-region batch at a time.
 
-    Block-wise rather than element-wise: whichever stream has the smallest head
-    contributes its entire prefix below every other stream's head in one slice,
-    so the Python loop runs once per *block boundary*, not once per entry.
+    Merged keys are ``r * span + slot * ploidy + ploid`` and both index maps are
+    strictly increasing *within one input*, so a merged region's entries are
+    exactly the union of that region's per-input blocks. There is no cross-region
+    state: each batch is gathered, remapped, ordered with one ``argsort``, and
+    written. Ties are impossible -- ``_concat_validate`` makes the inputs disjoint
+    on whichever axis is being merged -- so the sort's stability is irrelevant and
+    ``_SparseWriter``'s strictly-ascending check is a real assertion rather than a
+    formality.
 
-    Peak memory is ``k`` blocks, against the ``~88 bytes x N`` a
-    concatenate-and-sort would need (85 GB at the genome projection). Note that
-    ``concat`` as a whole is still ``R x S``-bound elsewhere: ``provenance``
-    allocates 16 bytes per slot (64 GB at All of Us chr22) and per-sample tracks
-    call it again. This fixes the range cache, not ``concat``.
+    This replaces a block-wise k-way merge over ``iter_entries``. That merge ran
+    its Python loop once per *alternation* in the merged key sequence, not once
+    per block: on ``axis="samples"`` the ownership pattern repeats inside every
+    region, so two shards with interleaved sample IDs cost ~N/2 iterations --
+    4.9e8 iterations, ~29 minutes, at the All of Us genome projection. This costs
+    ``ceil(n_regions / rows)`` iterations no matter how the inputs interleave, and
+    is less code.
 
     Args:
-        streams: One per input, each yielding ascending ``(key, entries)`` blocks
-            in the *merged* keyspace, with no key shared between streams.
-        writer: Destination; receives one ``append`` per region block.
+        readers: One per input dataset, in input order.
+        r_maps: Per input, source region index -> merged region index. The
+            **scatter-inverse** of ``provenance``'s ``order`` (which is merged ->
+            source); ``order[:, 1]`` is the inverse permutation and would silently
+            scramble regions. Strictly increasing.
+        s_maps: Per input, source sample slot -> merged sample slot. Likewise
+            strictly increasing -- merged samples are ``sorted(union)`` of
+            non-overlapping sorted inputs.
+        writer: Destination; receives one ``append`` per region batch.
         n_regions: Merged region count.
         span: ``n_samples * ploidy`` in the merged keyspace.
+        ploidy: ``P``, identical across inputs (``_concat_validate`` enforces it).
     """
-    heads: list[tuple[NDArray[np.int64], NDArray[np.void], int] | None] = []
-    for s in streams:
-        heads.append(_next_block(s))
+    rows = max(1, CONCAT_CHUNK_BYTES // ((ENTRY_DTYPE.itemsize + 8) * max(span, 1)))
+    for r0 in range(0, n_regions, rows):
+        r1 = min(r0 + rows, n_regions)
+        keys: "list[NDArray[np.int64]]" = []
+        ents: "list[NDArray[np.void]]" = []
+        for rd, r_map, s_map in zip(readers, r_maps, s_maps):
+            # r_map is strictly increasing, so merged [r0, r1) is a contiguous
+            # slice of this input's own region axis -- two searchsorteds, no scan.
+            w0 = int(np.searchsorted(r_map, r0, "left"))
+            w1 = int(np.searchsorted(r_map, r1, "left"))
+            if w1 <= w0:
+                continue
+            src_key, ent = rd.entries_for_regions(w0, w1)
+            if not len(src_key):
+                continue
+            r_src, rest = np.divmod(src_key, rd.n_samples * ploidy)
+            s_src, p = np.divmod(rest, ploidy)
+            # Region-LOCAL keys: _SparseWriter.append takes lo/rc separately.
+            keys.append((r_map[r_src] - r0) * span + s_map[s_src] * ploidy + p)
+            ents.append(ent)
 
-    out_key: list[NDArray[np.int64]] = []
-    out_ent: list[NDArray[np.void]] = []
-    buffered = 0
-    written_regions = 0
-
-    def flush(upto: int):
-        """Emit every buffered entry whose region is < ``upto``."""
-        nonlocal out_key, out_ent, buffered, written_regions
-        if not out_key:
-            if upto > written_regions:
-                writer.append(
-                    np.empty(0, np.int64),
-                    np.empty(0, ENTRY_DTYPE),
-                    lo=written_regions,
-                    rc=upto - written_regions,
-                )
-                written_regions = upto
-            return
-        key = np.concatenate(out_key)
-        ent = np.concatenate(out_ent)
-        cut = int(np.searchsorted(key, upto * span, "left"))
-        if cut:
-            writer.append(
-                key[:cut] - written_regions * span,
-                ent[:cut],
-                lo=written_regions,
-                rc=upto - written_regions,
-            )
-            written_regions = upto
-        out_key = [key[cut:]] if cut < len(key) else []
-        out_ent = [ent[cut:]] if cut < len(ent) else []
-        buffered = len(key) - cut
-
-    while True:
-        live = [i for i, h in enumerate(heads) if h is not None]
-        if not live:
-            break
-        firsts = [int(heads[i][0][heads[i][2]]) for i in live]  # type: ignore[index]
-        j = live[int(np.argmin(firsts))]
-        limit = min([f for i, f in zip(live, firsts) if i != j], default=None)
-
-        key, ent, off = heads[j]  # type: ignore[misc]
-        n = len(key) - off if limit is None else int(
-            np.searchsorted(key[off:], limit, "left")
-        )
-        n = max(n, 1)  # keys are globally unique, so this cannot loop forever
-        out_key.append(key[off : off + n])
-        out_ent.append(ent[off : off + n])
-        buffered += n
-
-        heads[j] = (key, ent, off + n) if off + n < len(key) else _next_block(streams[j])
-        if buffered * (ENTRY_DTYPE.itemsize + 8) >= CONCAT_CHUNK_BYTES:
-            # Flush only whole regions: region_ptr counts must be complete.
-            top = int(np.concatenate(out_key)[-1] // span)
-            if top > written_regions:
-                flush(top)
-
-    flush(n_regions)
-
-
-def _next_block(it) -> "tuple[NDArray[np.int64], NDArray[np.void], int] | None":
-    for key, ent in it:
-        if len(key):
-            return key, ent, 0
-    return None
+        if not keys:
+            key = np.empty(0, np.int64)
+            ent = np.empty(0, ENTRY_DTYPE)
+        elif len(keys) == 1:
+            key, ent = keys[0], ents[0]
+        else:
+            key = np.concatenate(keys)
+            ent = np.concatenate(ents)
+            perm = np.argsort(key, kind="stable")
+            key, ent = key[perm], ent[perm]
+        writer.append(key, ent, lo=r0, rc=r1 - r0)
 ```
-
-Add `from ._concat_plan import CONCAT_CHUNK_BYTES` to the module's imports.
 
 - [ ] **Step 4: Rewrite `_concat_svar2_ranges`**
 
@@ -2361,9 +2839,17 @@ def _concat_svar2_ranges(
     """Merge a .svar2 dataset's cached range arrays.
 
     The per-``(region, sample, ploid)`` var-key ranges are sparse (#357), so they
-    merge rather than gather: each input's entries are remapped into the merged
-    keyspace and k-way merged in ``CONCAT_CHUNK_BYTES`` blocks. Legacy dense
-    inputs feed the same merge through ``_DenseRanges.iter_entries``.
+    merge rather than gather: each merged region batch is gathered from every
+    input, remapped into the merged keyspace, ordered, and appended. Legacy dense
+    inputs feed the same merge through ``_DenseRanges.entries_for_regions``.
+
+    After this change an svar2 ``concat`` with no per-sample tracks holds nothing
+    ``R x S``-sized: the ``(R*S*P, 2)`` ``provenance`` array (64 GB at All of Us
+    chr22) and the ``list[Run]`` ``coalesce`` builds from it (~204 bytes per run,
+    which on an interleaved sample merge degenerates to one run per slot) are both
+    gone from this path. Per-sample tracks still plan in core at
+    ``_concat.py:465`` -- 32 GB plus a ~424 GB run list at the same projection --
+    so ``concat`` is bounded only for tracks-free datasets. Tracked separately.
 
     ``dense_snp_range``/``dense_indel_range`` are per-region only (sample- and
     ploidy-independent), and cannot be sparsified -- genoray's ``dense_abs_row``
@@ -2376,8 +2862,26 @@ def _concat_svar2_ranges(
     ``available_samples``; each input's own ``sample_cols.npy`` is already indexed
     by that input's own (sorted) sample list, so the merged array is a direct
     per-merged-sample lookup through ``order``.
+
+    Raises:
+        ValueError: If an input's ``svar2_meta.json`` disagrees with its
+            ``metadata.json`` about the grid, or if an input's own sample list is
+            not sorted on an ``axis="samples"`` merge.
     """
     readers = [_ranges_reader(p / "genotypes" / "svar2_ranges") for p in paths]
+
+    # The merge trusts each reader's own (n_regions, n_samples, ploidy) to decode
+    # its keys, and `shapes` to place them. If the two files disagree, every key
+    # is decoded against the wrong stride and the output is silently scrambled
+    # rather than wrong-sized -- so check, rather than let it through.
+    for d, (rd, (R_d, S_d)) in enumerate(zip(readers, shapes)):
+        if (rd.n_regions, rd.n_samples, rd.ploidy) != (R_d, S_d, ploidy):
+            raise ValueError(
+                f"input #{d}'s svar2_meta.json describes an "
+                f"({rd.n_regions}, {rd.n_samples}, {rd.ploidy}) grid but its "
+                f"metadata.json describes ({R_d}, {S_d}, {ploidy}); the two files "
+                "disagree about the dataset's shape."
+            )
 
     # `order` is merged -> source. The remap needs source -> merged, i.e. the
     # scatter-inverse; `order[:, 1]` is the inverse permutation and would produce
@@ -2394,26 +2898,63 @@ def _concat_svar2_ranges(
         s_maps = [np.empty(s, np.int64) for _, s in shapes]
         for i, (d, w) in enumerate(order):
             s_maps[d][w] = i
+        # merge_region_blocks relies on each s_map being strictly INCREASING, so
+        # that a merged region's entries come out ascending after one sort of the
+        # concatenated blocks. That holds iff each input's own sample list is
+        # sorted, because the merged order is sorted(union). gvl.write sorts
+        # unconditionally (_write.py:284), so this only fires on a hand-built or
+        # externally-produced store -- where it would otherwise scramble samples.
+        for d, p in enumerate(paths):
+            inp_samples = json.loads((p / "metadata.json").read_text())["samples"]
+            if list(inp_samples) != sorted(inp_samples):
+                raise ValueError(
+                    f"input #{d}'s samples are not sorted. concat merges the "
+                    "sparse range caches by remapping each input's keys into the "
+                    "merged keyspace and relying on that remap to stay ascending, "
+                    "which requires each input's own sample list to be sorted "
+                    "(gvl.write sorts unconditionally)."
+                )
 
     out_span = n_samples * ploidy
-    writer = _SparseWriter(out_dir, n_samples=n_samples, ploidy=ploidy)
-    merge_entry_streams(
-        [
-            remap_entry_stream(
-                rd.iter_entries(),
-                r_maps[d],
-                s_maps[d],
-                src_span=rd.n_samples * ploidy,
-                out_span=out_span,
+    if axis == "regions" and all(isinstance(rd, _SparseRanges) for rd in readers):
+        # Every merged region draws its whole CSR block from exactly one input,
+        # with cell ids unchanged (s_map is the identity and S is equal across
+        # inputs), so this is a pure reorder of ragged blocks -- the same shape of
+        # problem copy_runs already solves for tracks, with region_ptr as the
+        # offsets array. No decode, no remap, no sort: byte ranges only.
+        region_runs = coalesce(
+            provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order)
+        )
+        src_ptr = [np.asarray(rd.region_ptr, np.int64) for rd in readers]
+        merged_ptr = None
+        for fname, itemsize in (
+            ("cell_id.npy", 4),
+            ("cell_vk.npy", ENTRY_DTYPE.itemsize),
+        ):
+            # Both calls return the same offsets -- the two files are parallel --
+            # so keeping the last is keeping any of them.
+            merged_ptr = copy_runs(
+                [p / "genotypes" / "svar2_ranges" / fname for p in paths],
+                out_dir / fname,
+                region_runs,
+                src_ptr,
+                itemsize=itemsize,
+            )
+        assert merged_ptr is not None
+        merged_ptr.astype(np.int64).tofile(out_dir / "region_ptr.npy")
+        n_entries = int(merged_ptr[-1])
+    else:
+        with _SparseWriter(out_dir, n_samples=n_samples, ploidy=ploidy) as writer:
+            merge_region_blocks(
+                readers,
+                r_maps,
+                s_maps,
+                writer,
+                n_regions=n_regions,
+                span=out_span,
                 ploidy=ploidy,
             )
-            for d, rd in enumerate(readers)
-        ],
-        writer,
-        n_regions=n_regions,
-        span=out_span,
-    )
-    n_entries = writer.close()
+        n_entries = writer.n_entries
 
     if axis == "samples":
         for name in ("dense_snp_range", "dense_indel_range"):
@@ -2471,16 +3012,18 @@ Add to `_concat.py`'s imports:
 from ._svar2_ranges import (
     ENTRY_DTYPE,
     _ranges_reader,
+    _SparseRanges,
     _SparseWriter,
-    merge_entry_streams,
-    remap_entry_stream,
+    merge_region_blocks,
 )
 ```
+
+`copy_runs` is already imported at `_concat.py:15-22`; `provenance`/`coalesce` likewise.
 
 - [ ] **Step 5: Run the concat tests**
 
 Run: `pixi run -e dev pytest tests/dataset/test_concat_svar2.py -v`
-Expected: PASS, all five — including the two characterization tests from Task 2, which are the real gate: the merged dataset must read exactly like a single-shot `gvl.write`.
+Expected: PASS, all nine — including the two characterization tests from Task 2, which are the real gate: the merged dataset must read exactly like a single-shot `gvl.write`.
 
 - [ ] **Step 6: Run the full tree**
 
@@ -2492,17 +3035,32 @@ Expected: PASS.
 ```bash
 pixi run -e dev ruff check python/ tests/ && pixi run -e dev ruff format python/ tests/ && pixi run -e dev typecheck
 git add python/genvarloader/_dataset/_svar2_ranges.py python/genvarloader/_dataset/_concat.py tests/dataset/test_concat_svar2.py
-git commit -m "feat(concat): merge svar2 range caches as sparse streams
+git commit -m "feat(concat): merge svar2 range caches by region batch
 
 The var-key ranges are no longer fixed-size per slot, so gather_fixed cannot
-move them. Each input's entries are remapped into the merged keyspace and k-way
-merged in CONCAT_CHUNK_BYTES blocks; legacy dense inputs feed the same merge
-through _DenseRanges.iter_entries.
+move them. Each merged region batch is gathered from every input, remapped into
+the merged keyspace, ordered and appended; legacy dense inputs feed the same
+merge through _DenseRanges.entries_for_regions.
+
+Region-batched rather than a k-way merge over an entry stream. A block-wise
+k-way merge iterates once per ALTERNATION in the merged key sequence, not once
+per block, and on axis=samples the ownership pattern repeats inside every
+region: two shards with interleaved sample IDs cost ~N/2 iterations, ~29 min at
+the All of Us genome projection. This costs ceil(R / rows) iterations however
+the inputs interleave, and is less code.
+
+axis=regions with all-sparse inputs skips the merge entirely: every merged
+region draws its whole CSR block from one input with cell ids unchanged, which
+is a ragged reorder copy_runs already does, with region_ptr as the offsets.
 
 The remap uses the scatter-INVERSE of provenance's order, which is merged ->
 source; order[:, 1] is the inverse permutation and would silently scramble
 regions. The output meta is built fresh rather than patched from input #0,
 which would otherwise carry stale vk_* keys and a stale n_samples.
+
+No R x S allocation is left on this path -- provenance's (R*S*P, 2) array and
+the run list coalesce built from it are both gone. Per-sample tracks still plan
+in core, so concat is bounded only for tracks-free datasets.
 
 Relates to #357"
 ```
@@ -2544,10 +3102,19 @@ The baseline is a RESIDENT dense array at a size that fits (1000 x 2000 x 2 =
 128 MB) -- not the 6 KB fixture, and not the 128 GB array the real comparison
 would need, which nobody can run.
 
-If the two-level probe misses the gate, take the spec's defined fallback: store
-an int64 global key (r * S * P + cell_id) instead of cell_id, probe with one
-np.searchsorted, and keep region_ptr for the full-region fast path. That is 32
-bytes per entry -- still never larger than dense, just not smaller.
+If the two-level probe misses the gate, do NOT take the spec's flat-int64-key
+fallback. It was written before the depth was measured and it makes the probe
+slower, not faster: a flat key searches the whole table, raising depth from
+log2(N/R) = 13 to log2(N) = 24 at All of Us chr22, on the term measured at 91%
+of lookup cost. Its only real effect is +4 bytes per entry.
+
+The actual fallback is to fuse the search loop, which is where the time is: the
+probe is ~93% numpy-pass-bound (measured -- the gather itself is the minority),
+so a single-pass kernel over (region_ptr, cell_id) removes the per-iteration
+temporaries the vectorized form cannot. That is a Rust #[pyfunction], deferred to
+a follow-up issue (Task 10, Step 9) precisely because it is only worth doing if
+this gate fails: at the measured numbers the whole probe is 0.5% of batch wall,
+so a 3-5x relative win is worth ~0.35% of wall.
 """
 
 from __future__ import annotations
@@ -2559,7 +3126,15 @@ import numpy as np
 from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseRanges
 
 BATCH_MS = 171.0
-"""Single-threaded spliced 8192-cell batch wall, from _readbound_gather's docstring."""
+"""Single-threaded spliced 8192-cell batch wall, from _readbound_gather's docstring.
+
+This is a recorded figure from another machine, so the percentages below are only
+as good as it is. Re-measure it on the machine running the gate before trusting a
+borderline result -- a batch that is actually 60 ms here turns a 1.9% PASS into a
+5.4% FAIL. The spec's companion figure of 18.4 ms for a shuffled 8192-cell probe
+does NOT reproduce (measured ~13x lower); the table this script prints supersedes
+it.
+"""
 GATE = 0.02
 
 
@@ -2602,7 +3177,7 @@ def timeit(fn, reps: int = 20) -> float:
 
 def main():
     R, S, P = 3734, 535662, 2  # All of Us chr22
-    print(f"{'N':>10} {'n_q':>6} {'dist':>10} {'ms':>8} {'sorted ms':>10} {'% batch':>8}")
+    print(f"{'N':>10} {'n_q':>6} {'dist':>10} {'ms':>8} {'% batch':>8}")
     worst = 0.0
     for N in (10**5, 10**6, 10**7, 10**8):
         table = build(R, S, P, N)
@@ -2610,15 +3185,10 @@ def main():
             for how in ("clustered", "shuffled"):
                 r_q, si_q = probes(R, S, n_q, how)
                 ms = timeit(lambda: table.lookup(r_q, si_q, P))
-                # Deviation 1 from the spec: the manual search does not gallop,
-                # so probe sorting buys cache locality only. Measured, not assumed.
-                o = np.argsort(r_q * (S * P) + si_q * P)
-                rs, ss = r_q[o], si_q[o]
-                ms_s = timeit(lambda: table.lookup(rs, ss, P))
                 pct = ms / BATCH_MS * 100
                 if how == "shuffled":
                     worst = max(worst, pct)
-                print(f"{N:>10} {n_q:>6} {how:>10} {ms:>8.2f} {ms_s:>10.2f} {pct:>7.2f}%")
+                print(f"{N:>10} {n_q:>6} {how:>10} {ms:>8.2f} {pct:>7.2f}%")
 
     # Baseline: a dense array at a size that actually fits.
     d = np.zeros((1000, 2000, 2, 2), np.int64)  # 128 MB
@@ -2641,13 +3211,11 @@ if __name__ == "__main__":
 Run: `pixi run -e dev python tests/benchmarks/profiling/bench_svar2_range_lookup.py`
 Expected: a table, ending `PASS`. Capture the output for the PR description.
 
-If it prints `FAIL`: do not tune ad hoc. Take the spec's pre-agreed fallback — swap `cell_id` int32 for an int64 global key (`r * S * P + cell_id`), replace `_SparseRanges._search` with a single `np.searchsorted` over that key (keeping `region_ptr` and the full-region fast path), update `ENTRY_DTYPE`'s size assertion to 32 bytes, and re-run. Then re-run Tasks 3-8's tests, which are layout-agnostic and must still pass.
+First, sanity-check `BATCH_MS` before acting on a borderline number: it is a figure recorded on another machine. Re-measure a spliced 8192-cell batch here (`Svar2Haps._readbound_gather`'s docstring says how it was produced) and substitute it. A gate expressed as a fraction of a stale denominator is not a measurement.
 
-- [ ] **Step 3: Act on the sorted-probe column**
+If it still prints `FAIL`: do not tune ad hoc, and do **not** take the spec's flat-int64-key fallback — it raises search depth from 13 to 24 at chr22 (`log2(N)` instead of `log2(N/R)`) on the term measured at 91% of lookup cost, and its only other effect is +4 bytes per entry. Stop, file the fused-kernel issue from Step 9 as blocking, and bring the measurement back for a decision.
 
-If the `sorted ms` column beats `ms` by more than ~10% on the shuffled distribution at N >= 1e7, add the `argsort` inside `_SparseRanges.lookup` (sort the probes, search, scatter the results back with the inverse permutation) and re-run. Otherwise leave it out and delete the column. Record the decision in the module docstring either way — "measure, don't guess" is the project's standing rule, and the spec's original justification for the sort does not apply to a manual search.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add tests/benchmarks/profiling/bench_svar2_range_lookup.py python/genvarloader/_dataset/_svar2_ranges.py
@@ -2691,19 +3259,19 @@ Open `docs/source/format.md` and fix, in order:
 
 - [ ] **Step 2: Fix `write.md` and `faq.md`**
 
-- `docs/source/write.md:110` — "not small at cohort scale" is now false, **and** the `max_mem` RAM-bounding promise is wrong. Replace with: the range cache is small at cohort scale (~504 MB for All of Us chr22); `max_mem` bounds the genoray chunk stream but **not** the per-contig entry accumulator, which peaks at roughly `80 bytes x entries on the largest contig` (~1.4 GB at chr22, ~4.6 GB at chr19).
+- `docs/source/write.md:110` — "not small at cohort scale" is now false, **and** the `max_mem` RAM-bounding promise is wrong. Replace with: the range cache is small at cohort scale (~504 MB for All of Us chr22); `max_mem` bounds the genoray chunk stream but **not** the per-contig entry accumulator, which peaks at roughly `60 bytes x entries on the largest contig` — the per-chunk `(region int32, cell int32, 24-byte entry)` blocks plus the merged `(cell, entry)` output, live at the same time. That is ~0.8 GB at All of Us chr22 and ~2.6 GB at chr19. Do not quote a figure from the argsort formulation this plan replaced: `append_contig` measured 0.56x its peak RSS.
 - `docs/source/faq.md:99` — "not small at cohort scale, see the size formula" becomes the new figure and a pointer to `format.md`'s layout section.
 
 - [ ] **Step 3: Fix `gvl.write`'s own docstring**
 
-`python/genvarloader/_dataset/_write.py:162-166` currently says the cache "is two `(n_regions, n_samples, ploidy, 2)` int64 memmaps ... 60.7 GiB for 1,901 regions x 535,662 diploid samples". Every clause is now false. Replace with the sparse description and a realistic figure. CLAUDE.md's skill-maintenance rule names this docstring explicitly, so it is not optional.
+`python/genvarloader/_dataset/_write.py:162-166` currently says the cache "is two `(n_regions, n_samples, ploidy, 2)` int64 memmaps ... 60.7 GiB for 1,901 regions x 535,662 diploid samples". Every clause is now false. Replace with: 28 bytes per `(region, sample, ploid)` window that holds a variant, so the cache scales with observed variants rather than with `regions x samples`; the same All of Us chr22 grid is ~504 MB. Say explicitly that `max_mem` does not bound the per-contig accumulator (~60 bytes per entry on the largest contig), since that is the one memory surprise left. CLAUDE.md's skill-maintenance rule names this docstring explicitly, so it is not optional.
 
 - [ ] **Step 4: Update the skill**
 
 `skills/genvarloader/SKILL.md`:
 - `:86` and `:135` — the size formula and "scales with `regions x samples x ploidy`".
 - `:440` — the `svar2_ranges/` layout tree.
-- `:503-508` — the "Common gotchas" bullet about cache size; it should now warn about the *write-time accumulator* instead, since that is the remaining memory surprise.
+- `:503-508` — the "Common gotchas" bullet about cache size; it should now warn about the *write-time accumulator* instead (~60 bytes per entry on the largest contig, not bounded by `max_mem`), since that is the remaining memory surprise.
 
 Then re-check the "Where to look next" pointer table per CLAUDE.md.
 
@@ -2737,7 +3305,35 @@ Relates to #355, #357"
 git push -u origin worktree-feat+svar2-sparse-range-cache
 ```
 
-- [ ] **Step 9: Open the PR**
+- [ ] **Step 9: File the three follow-up issues**
+
+Three measured findings are deliberately out of this PR's scope. File them before opening the PR so the PR body can reference them by number, and do not fold any of them in — each one is its own change with its own gate.
+
+```bash
+gh issue create --title "concat still plans per-sample tracks in core (R x S)" --body "After #357, an svar2 \`concat\` with no per-sample tracks holds nothing \`R x S\`-sized: the range caches merge by region batch and \`provenance\` is no longer called on that path.
+
+Per-sample tracks still are. \`_concat.py:465\` calls \`provenance(...)\` for each per-sample track, which allocates an \`(R*S*P, 2)\` int64 array -- 32 GB at All of Us chr22 -- and \`coalesce\` then builds a \`list[Run]\` from it at ~204 bytes per run. On an interleaved sample merge (the common case: two cohorts whose sample IDs interleave in sorted order) that degenerates to one run per slot, i.e. ~424 GB of Python objects.
+
+So \`concat\` is bounded only for tracks-free datasets. The fix is the same shape as the range-cache one: plan per region batch rather than materializing the whole provenance map, or emit runs as an iterator instead of a list.
+
+Found while implementing #357."
+
+gh issue create --title "svar2 range probe: fuse the search loop into a Rust kernel" --body "The sparse range probe (#357) is ~93% numpy-pass-bound: the branchless \`partition_point\` loop runs \`_depth\` iterations over the whole query block, each one a handful of full-array passes, and the \`cell_vk\` gather is the minority of the time. A single-pass kernel over \`(region_ptr, cell_id)\` would do the whole search per query in registers -- measured headroom is 3-5x on the probe itself.
+
+Deliberately NOT done in #357, on measurement: the whole probe is ~0.5% of batch wall, so 3-5x on it is worth ~0.35% of wall. It becomes worth doing if the benchmark gate in \`tests/benchmarks/profiling/bench_svar2_range_lookup.py\` ever fails, or if the read path gets fast enough elsewhere that 0.5% matters.
+
+Shape, if taken: a \`#[pyfunction]\` in \`src/ffi/mod.rs\` over a kernel in a domain module, registered in \`src/lib.rs\`'s \`#[pymodule]\`. Note there is no dual-backend parity harness any more (\`_dispatch.py\` and \`docs/roadmaps/rust-migration.md\` were retired in 8f9d3c99), so parity needs a hand-written numpy oracle plus frozen \`.npz\` goldens under \`tests/parity/\`."
+
+gh issue create --title "genoray: emit sparse ranges from find_ranges_chunk" --body "GVL's sparse range cache (#357) is built by materializing genoray's dense \`(samples, ploidy, regions, 2)\` chunk and then throwing >99% of it away. \`np.nonzero\` on that dense block is 71% of GVL's per-chunk kernel time, and the dense intermediate is ~128 GB per All of Us chr22 contig at default \`max_mem\`.
+
+The larger prize is sparsifying at the source: have \`find_ranges_chunk\` emit only the non-empty windows, so the dense intermediate never exists. That removes both the allocation and the scan, and GVL's \`nonempty_entries\` collapses into a passthrough.
+
+This is a genoray change, filed here for tracking; it is the bigger win of the two kernel opportunities found while implementing #357."
+```
+
+Record the three issue numbers; Step 10's PR body references them.
+
+- [ ] **Step 10: Open the PR**
 
 ```bash
 gh pr create --title "feat(svar2)!: sparse range cache" --body "$(cat <<'EOF'
@@ -2763,9 +3359,26 @@ byte-identical to the true insertion point -- and strictly safer, since Rust
 slicing panics if `vs > ve` while `(0, 0)` is unconditionally in bounds.
 
 **Lookup.** A bounded, manually vectorized binary search inside one region's
-block: `log2(N/R)` = 12.2 bits at chr22 rather than `log2(N)` = 24.1, and no
-search at all for a fully occupied region. `np.searchsorted` cannot express
-per-element bounds, hence the manual loop -- over bit-depth, never over queries.
+block: 13 iterations at chr22 (`ceil(log2(widest block))`) rather than the 24 a
+flat key would need, and no search at all for a fully occupied region -- the
+whole high-fill regime that sequence-model windows live in, measured at 0.35 ms
+against 0.89 ms. `np.searchsorted` cannot express per-element bounds, hence the
+manual loop -- over bit-depth, never over queries, in the branchless
+`std::partition_point` form so no `active` mask is needed.
+
+**Write path.** The per-contig merge is a counting sort with `O(regions)`
+auxiliary state, not `np.argsort(kind="stable")`: numpy maps that to radix only
+for integers of 16 bits or fewer, so an int64 key sort is timsort. Measured at
+N = 18e6: 914 ms (k=30) / 1369 ms (k=500) for the sort against 532 / 528 ms for
+the counting sort, byte-identical, at 0.56x peak RSS -- and flat in chunk count,
+which matters because `samples_per_chunk` can be 1.
+
+**Concat.** Merges one merged-region batch at a time rather than k-way merging an
+entry stream, which iterated once per *alternation* in the merged key sequence
+(~29 min at the genome projection on an interleaved sample merge) rather than
+once per block. `axis="regions"` with all-sparse inputs skips the merge entirely
+and moves byte ranges through `copy_runs`. No `R x S` allocation is left on this
+path.
 
 **Guards.** Once an absent cell and an empty cell are indistinguishable, several
 errors stop being loud: explicit bounds checks (a miss would otherwise be a
@@ -2780,6 +3393,13 @@ is kept behind the same interface, so old datasets open unchanged. Re-run
 
 **Breaking:** GVL <= 0.42.1 cannot open a dataset written by this version. It
 fails with `KeyError: 'vk_snp_range'` -- loud, not silently wrong.
+
+**Deliberately out of scope**, each filed in Step 9 with its measurement:
+concat's remaining `R x S` planning for per-sample tracks; a fused Rust kernel
+for the probe (worth ~0.35% of batch wall at current numbers); and sparsifying
+genoray's `find_ranges_chunk` at the source, which is the larger prize -- the
+dense chunk this PR scans with `np.nonzero` is 71% of the write kernel and
+~128 GB per chr22 contig.
 
 Design: `docs/superpowers/specs/2026-09-14-svar2-sparse-range-cache-design.md`
 Plan: `docs/superpowers/plans/2026-09-14-svar2-sparse-range-cache.md`
@@ -2803,8 +3423,10 @@ EOF
 
 **Spec coverage.** Every spec section maps to a task: Layout -> 3; Lookup incl. the guards and both fast paths -> 3; Write path incl. the append convention, the contiguity assert and the `S*P` bound -> 5; Preflight -> 6; `n_variants` -> 7; Concat incl. the scatter-inverse and fresh meta -> 8; Meta schema and backward compat -> 4 (reader) + 5 (writer + dense helper); Testing incl. all six rewrites, the fixture, the characterization test and the Hypothesis property -> 1, 2, 3, 5; Docs -> 10; benchmark gate -> 9. Process notes (target `main`, no Rust gate, no version hand-edit) are in Global Constraints.
 
-**Deliberately not built**, and recorded in the spec's "Out of scope": the `svar2_ranges="lazy"` mode, moving the probe into Rust, making `concat` scale (it stays `R x S`-bound via `provenance` for per-sample tracks), and genoray's O(S²) `_sample_idxs`. One new deferral is added by this plan: the query-side all-samples scatter (see Deviation 2).
+**Deliberately not built**, and recorded in the spec's "Out of scope": the `svar2_ranges="lazy"` mode, moving the probe into Rust, making `concat` scale, and genoray's O(S²) `_sample_idxs`. Three of those are now filed as issues in Task 10 Step 9 with the measurement that justifies deferring them, and their scope is narrower than the spec assumed: `concat` is `R x S`-bound *only* for per-sample tracks after Task 8, not for the range caches. One new deferral is added by this plan: the query-side all-samples scatter (see Deviation 2).
 
-**Placeholders:** none. Every code step carries the actual code; the one `<paste the table>` is a benchmark result that cannot exist before Task 9 runs.
+**Measurement-driven revisions.** Six of the plan's original choices were replaced after measurement rather than review; they are listed with their numbers in "Deviations from the spec" at the top, and each one's reasoning is carried in the docstring of the code that implements it, not only here. The load-bearing ones: `np.argsort(kind="stable")` is not radix above 16-bit (so Task 5 counting-sorts), the k-way entry merge iterates per alternation rather than per block (so Task 8 batches by region), and neither a numba nor a Rust kernel is worth taking in this PR (Global Constraints, with the two measured opportunities filed in Task 10 Step 9).
 
-**Type consistency:** `_RangeLookup` exposes `n_regions` / `n_samples` / `ploidy` and `lookup` / `iter_entries`; `_SparseRanges` and `_DenseRanges` both implement all five and are constructed only in `_ranges_reader` (production) or directly in tests. `ENTRY_DTYPE`'s field names are used identically in `nonempty_entries`, `_DenseRanges.iter_entries`, `_SparseRanges.lookup` and the tests. `_SparseWriter.append(key, ent, lo, rc)` has one signature, called from `_write_from_svar2` and `merge_entry_streams`. `_svar2_preflight` and `_svar2_ranges_cache_bytes` keep their existing signatures; `_svar2_fill_projection` is new and called once.
+**Placeholders:** none. Every code step carries the actual code; the one `<paste the table>` is a benchmark result that cannot exist before Task 9 runs, and the three issue numbers in Step 10's PR body come from Step 9.
+
+**Type consistency:** `_RangeLookup` exposes `n_regions` / `n_samples` / `ploidy` and `lookup` / `entries_for_regions` / `iter_entries`; `_SparseRanges` and `_DenseRanges` both implement all six, and `iter_entries` is a loop over `entries_for_regions` in both. Readers are constructed only in `_ranges_reader` (production) or directly in tests. `ENTRY_DTYPE`'s field names are used identically in `nonempty_entries`, `_DenseRanges.entries_for_regions`, `_SparseRanges.lookup` and the tests. `_SparseWriter` has two append entry points with distinct signatures and no overlap in callers: `append(key, ent, lo, rc)` takes ordered region-local keys and is called only from `merge_region_blocks`; `append_contig(regions, cells, ents, lo, rc)` takes the three parallel arrays `nonempty_entries` returns and is called only from `_write_from_svar2`. `nonempty_entries(snp, indel, slot0, ploidy)` returns `(int32 region, int32 cell, ENTRY_DTYPE)` — no `span` parameter and no combined key, which is what `append_contig` consumes. `_svar2_preflight` and `_svar2_ranges_cache_bytes` keep their existing signatures; `_svar2_fill_projection` is new and called once, behind a latch.
