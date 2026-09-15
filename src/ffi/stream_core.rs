@@ -43,6 +43,7 @@ use std::thread::JoinHandle;
 
 use crossbeam_channel::bounded;
 use ndarray::Array1;
+use pyo3::Python;
 
 use crate::variants::{VariantWindowsBatch, VariantsBatch};
 
@@ -159,14 +160,34 @@ impl<Slot> Drop for EngineState<Slot> {
     /// returns `Ok(())` — the join then completes promptly (bounded by at most one
     /// in-flight `fill`). Cannot double-join: the normal exhaustion / error / panic paths
     /// already `take()` the handle in `next_batch_core`, leaving `producer == None` here.
-    /// There is no permanent-wedge risk even without this (channel close always unblocks
-    /// the producer); this just makes teardown synchronous so threads can't transiently
-    /// accumulate under create/drop churn.
+    ///
+    /// **The join MUST NOT hold the GIL** (issue #399). Closing the channels unblocks a
+    /// producer parked in `rx_free.recv()`/`tx_filled.send()`, but it does nothing for one
+    /// parked *inside* `fill` waiting on the GIL — and `PgenWindowFiller::fill` drives
+    /// pgenlib through `Python::attach`, so that is a real state. This `drop` normally runs
+    /// from Python deallocation, i.e. with the GIL held, so joining directly deadlocks the
+    /// pair: we wait on the producer, the producer waits on the GIL we are holding. The
+    /// bound in the paragraph above ("at most one in-flight `fill`") only holds once the
+    /// GIL is released across the join, which is what `detach` does here. This is the same
+    /// discipline `next_batch`/`window_realign_inputs` already follow via `py.detach`.
     fn drop(&mut self) {
         self.tx_free = None;
         self.rx_filled = None;
         if let Some(h) = self.producer.take() {
-            let _ = h.join();
+            // `Python::attach` is re-entrant when this thread already holds the GIL and
+            // acquires it otherwise; `detach` is what actually releases it across the
+            // join. Skip it entirely once the interpreter is gone (a drop racing
+            // `Py_Finalize`, or a pure-Rust unit test with no interpreter): there is no
+            // GIL to release, and attaching then would be undefined.
+            if unsafe { pyo3::ffi::Py_IsInitialized() } != 0 {
+                Python::attach(|py| {
+                    py.detach(|| {
+                        let _ = h.join();
+                    })
+                });
+            } else {
+                let _ = h.join();
+            }
         }
     }
 }
@@ -453,5 +474,106 @@ impl<B: EngineBackend> StreamEngineCore<B> {
             NextSlice::Done => None,
             NextSlice::Failed(e) => Some(Err(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A backend whose `fill` needs the GIL — the shape of `PgenWindowFiller`, which
+    /// drives pgenlib through `Python::attach` (issue #399). `VcfWindowFiller` touches
+    /// Python not at all, which is exactly why only PGEN streams ever wedged.
+    struct GilHungryBackend {
+        /// Fires once, immediately before the producer parks in `Python::attach`, so the
+        /// test can drop the engine at the one instant that actually reproduces #399.
+        entered_fill: Mutex<Option<mpsc::Sender<()>>>,
+    }
+
+    impl EngineBackend for GilHungryBackend {
+        type Slot = ();
+
+        fn n_jobs(&self) -> usize {
+            1
+        }
+
+        fn fill(&self, _job_idx: usize, _slot: &mut ()) -> anyhow::Result<()> {
+            if let Some(tx) = self.entered_fill.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            Python::attach(|_py| ());
+            Ok(())
+        }
+
+        fn n_batch_rows(&self, _job_idx: usize, _slot: &()) -> usize {
+            1
+        }
+
+        fn generate(
+            &self,
+            _job_idx: usize,
+            _slot: &(),
+            _row_lo: usize,
+            _row_hi: usize,
+        ) -> anyhow::Result<(
+            Array1<u8>,
+            Option<Array1<i32>>,
+            Option<Array1<i32>>,
+            Array1<i64>,
+        )> {
+            unreachable!("this backend is never consumed from — the test only drops it")
+        }
+    }
+
+    /// Issue #399: dropping a mid-stream engine while holding the GIL must not deadlock.
+    ///
+    /// Closing the channels (which `drop` does first) unblocks a producer parked on
+    /// `rx_free.recv()`/`tx_filled.send()`, but does nothing for one parked *inside*
+    /// `fill` waiting on the GIL. Only releasing the GIL across the join does. The
+    /// engine is therefore dropped from inside `Python::attach` here, reproducing the
+    /// real caller: `EngineState::drop` runs during Python deallocation.
+    ///
+    /// Structured so a regression FAILS instead of hanging forever: the whole
+    /// GIL-holding sequence runs on a worker thread and the test thread waits on a
+    /// bounded `recv_timeout`. (The test thread must not hold the GIL itself, or it
+    /// would be the thing blocking the producer.)
+    #[test]
+    fn dropping_mid_stream_engine_does_not_deadlock_a_gil_needing_filler() {
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+
+        let worker = std::thread::spawn(move || {
+            let backend = Arc::new(GilHungryBackend {
+                entered_fill: Mutex::new(Some(entered_tx)),
+            });
+            let core = StreamEngineCore::new(backend, 1);
+
+            Python::attach(|_py| {
+                {
+                    let mut state = core.state.lock().unwrap();
+                    core.ensure_started(&mut state)
+                        .expect("producer thread should spawn");
+                }
+                // Wait until the producer is at the doorstep of `Python::attach`, then
+                // give it a moment to actually park there — this thread holds the GIL,
+                // so it cannot get in. Without the sleep the drop can win the race and
+                // the pre-fix code would pass by luck.
+                entered_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("producer never reached fill");
+                std::thread::sleep(Duration::from_millis(100));
+
+                drop(core); // -> EngineState::drop -> join, with the GIL held
+            });
+
+            let _ = dropped_tx.send(());
+        });
+
+        dropped_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("EngineState::drop deadlocked: it joined a GIL-needing producer without releasing the GIL (issue #399)");
+        worker.join().expect("worker thread should not panic");
     }
 }
