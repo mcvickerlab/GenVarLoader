@@ -1088,11 +1088,16 @@ def _write_from_svar(
 
 
 def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> int:
-    """Permanent on-disk size of the two ``svar2_ranges`` var-key caches.
+    """What the pre-0.43.0 DENSE var-key cache would have occupied.
 
-    Each of ``vk_snp_range`` and ``vk_indel_range`` is a
-    ``(regions, samples, ploidy, 2)`` int64 array. These are NOT small: one
-    chromosome of a 414k-sample cohort over ~4k regions is ~98 GiB.
+    Two ``(regions, samples, ploidy, 2)`` int64 arrays: 32 bytes for every
+    ``(region, sample, ploid)`` cell, over 99% of them empty at cohort scale.
+    One chromosome of a 414k-sample cohort over ~4k regions is ~98 GiB.
+
+    The writer no longer emits this layout (#357) -- this is kept as the
+    reference figure the preflight logs for context, so the log says what the
+    change is worth. For what will actually be written, see
+    :func:`_svar2_fill_projection`.
 
     Args:
         n_regions: Number of BED rows in the dataset.
@@ -1100,16 +1105,18 @@ def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> in
         ploidy: Ploidy of the variant source.
 
     Returns:
-        Total bytes both channels will occupy on disk.
+        Total bytes the two dense channels would have occupied.
     """
     return 2 * n_regions * n_samples * ploidy * 2 * 8
 
 
 def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
-    """Log the projected ``svar2_ranges`` cache size and warn if disk is short.
+    """Log what the old dense range cache would have cost. Does not warn.
 
-    Warns rather than raising: free-space reporting is unreliable on some
-    network filesystems, and a false refusal would block a valid large build.
+    A worst-case sparse bound is useless here: ``28 * R * S * P`` genome-wide is
+    6.06 TB against a 6.93 TB dense cache, for a realized ~27 GB. Warning on that
+    would fire on every cohort build. The real check runs after the first contig
+    (:func:`_svar2_fill_projection`), once there is a fill to extrapolate from.
 
     Args:
         out_dir: Directory the cache will be written to.
@@ -1118,12 +1125,54 @@ def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int)
         ploidy: Ploidy of the variant source.
 
     Returns:
-        Projected total bytes of the two var-key caches.
+        The dense-equivalent byte count that was logged.
     """
     n_bytes = _svar2_ranges_cache_bytes(n_regions, n_samples, ploidy)
     logger.info(
-        f"svar2 range cache: {format_memory(n_bytes)} for {n_regions} regions "
-        f"x {n_samples} samples x ploidy {ploidy}."
+        f"svar2 range cache at {out_dir}: the pre-0.43.0 dense layout would have "
+        f"needed {format_memory(n_bytes)} for {n_regions} regions x {n_samples} "
+        f"samples x ploidy {ploidy}. The sparse layout stores only non-empty "
+        f"windows; the projected size is logged after the first contig."
+    )
+    return n_bytes
+
+
+def _svar2_fill_projection(
+    out_dir: Path,
+    n_entries: int,
+    regions_done: int,
+    n_regions: int,
+    n_samples: int,
+    ploidy: int,
+) -> int:
+    """Project the sparse cache size from realized fill, and check free space.
+
+    Warns rather than raising: free-space reporting is unreliable on some
+    network filesystems, and a false refusal would block a valid large build.
+
+    Args:
+        out_dir: Directory the cache is being written to.
+        n_entries: Non-empty cells written so far.
+        regions_done: Region rows completed so far.
+        n_regions: Total BED rows in the dataset.
+        n_samples: Number of selected samples.
+        ploidy: Ploidy of the variant source.
+
+    Returns:
+        Projected total bytes, or ``0`` if there is nothing to extrapolate from
+        yet -- no finished contig, or a finished contig that held no variant.
+    """
+    if regions_done <= 0 or n_entries <= 0:
+        # Nothing to extrapolate from. Returning 0 rather than warning about a
+        # 0-byte projection is what lets the caller's latch ask again after the
+        # next contig; see _write_from_svar2.
+        return 0
+    per_region = n_entries / regions_done
+    n_bytes = int(28 * per_region * n_regions)
+    fill = n_entries / max(regions_done * n_samples * ploidy, 1)
+    logger.info(
+        f"svar2 range cache: {fill:.4%} of windows hold a variant so far; "
+        f"projecting {format_memory(n_bytes)} for {n_regions} regions."
     )
     try:
         free = shutil.disk_usage(out_dir).free
@@ -1131,7 +1180,7 @@ def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int)
         return n_bytes
     if n_bytes > free:
         logger.warning(
-            f"svar2 range cache needs {format_memory(n_bytes)} but only "
+            f"svar2 range cache projects {format_memory(n_bytes)} but only "
             f"{format_memory(free)} is free at {out_dir}. The write will likely "
             f"fail with ENOSPC."
         )
@@ -1195,6 +1244,7 @@ def _write_from_svar2(
 
     max_ends = np.empty(R, np.int32)
     contig_offset = 0
+    projected = False
     pbar = tqdm(total=R, unit=" region")
     with _SparseWriter(out_dir, n_samples=S, ploidy=P) as writer:
         for (c,), df in bed.partition_by(
@@ -1281,6 +1331,17 @@ def _write_from_svar2(
             # _SparseWriter.append_contig for why this is not an argsort.
             writer.append_contig(acc_r, acc_c, acc_e, lo=lo, rc=rc)
             del acc_r, acc_c, acc_e
+
+            # Project from the first contig that produced anything, not from the
+            # first contig full stop. A variant-free leading contig -- a small or
+            # unplaced one, or a region set whose first contig happens to miss
+            # every variant -- would otherwise project 0 bytes, log "0.0000% of
+            # windows hold a variant", and permanently suppress the free-space
+            # check for the rest of the build. `projected` latches, so this still
+            # runs exactly once.
+            if not projected and writer.n_entries:
+                _svar2_fill_projection(out_dir, writer.n_entries, hi, R, S, P)
+                projected = True
 
             mask = (1 << MAX_END_SHIFT) - 1
             region_ends = np.asarray(ends, np.int64).copy()

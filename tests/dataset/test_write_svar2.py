@@ -411,7 +411,11 @@ def test_write_svar2_max_ends_extend_chromend(svar2_store: Path, tmp_path):
 
 
 def test_svar2_ranges_cache_bytes():
-    """Both var-key channels: 2 * R * S * P * 2 endpoints * 8 bytes."""
+    """The DENSE formula: 2 * R * S * P * 2 endpoints * 8 bytes.
+
+    Retained after #357 as the "what the old layout would have cost" reference
+    the preflight logs for context. It is no longer a projection.
+    """
     from genvarloader._dataset._write import _svar2_ranges_cache_bytes
 
     assert _svar2_ranges_cache_bytes(1, 1, 2) == 2 * 1 * 1 * 2 * 2 * 8
@@ -420,8 +424,12 @@ def test_svar2_ranges_cache_bytes():
     assert 90 * 1024**3 < big < 110 * 1024**3
 
 
-def test_svar2_preflight_warns_when_disk_is_short(tmp_path, monkeypatch):
-    """A projected cache larger than free space must warn, not silently proceed."""
+def test_svar2_preflight_logs_dense_equivalent_without_warning(tmp_path, monkeypatch):
+    """Preflight must NOT warn on the dense figure: the sparse cache is ~200x smaller.
+
+    Warning on `28 * R * S * P` would fire on every cohort build for a cache that
+    actually fits, which is exactly the false alarm #357 removes.
+    """
     from collections import namedtuple
 
     from loguru import logger
@@ -440,7 +448,61 @@ def test_svar2_preflight_warns_when_disk_is_short(tmp_path, monkeypatch):
         logger.remove(sink)
 
     assert n == _write._svar2_ranges_cache_bytes(3964, 414830, 2)
+    assert not msgs, f"preflight must not warn on the dense-equivalent figure: {msgs}"
+
+
+def test_svar2_fill_projection_warns_when_disk_is_short(tmp_path, monkeypatch):
+    """After the first contig, the realized fill drives the free-space check."""
+    from collections import namedtuple
+
+    from loguru import logger
+
+    from genvarloader._dataset import _write
+
+    Usage = namedtuple("Usage", "total used free")
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        monkeypatch.setattr(
+            _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
+        )
+        # 1 of 100 regions done, 1e6 entries => ~1e8 entries * 28 B projected.
+        n = _write._svar2_fill_projection(tmp_path, 1_000_000, 1, 100, 500, 2)
+    finally:
+        logger.remove(sink)
+
+    assert n == 28 * 100 * 1_000_000
     assert any("free" in m for m in msgs), msgs
+
+
+def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypatch):
+    """A variant-free first contig must not project 0 bytes and call it a day.
+
+    This is the failure mode the `projected` latch at the call site exists for: a
+    leading contig that happens to hold no variant extrapolates to 0, which would
+    pass any free-space check and, without the latch, suppress the projection for
+    the whole build. The helper is honest about having nothing to say; the caller
+    is responsible for asking again.
+    """
+    from collections import namedtuple
+
+    from loguru import logger
+
+    from genvarloader._dataset import _write
+
+    Usage = namedtuple("Usage", "total used free")
+    msgs: list[str] = []
+    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    try:
+        monkeypatch.setattr(
+            _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
+        )
+        assert _write._svar2_fill_projection(tmp_path, 0, 0, 100, 500, 2) == 0
+        assert _write._svar2_fill_projection(tmp_path, 0, 10, 100, 500, 2) == 0
+    finally:
+        logger.remove(sink)
+
+    assert not msgs, f"an empty projection must not warn about free space: {msgs}"
 
 
 @pytest.fixture(scope="module")
