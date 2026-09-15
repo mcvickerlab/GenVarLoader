@@ -489,6 +489,13 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
     no log record at all -- not just no warning. A return value of 0 alone does
     not distinguish the early return from `28 * (0 / regions_done) * n_regions`,
     which is also 0 by construction; only "did it log" tells the two apart.
+
+    Three calls, each isolating a different clause: (0, 0) exercises both at
+    once, (0, 10) exercises `n_entries <= 0` with a positive `regions_done`, and
+    (1_000_000, 0) exercises `regions_done <= 0` with a positive `n_entries` --
+    without that clause the third call divides by zero, so it alone is what
+    makes `regions_done <= 0` load-bearing for this test (the first two calls
+    never reach it, since `n_entries <= 0` short-circuits first).
     """
     from collections import namedtuple
 
@@ -507,6 +514,10 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
         assert not msgs, f"regions_done <= 0 must short-circuit before any log: {msgs}"
         assert _write._svar2_fill_projection(tmp_path, 0, 10, 100, 500, 2) == 0
         assert not msgs, f"n_entries <= 0 must short-circuit before any log: {msgs}"
+        assert _write._svar2_fill_projection(tmp_path, 1_000_000, 0, 100, 500, 2) == 0
+        assert not msgs, (
+            f"regions_done <= 0 must short-circuit even with n_entries > 0: {msgs}"
+        )
     finally:
         logger.remove(sink)
 
