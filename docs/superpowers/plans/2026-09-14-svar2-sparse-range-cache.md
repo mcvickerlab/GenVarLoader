@@ -3571,14 +3571,46 @@ def test_svar2_n_variants_is_a_zero_stride_view():
     assert taken.flags.writeable and taken.shape == (2, 7, 2)
 ```
 
-- [ ] **Step 2: Run it**
+- [ ] **Step 1b: Pin it on a real instance**
 
-Run: `pixi run -e dev pytest tests/unit/dataset/test_svar2_ranges.py -q -k n_variants`
-Expected: PASS — it characterizes numpy, not GVL. It exists so the contract is written down next to the change.
+The Step 1 test builds its own `np.broadcast_to` and never touches `Svar2Haps`,
+so it passes identically whether or not Step 3 is done — it characterizes numpy,
+not this change. It stays (the contract is worth writing down), but it cannot be
+the only test. Append to `tests/dataset/test_svar2_readbound_haps.py`, which has
+the `svar2_store` fixture and the `_svar2_haps_dataset` helper this needs:
+
+```python
+def test_svar2_haps_n_variants_is_a_readonly_zero_stride_view(
+    tmp_path: Path, svar2_store: Path
+):
+    """#355 mutation-kill: assert on a REAL ``Svar2Haps.n_variants``, not a
+    standalone ``np.broadcast_to`` call.
+
+    ``test_svar2_n_variants_is_a_zero_stride_view`` (tests/unit/dataset/
+    test_svar2_ranges.py) characterizes numpy's ``broadcast_to`` in isolation --
+    it never touches ``Svar2Haps`` and so passes identically whether or not the
+    production code is changed. This test fails if ``Svar2Haps.__post_init__``
+    goes back to a real ``np.zeros`` allocation: shape/dtype are preserved by a
+    plain ``np.zeros`` too, but strides/writeability are not.
+    """
+    ds = _svar2_haps_dataset(tmp_path, svar2_store)
+    seqs = ds._seqs
+    n_variants = seqs.n_variants
+
+    assert n_variants.strides == (0, 0, 0)
+    assert not n_variants.flags.writeable
+    assert n_variants.dtype == np.int32
+    assert n_variants.shape == (seqs.n_regions, seqs.n_samples, seqs.ploidy)
+```
+
+- [ ] **Step 2: Run both**
+
+Run: `pixi run -e dev pytest tests/unit/dataset/test_svar2_ranges.py tests/dataset/test_svar2_readbound_haps.py -q -k n_variants`
+Expected: the Step 1 characterization test PASSES (it characterizes numpy, not GVL — it exists so the contract is written down next to the change), and the Step 1b test FAILS with `assert (16, 8, 4) == (0, 0, 0)`, because `__post_init__` still allocates. That failure is the point: it is what makes Step 3 verifiable. After Step 3, re-run and both pass.
 
 - [ ] **Step 3: Replace the allocation**
 
-In `python/genvarloader/_dataset/_svar2_haps.py`, replace the `n_variants` block in `__post_init__` (`:270-279`):
+In `python/genvarloader/_dataset/_svar2_haps.py`, replace the `n_variants` block in `__post_init__` (`:277-284`):
 
 ```python
         # n_variants is all zeros, and wrong: the read-bound decode never counts
@@ -3603,7 +3635,7 @@ In `python/genvarloader/_dataset/_svar2_haps.py`, replace the `n_variants` block
 Update the `n_variants` annotation's docstring at `python/genvarloader/_dataset/_haps.py:294` to record that the SVAR2 view is read-only:
 
 ```python
-    n_variants: NDArray[np.int32]
+    n_variants: NDArray[np.int32] = field(init=False)
     """Per ``(region, sample, ploid)`` variant counts.
 
     SVAR1 fills this with real counts and it is writable. SVAR2 cannot count
@@ -3615,13 +3647,13 @@ Update the `n_variants` annotation's docstring at `python/genvarloader/_dataset/
 - [ ] **Step 5: Run the full tree**
 
 Run: `pixi run -e dev pytest tests -q`
-Expected: PASS. If anything mutates `n_variants` in place it fails here with `ValueError: assignment destination is read-only` — that is a real bug the old writable array was hiding, so fix the mutation, do not revert the view.
+Expected: the two `tests/dataset/test_concat_svar2.py` `FileNotFoundError` failures that Task 5 left behind and Task 8 fixes, and nothing else. Do not patch them here. If anything mutates `n_variants` in place it fails here with `ValueError: assignment destination is read-only` — that is a real bug the old writable array was hiding, so fix the mutation, do not revert the view.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 pixi run -e dev ruff check python/ tests/ && pixi run -e dev ruff format python/ tests/
-git add python/genvarloader/_dataset/_svar2_haps.py python/genvarloader/_dataset/_haps.py tests/unit/dataset/test_svar2_ranges.py
+git add python/genvarloader/_dataset/_svar2_haps.py python/genvarloader/_dataset/_haps.py tests/unit/dataset/test_svar2_ranges.py tests/dataset/test_svar2_readbound_haps.py
 git commit -m "perf(svar2): stop allocating a dense n_variants at open
 
 Svar2Haps allocated a real (R, S, P) int32 of zeros -- 50.7 GB at All of Us
