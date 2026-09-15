@@ -29,6 +29,8 @@ from typing import IO, Any, Iterator, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from ._concat_plan import CONCAT_CHUNK_BYTES
+
 __all__ = [
     "ENTRY_DTYPE",
     "_RangeLookup",
@@ -37,6 +39,7 @@ __all__ = [
     "_ranges_reader",
     "_SparseWriter",
     "nonempty_entries",
+    "merge_region_blocks",
 ]
 
 ENTRY_DTYPE = np.dtype(
@@ -897,3 +900,79 @@ def nonempty_entries(
         )
     cell = (slot0 + sj).astype(np.int64) * ploidy + pj
     return ri.astype(np.int32), cell.astype(np.int32), ent
+
+
+def merge_region_blocks(
+    readers: "list[_RangeLookup]",
+    r_maps: "list[NDArray[np.int64]]",
+    s_maps: "list[NDArray[np.int64]]",
+    writer: "_SparseWriter",
+    n_regions: int,
+    span: int,
+    ploidy: int,
+) -> None:
+    """Merge k range caches into ``writer``, one merged-region batch at a time.
+
+    Merged keys are ``r * span + slot * ploidy + ploid`` and both index maps are
+    strictly increasing *within one input*, so a merged region's entries are
+    exactly the union of that region's per-input blocks. There is no cross-region
+    state: each batch is gathered, remapped, ordered with one ``argsort``, and
+    written. Ties are impossible -- ``_concat_validate`` makes the inputs disjoint
+    on whichever axis is being merged -- so the sort's stability is irrelevant and
+    ``_SparseWriter``'s strictly-ascending check is a real assertion rather than a
+    formality.
+
+    This replaces a block-wise k-way merge over ``iter_entries``. That merge ran
+    its Python loop once per *alternation* in the merged key sequence, not once
+    per block: on ``axis="samples"`` the ownership pattern repeats inside every
+    region, so two shards with interleaved sample IDs cost ~N/2 iterations --
+    4.9e8 iterations, ~29 minutes, at the All of Us genome projection. This costs
+    ``ceil(n_regions / rows)`` iterations no matter how the inputs interleave, and
+    is less code.
+
+    Args:
+        readers: One per input dataset, in input order.
+        r_maps: Per input, source region index -> merged region index. The
+            **scatter-inverse** of ``provenance``'s ``order`` (which is merged ->
+            source); ``order[:, 1]`` is the inverse permutation and would silently
+            scramble regions. Strictly increasing.
+        s_maps: Per input, source sample slot -> merged sample slot. Likewise
+            strictly increasing -- merged samples are ``sorted(union)`` of
+            non-overlapping sorted inputs.
+        writer: Destination; receives one ``append`` per region batch.
+        n_regions: Merged region count.
+        span: ``n_samples * ploidy`` in the merged keyspace.
+        ploidy: ``P``, identical across inputs (``_concat_validate`` enforces it).
+    """
+    rows = max(1, CONCAT_CHUNK_BYTES // ((ENTRY_DTYPE.itemsize + 8) * max(span, 1)))
+    for r0 in range(0, n_regions, rows):
+        r1 = min(r0 + rows, n_regions)
+        keys: "list[NDArray[np.int64]]" = []
+        ents: "list[NDArray[np.void]]" = []
+        for rd, r_map, s_map in zip(readers, r_maps, s_maps):
+            # r_map is strictly increasing, so merged [r0, r1) is a contiguous
+            # slice of this input's own region axis -- two searchsorteds, no scan.
+            w0 = int(np.searchsorted(r_map, r0, "left"))
+            w1 = int(np.searchsorted(r_map, r1, "left"))
+            if w1 <= w0:
+                continue
+            src_key, ent = rd.entries_for_regions(w0, w1)
+            if not len(src_key):
+                continue
+            r_src, rest = np.divmod(src_key, rd.n_samples * ploidy)
+            s_src, p = np.divmod(rest, ploidy)
+            # Region-LOCAL keys: _SparseWriter.append takes lo/rc separately.
+            keys.append((r_map[r_src] - r0) * span + s_map[s_src] * ploidy + p)
+            ents.append(ent)
+
+        if not keys:
+            key = np.empty(0, np.int64)
+            ent = np.empty(0, ENTRY_DTYPE)
+        elif len(keys) == 1:
+            key, ent = keys[0], ents[0]
+        else:
+            key = np.concatenate(keys)
+            ent = np.concatenate(ents)
+            perm = np.argsort(key, kind="stable")
+            key, ent = key[perm], ent[perm]
+        writer.append(key, ent, lo=r0, rc=r1 - r0)

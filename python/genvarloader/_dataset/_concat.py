@@ -20,6 +20,13 @@ from ._concat_validate import (
     validate_concat,
     variants_fingerprint,
 )
+from ._svar2_ranges import (
+    ENTRY_DTYPE,
+    _ranges_reader,
+    _SparseRanges,
+    _SparseWriter,
+    merge_region_blocks,
+)
 from ._write import DATASET_FORMAT_VERSION, Metadata, _prep_bed
 
 if TYPE_CHECKING:
@@ -244,34 +251,123 @@ def _concat_svar2_ranges(
 ) -> None:
     """Merge a .svar2 dataset's cached range arrays.
 
-    ``vk_snp_range``/``vk_indel_range`` are per-``(region, sample, ploid)``
-    fixed 16-byte (2 x int64) records in the same C-order flat-slot space as
-    genotype offsets, so they gather through ``gather_fixed`` using the same
-    ``runs`` the svar/svar2 offsets and per-sample tracks use (built from
-    ``provenance(axis, shapes, ploidy, order=order)``).
+    The per-``(region, sample, ploid)`` var-key ranges are sparse (#357), so they
+    merge rather than gather: each merged region batch is gathered from every
+    input, remapped into the merged keyspace, ordered, and appended. Legacy dense
+    inputs feed the same merge through ``_DenseRanges.entries_for_regions``.
+
+    After this change an svar2 ``concat`` with no per-sample tracks holds nothing
+    ``R x S``-sized: the ``(R*S*P, 2)`` ``provenance`` array (64 GB at All of Us
+    chr22) and the ``list[Run]`` ``coalesce`` builds from it (~204 bytes per run,
+    which on an interleaved sample merge degenerates to one run per slot) are both
+    gone from this path. Per-sample tracks still plan in core at
+    ``_concat.py:465`` -- 32 GB plus a ~424 GB run list at the same projection --
+    so ``concat`` is bounded only for tracks-free datasets. Tracked separately.
 
     ``dense_snp_range``/``dense_indel_range`` are per-region only (sample- and
-    ploidy-independent): on ``axis="samples"`` they're identical across inputs
-    and just linked from input #0; on ``axis="regions"`` they need the region
-    ordering (not a block concatenation), so they gather through a *separate*
-    ``gather_fixed`` call using region-only runs (``n_samples=1, ploidy=1``)
-    built from the same merged region ``order``.
+    ploidy-independent), and cannot be sparsified -- genoray's ``dense_abs_row``
+    uses ``.start`` as an index base. On ``axis="samples"`` they're identical
+    across inputs and just linked from input #0; on ``axis="regions"`` they need
+    the region ordering, so they gather through ``gather_fixed`` using region-only
+    runs (``n_samples=1, ploidy=1``) built from the merged region ``order``.
 
-    ``sample_cols`` maps merged sample slot -> index into the linked svar2
-    store's ``available_samples``; each input's own ``sample_cols.npy`` is
-    already indexed by that input's own (sorted) sample list, so the merged
-    array is a direct per-merged-sample lookup through ``order``.
+    ``sample_cols`` maps merged sample slot -> index into the linked svar2 store's
+    ``available_samples``; each input's own ``sample_cols.npy`` is already indexed
+    by that input's own (sorted) sample list, so the merged array is a direct
+    per-merged-sample lookup through ``order``.
+
+    Raises:
+        ValueError: If an input's ``svar2_meta.json`` disagrees with its
+            ``metadata.json`` about the grid, or if an input's own sample list is
+            not sorted on an ``axis="samples"`` merge.
     """
-    prov = provenance(axis, shapes, ploidy, order=order)
-    runs = coalesce(prov)
+    readers = [_ranges_reader(p / "genotypes" / "svar2_ranges") for p in paths]
 
-    for name in ("vk_snp_range", "vk_indel_range"):
-        gather_fixed(
-            [p / "genotypes" / "svar2_ranges" / f"{name}.npy" for p in paths],
-            out_dir / f"{name}.npy",
-            runs,
-            record_bytes=16,
+    # The merge trusts each reader's own (n_regions, n_samples, ploidy) to decode
+    # its keys, and `shapes` to place them. If the two files disagree, every key
+    # is decoded against the wrong stride and the output is silently scrambled
+    # rather than wrong-sized -- so check, rather than let it through.
+    for d, (rd, (R_d, S_d)) in enumerate(zip(readers, shapes)):
+        if (rd.n_regions, rd.n_samples, rd.ploidy) != (R_d, S_d, ploidy):
+            raise ValueError(
+                f"input #{d}'s svar2_meta.json describes an "
+                f"({rd.n_regions}, {rd.n_samples}, {rd.ploidy}) grid but its "
+                f"metadata.json describes ({R_d}, {S_d}, {ploidy}); the two files "
+                "disagree about the dataset's shape."
+            )
+
+    # `order` is merged -> source. The remap needs source -> merged, i.e. the
+    # scatter-inverse; `order[:, 1]` is the inverse permutation and would produce
+    # a silently scrambled dataset.
+    if axis == "regions":
+        # _concat_validate requires identical samples in identical order here.
+        s_maps = [np.arange(n_samples, dtype=np.int64) for _ in paths]
+        r_maps = [np.empty(r, np.int64) for r, _ in shapes]
+        for i, (d, w) in enumerate(order):
+            r_maps[d][w] = i
+    else:
+        # _concat_validate requires inp.bed.equals(ref.bed) here.
+        r_maps = [np.arange(n_regions, dtype=np.int64) for _ in paths]
+        s_maps = [np.empty(s, np.int64) for _, s in shapes]
+        for i, (d, w) in enumerate(order):
+            s_maps[d][w] = i
+        # merge_region_blocks relies on each s_map being strictly INCREASING, so
+        # that a merged region's entries come out ascending after one sort of the
+        # concatenated blocks. That holds iff each input's own sample list is
+        # sorted, because the merged order is sorted(union). gvl.write sorts
+        # unconditionally (_write.py:284), so this only fires on a hand-built or
+        # externally-produced store -- where it would otherwise scramble samples.
+        for d, p in enumerate(paths):
+            inp_samples = json.loads((p / "metadata.json").read_text())["samples"]
+            if list(inp_samples) != sorted(inp_samples):
+                raise ValueError(
+                    f"input #{d}'s samples are not sorted. concat merges the "
+                    "sparse range caches by remapping each input's keys into the "
+                    "merged keyspace and relying on that remap to stay ascending, "
+                    "which requires each input's own sample list to be sorted "
+                    "(gvl.write sorts unconditionally)."
+                )
+
+    out_span = n_samples * ploidy
+    if axis == "regions" and all(isinstance(rd, _SparseRanges) for rd in readers):
+        # Every merged region draws its whole CSR block from exactly one input,
+        # with cell ids unchanged (s_map is the identity and S is equal across
+        # inputs), so this is a pure reorder of ragged blocks -- the same shape of
+        # problem copy_runs already solves for tracks, with region_ptr as the
+        # offsets array. No decode, no remap, no sort: byte ranges only.
+        region_runs = coalesce(
+            provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order)
         )
+        src_ptr = [np.asarray(rd.region_ptr, np.int64) for rd in readers]
+        merged_ptr = None
+        for fname, itemsize in (
+            ("cell_id.npy", 4),
+            ("cell_vk.npy", ENTRY_DTYPE.itemsize),
+        ):
+            # Both calls return the same offsets -- the two files are parallel --
+            # so keeping the last is keeping any of them.
+            merged_ptr = copy_runs(
+                [p / "genotypes" / "svar2_ranges" / fname for p in paths],
+                out_dir / fname,
+                region_runs,
+                src_ptr,
+                itemsize=itemsize,
+            )
+        assert merged_ptr is not None
+        merged_ptr.astype(np.int64).tofile(out_dir / "region_ptr.npy")
+        n_entries = int(merged_ptr[-1])
+    else:
+        with _SparseWriter(out_dir, n_samples=n_samples, ploidy=ploidy) as writer:
+            merge_region_blocks(
+                readers,
+                r_maps,
+                s_maps,
+                writer,
+                n_regions=n_regions,
+                span=out_span,
+                ploidy=ploidy,
+            )
+        n_entries = writer.n_entries
 
     if axis == "samples":
         for name in ("dense_snp_range", "dense_indel_range"):
@@ -299,16 +395,28 @@ def _concat_svar2_ranges(
         merged_cols = cols[0]
     np.save(out_dir / "sample_cols.npy", merged_cols)
 
-    src_meta = json.loads(
-        (paths[0] / "genotypes" / "svar2_ranges" / "svar2_meta.json").read_text()
-    )
+    # Built FRESH, not patched from input #0: a dense input has no region_ptr key
+    # and a patched meta would keep stale vk_* keys, leaving a file that claims
+    # both layouts -- and from which the reader would take a stale `n_samples`.
     R, S, P = n_regions, n_samples, ploidy
-    src_meta["vk_snp_range"]["shape"] = [R, S, P, 2]
-    src_meta["vk_indel_range"]["shape"] = [R, S, P, 2]
-    src_meta["dense_snp_range"]["shape"] = [R, 2]
-    src_meta["dense_indel_range"]["shape"] = [R, 2]
-    src_meta["sample_cols"]["shape"] = [S]
-    (out_dir / "svar2_meta.json").write_text(json.dumps(src_meta))
+    (out_dir / "svar2_meta.json").write_text(
+        json.dumps(
+            {
+                "layout": "sparse",
+                "n_regions": R,
+                "n_samples": S,
+                "n_entries": n_entries,
+                "fill": (n_entries / (R * S * P)) if R * S * P else 0.0,
+                "region_ptr": {"shape": [R + 1], "dtype": "<i8"},
+                "cell_id": {"shape": [n_entries], "dtype": "<i4"},
+                "cell_vk": {"shape": [n_entries], "dtype": ENTRY_DTYPE.descr},
+                "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
+                "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
+                "sample_cols": {"shape": [S], "dtype": "<i8"},
+                "ploidy": P,
+            }
+        )
+    )
 
 
 def concat(
