@@ -790,6 +790,43 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
 **Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
 (PR-B0 through PR-B4, per the ✅ entries above, plus the #328 follow-up).
 
+- ✅ **Per-dataset parallelism policy on `StreamingDataset` — issue [#359](https://github.com/mcvickerlab/GenVarLoader/issues/359).**
+  Feature-parity follow-up to the `main`→`streaming` reconcile ([#358](https://github.com/mcvickerlab/GenVarLoader/issues/358)), which
+  deliberately shipped no features: `main` gained
+  `Dataset.with_settings(parallel=True|False|"auto")` ([#352](https://github.com/mcvickerlab/GenVarLoader/issues/352)/[#353](https://github.com/mcvickerlab/GenVarLoader/issues/353)) while
+  `streaming` was long-lived, so the two `with_settings` surfaces drifted.
+  `StreamingDataset.with_settings(parallel=)` + a read-only `StreamingDataset.parallel` now
+  match it, with the same precedence (**explicit > `GVL_FORCE_PARALLEL` > size gate**) and the
+  same `ValueError`-at-the-boundary validation. Two findings changed the shape of the fix from
+  what the issue assumed:
+  (1) **The record engines never consulted `should_parallelize` at all.** SVAR1/VCF/PGEN take a
+  single `parallel: bool` at engine CONSTRUCTION which then governs every batch that engine
+  produces, and all three call sites passed a hardcoded `True` — so an ambient
+  `gvl.parallel_policy(False)` block, which the issue believed was already honored, in fact
+  reached only the SVAR2 super-batch and the track-realign kernels (the ones that call the gate
+  per batch with their own byte count). A new `_engine_parallel()` resolves the ContextVar at
+  build time. `"auto"` deliberately keeps its pre-#359 meaning of "let the engine parallelize"
+  rather than deferring to the size floor: there is no "this batch" yet when the flag is chosen,
+  and routing it through the gate would flip small-batch streams to serial as a side effect of
+  adding an override. SVAR2 needed no change (its engine takes no `parallel` argument; the
+  super-batch already gates per batch), which is the `svar2_readbound_chain` case the issue
+  flagged.
+  (2) **`to_iter` is a generator, so it cannot simply wrap the loop in `parallel_policy`.**
+  Generators do not get their own context, so a `with` spanning the `yield` would leave the
+  policy set in the CALLER's context while the consumer's loop body runs, silently re-policying
+  any unrelated `"auto"` read made between batches. The policy is therefore established per
+  ADVANCE of the inner generator and released before yielding; `"auto"` skips the scope entirely
+  so the default path stays exactly as cheap as before. Gated by 18 cases in
+  `tests/dataset/test_streaming_parallel_setting.py` — the flag reaching the Rust constructor is
+  asserted index-free (drive twice under opposing policies, require exactly one differing boolean
+  argument), both precedence directions, ContextVar hygiene in the loop body / after the loop /
+  on an abandoned iterator, and output identity under either policy on all three backends. All 18
+  fail against the pre-fix module, and the 5 engine-wiring cases still fail when only the three
+  call sites are reverted to the literal `True` — so they pin the threading, not just the new
+  keyword. Public-API change, so `skills/genvarloader/SKILL.md` and `docs/source/faq.md` are
+  updated (`docs/source/api.md` needs no change — no new `__all__` symbol).
+
+
 ## Sequencing
 
 **#275 is the keystone** — it defines the generic `StreamBackend` trait that every other backend

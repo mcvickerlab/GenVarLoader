@@ -87,6 +87,11 @@ ds = ds.with_settings(parallel=False)   # True | False | "auto"
 
 The setting is per-dataset and travels with it, including into dataloader worker processes.
 
+`gvl.StreamingDataset.with_settings(parallel=...)` takes the same values with the same precedence, and `StreamingDataset.parallel` reports the current one. Two details are specific to streaming:
+
+- **The policy is established per batch, not for the whole loop.** `to_iter` is a generator, and a generator shares its caller's context, so holding the policy across the `yield` would silently re-policy whatever you do between batches — including reads of an unrelated `"auto"` dataset. It is set around each advance of the stream and released before the batch is handed back, so inside your `for` body the ambient policy is whatever it was outside the loop.
+- **Under `"auto"`, the `.svar`/VCF/PGEN engines stay parallel.** Those engines take a single parallel-or-not decision when the engine is built, which then governs every batch it produces, so there is no per-batch size to gate on. The `.svar2` super-batch and the track re-alignment kernels do apply the size gate per batch. An explicit `True`/`False` is honored by all of them.
+
 ```{note}
 This governs *whether* to parallelize, not how many threads to use. The worker count is fixed at import from `GVL_NUM_THREADS`, because rayon reads it when its global thread pool initializes — so it cannot be varied per dataset.
 ```
