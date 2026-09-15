@@ -62,6 +62,7 @@ from ._protocol import TrackRealigner
 from ._rag_variants import RaggedVariants
 from ._reference import Reference
 from ._svar2_link import Svar2Link, _resolve_svar2, _verify_svar2_fingerprint
+from ._svar2_ranges import _RangeLookup, _ranges_reader
 
 if TYPE_CHECKING:
     from genoray._svar2_fields import StoredField
@@ -110,17 +111,18 @@ def _field_spec(sf: "StoredField") -> tuple[str, str, str]:
 
 @dataclass(slots=True)
 class _Svar2Cache:
-    """The six memmapped ``svar2_ranges/`` arrays (all int64), sliced per query.
+    """The ``svar2_ranges/`` cache, sliced per query.
 
-    ``vk_*_range`` are ``(R, S, P, 2)`` (per region/sample/ploid byte windows into
-    the store's var_key tables); ``dense_*_range`` are ``(R, 2)`` (per-region,
-    sample-independent); ``sample_cols`` is ``(S,)`` (selected slot -> original
-    store sample index). Per-query starts are recomputed post-jitter at read time,
-    so they are not cached here.
+    ``ranges`` answers the per-``(region, sample, ploid)`` var-key question and
+    owns its own on-disk layout (dense or sparse -- see ``_svar2_ranges``).
+    ``dense_*_range`` are ``(R, 2)`` memmaps (per-region, sample-independent, and
+    NOT sparsifiable: ``genoray``'s ``dense_abs_row`` uses ``.start`` as an index
+    base). ``sample_cols`` is ``(S,)``: selected slot -> original store sample
+    index. Per-query starts are recomputed post-jitter at read time, so they are
+    not cached here.
     """
 
-    vk_snp_range: NDArray[np.int64]
-    vk_indel_range: NDArray[np.int64]
+    ranges: "_RangeLookup"
     dense_snp_range: NDArray[np.int64]
     dense_indel_range: NDArray[np.int64]
     sample_cols: NDArray[np.int64]
@@ -223,11 +225,14 @@ class Svar2Haps(Haps[_H]):
     n_regions: int
     """The dataset's region count, from the range cache's ``dense_snp_range`` shape."""
     n_samples: int
-    """The dataset's sample count, from the range cache's ``vk_snp_range`` shape.
+    """The dataset's sample count, from ``svar2_meta.json``.
 
     Together with :attr:`n_regions` this is the ``(R, S)`` grid a flat dataset
     index unravels into. SVAR1 reads the same two numbers off its ``genotypes``
-    array's leading shape; there is no such array here.
+    array's leading shape; there is no such array here, so the meta is the only
+    source -- and a wrong value makes every sparse probe miss, which reads as a
+    silently variant-free dataset. ``_ranges_reader`` cross-checks it against
+    ``sample_cols.npy``.
     """
     ploidy: int
     """The store's ploidy, from the svar2 range cache's ``svar2_meta.json``.
@@ -274,8 +279,15 @@ class Svar2Haps(Haps[_H]):
         # fill this with at open time. Tracked as #363 -- Dataset.n_variants()
         # reports zeros on SVAR2. Kept zero-valued rather than absent because the
         # shape (R, S, P) is what callers read it for.
-        self.n_variants = np.zeros(
-            (self.n_regions, self.n_samples, self.ploidy), np.int32
+        #
+        # A real np.zeros here is 50.7 GB at All of Us chr19 (#355), allocated at
+        # open, for an array nothing writes to. A zero-stride broadcast has the
+        # same shape and dtype for 0.8 KiB. Two caveats: `.nbytes` still reports
+        # the full 50 GB, and np.broadcast_to pickles by materializing, so spawn
+        # workers (to_dataloader(num_workers>0)) serialize it in full -- exactly
+        # as they did with np.zeros, so no regression, but not free either.
+        self.n_variants = np.broadcast_to(
+            np.zeros((), np.int32), (self.n_regions, self.n_samples, self.ploidy)
         )
         self.available_var_fields = ["alt", "ilen", "start"] + [
             k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS
@@ -417,20 +429,18 @@ class Svar2Haps(Haps[_H]):
         with open(ranges_dir / "svar2_meta.json") as f:
             meta = json.load(f)
 
+        ranges = _ranges_reader(ranges_dir)
+        R, S, P = ranges.n_regions, ranges.n_samples, ranges.ploidy
+        if P != ploidy:
+            raise ValueError(f"svar2 cache ploidy ({P}) != dataset ploidy ({ploidy}).")
+
         def _mm(name: str, shape: list[int]) -> NDArray[np.int64]:
             return np.memmap(
                 ranges_dir / name, dtype=np.int64, mode="r", shape=tuple(shape)
             )
 
-        R = int(meta["dense_snp_range"]["shape"][0])
-        S = int(meta["vk_snp_range"]["shape"][1])
-        P = int(meta["ploidy"])
-        if P != ploidy:
-            raise ValueError(f"svar2 cache ploidy ({P}) != dataset ploidy ({ploidy}).")
-
         cache = _Svar2Cache(
-            vk_snp_range=_mm("vk_snp_range.npy", meta["vk_snp_range"]["shape"]),
-            vk_indel_range=_mm("vk_indel_range.npy", meta["vk_indel_range"]["shape"]),
+            ranges=ranges,
             dense_snp_range=_mm(
                 "dense_snp_range.npy", meta["dense_snp_range"]["shape"]
             ),
@@ -1552,19 +1562,14 @@ class Svar2Haps(Haps[_H]):
     ) -> _GatherInputs:
         """Cache-slice a per-contig query block into the read-bound FFI inputs.
 
-        Fancy-indexes the memmapped cache (sub-linear; no per-read search). The
-        vk_* rows come out ``(n, P, 2)`` -> reshaped ``(n*P, 2)`` in row = q*P+p
-        order, which is exactly what the kernel expects.
+        The ``vk_*`` rows come back ``(n * P, 2)`` in ``row = q * P + p`` order,
+        which is exactly what the kernel expects; how they are found is the range
+        layout's business (see ``_svar2_ranges``).
         """
         c = self.cache
         region_starts = np.ascontiguousarray(regions_grp[:, 1], np.uint32)
         orig_samples = np.ascontiguousarray(c.sample_cols[si_q], np.int64)
-        vk_snp = np.ascontiguousarray(
-            np.asarray(c.vk_snp_range[r_q, si_q]).reshape(-1, 2), np.int64
-        )
-        vk_indel = np.ascontiguousarray(
-            np.asarray(c.vk_indel_range[r_q, si_q]).reshape(-1, 2), np.int64
-        )
+        vk_snp, vk_indel = c.ranges.lookup(r_q, si_q, P)
         dense_snp = np.ascontiguousarray(np.asarray(c.dense_snp_range[r_q]), np.int64)
         dense_indel = np.ascontiguousarray(
             np.asarray(c.dense_indel_range[r_q]), np.int64

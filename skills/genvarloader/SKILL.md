@@ -83,7 +83,7 @@ SVARs are resolved at `Dataset.open` time via `metadata.json` → caller `svar=`
 
 `.svar2` is genoray's newer sparse columnar variant store. Pass it to `gvl.write` exactly like a `.svar`, BCF, or PGEN — `gvl.write(path, bed, variants="cohort.svar2")` or `variants=SparseVar2("cohort.svar2")`. Like `.svar`, the dataset stores a back-reference (`metadata.json` → `svar2_link`) instead of duplicating per-variant arrays, so the `.svar2` store must remain accessible at read time.
 
-Unlike `.svar` (whose read path builds an interval search tree + a per-read dense-union over the queried window), a `.svar2`-backed dataset reconstructs via a **read-bound** path: `gvl.write` caches per-`(region, sample, ploid)` variant-key ranges under `<dataset>/genotypes/svar2_ranges/` (sized to the dataset's *selected* samples, not the full `.svar2` cohort) — **not small at cohort scale**, see the "Common gotchas" bullet below — and at read time gvl gathers directly off that cache and calls all-Rust kernels — **no interval-search-tree build and no dense-union rebuild per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts. See `docs/source/faq.md`.
+Unlike `.svar` (whose read path builds an interval search tree + a per-read dense-union over the queried window), a `.svar2`-backed dataset reconstructs via a **read-bound** path: `gvl.write` caches the var-key window for each `(region, sample, ploid)` that holds a variant, under `<dataset>/genotypes/svar2_ranges/` (sized to the dataset's *selected* samples, not the full `.svar2` cohort) — as a sparse region-CSR table, 28 bytes per non-empty window, small at cohort scale (~504 MB for the All of Us chr22 grid; see the "Common gotchas" bullet below) — and at read time gvl gathers directly off that cache and calls all-Rust kernels — **no interval-search-tree build and no dense-union rebuild per read**. `.svar2` stores are also typically smaller on disk than `.svar`, especially for large cohorts. See `docs/source/faq.md`.
 
 `.svar2` is resolved at `Dataset.open` time in the same order as `.svar`: caller `svar2=` arg → recorded relative path → recorded absolute path → sibling `*.svar2`. `Dataset.open(path, svar2=<override>)` mirrors `svar=`. See `docs/source/format.md` ("`.svar2` resolution at open time").
 
@@ -132,7 +132,7 @@ Notable:
 
 **Parallelism:** `gvl.write` now parallelizes over write categories. Variants are processed first (serially). Then per-sample `tracks` and `annot_tracks` run concurrently (joblib loky backend). The `max_mem` budget is divided across the concurrently-running categories.
 
-**`max_mem` and `.svar2`:** for a `.svar2` variant source, `max_mem` also bounds the genotype range-cache write — ranges are produced in per-sample chunks sized to fit the budget rather than a whole contig at once. It does not bound the permanent `genotypes/svar2_ranges/` cache's on-disk size; that scales with `regions x samples x ploidy` and is governed by disk space (see "Common gotchas" below and `format.md`).
+**`max_mem` and `.svar2`:** for a `.svar2` variant source, `max_mem` bounds the genoray chunk stream `gvl.write` reads while producing the genotype range cache — ranges are produced in per-sample chunks sized to fit the budget rather than a whole contig at once. It does **not** bound the per-contig entry accumulator, which peaks at roughly 60 bytes per entry on the largest contig (see "Common gotchas" below), nor the permanent `genotypes/svar2_ranges/` cache's on-disk size, which scales with variants observed inside regions (not `regions x samples x ploidy`) and is governed by disk space (see `format.md`).
 
 Source: `python/genvarloader/_dataset/_write.py`.
 
@@ -465,6 +465,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 | Insertion fill internals              | `python/genvarloader/_dataset/_insertion_fill.py`      |
 | SVAR back-reference / migration       | `python/genvarloader/_dataset/_svar_link.py`           |
 | `.svar2` back-reference / read-bound wiring | `python/genvarloader/_dataset/_svar2_link.py`, `_svar2_haps.py` |
+| `.svar2` sparse range-cache layout (write/read/concat) | `python/genvarloader/_dataset/_svar2_ranges.py` |
 | Format 1.x → 2.0 migration internals  | `python/genvarloader/_dataset/_migrate.py`             |
 | Flat-buffer ragged containers         | `python/genvarloader/_flat.py`                         |
 | Flat variants + alleles types         | `python/genvarloader/_dataset/_flat_variants.py`       |
@@ -500,12 +501,14 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
 - `dummy_variant` padding applies to **both `"variants"` and `"variant-windows"`** outputs. Setting `dummy_variant=<DummyVariant>` and then indexing with any other kind (`"haplotypes"`, `"annotated"`, `"reference"`, or no seqs) raises `ValueError`. For token fields (`flank_tokens`, `ref_window`/`alt_window`, bare `ref`/`alt`), the dummy fill is all-`unknown_token` — the `DummyVariant.ref`/`.alt` bytes only set the dummy allele's byte-length, not the token value. `dummy_variant=False` with an unsupported output kind is silently ignored.
 - A non-`b"N"` `DummyVariant.alt` (or `.ref`) **is reverse-complemented** on negative-strand regions, exactly like a real variant allele. The default `b"N"` is rc-invariant; use it if you want a strand-neutral sentinel.
 - `unphased_union=True` + `with_seqs("haplotypes")` / `with_seqs("annotated")` raises — `unphased_union` only applies to `"variants"` / `"variant-windows"` output.
-- **SVAR2 range caches scale with `regions x samples x ploidy`.** `gvl.write`
-  with a `.svar2` source writes a permanent
-  `2 x regions x samples x ploidy x 2 x 8` byte cache under
-  `genotypes/svar2_ranges/`. That is ~98 GiB for ~4,000 regions over 414,830
-  diploid samples. `max_mem` bounds RAM during the write; it does not bound this
-  on-disk cache.
+- **The `.svar2` range-cache write-time accumulator is not bounded by `max_mem`.** `gvl.write`
+  with a `.svar2` source builds the permanent `genotypes/svar2_ranges/` cache as a sparse
+  region-CSR table — 28 bytes per non-empty `(region, sample, ploid)` window, ~504 MB for the
+  All of Us chr22 grid, small at cohort scale (see `format.md`). The remaining memory surprise
+  is at write time: `max_mem` bounds the genoray chunk stream but not the per-contig entry
+  accumulator, which peaks at roughly 60 bytes per entry on the largest contig — the per-chunk
+  `(region int32, cell int32, 24-byte entry)` blocks plus the merged `(cell, entry)` output live
+  at the same time (~1.1 GB at chr22, low single-digit GB on the largest contigs).
 - **`Dataset.samples` is sorted lexicographically, not numerically.** Cohorts with integer-like IDs of mixed digit counts come out in an order that differs from the numeric sort a phenotype table typically has (`"1000" < "999"` as strings). A positional join between the two is silently wrong; join on the sample name.
 - **`gvl.concat` requires one shared variant source and at least two inputs.** Mismatched variant
   sources (checked by fingerprint, not just backend type), `axis="regions"` with differing sample
