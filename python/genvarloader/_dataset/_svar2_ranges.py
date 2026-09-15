@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import IO, Any, Iterator, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,6 +35,8 @@ __all__ = [
     "_SparseRanges",
     "_DenseRanges",
     "_ranges_reader",
+    "_SparseWriter",
+    "nonempty_entries",
 ]
 
 ENTRY_DTYPE = np.dtype(
@@ -564,3 +566,246 @@ def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
         n_samples=S,
         ploidy=P,
     )
+
+
+@dataclass(slots=True)
+class _SparseWriter:
+    """Streams a region-CSR table to ``region_ptr``/``cell_id``/``cell_vk``.
+
+    Files are raw and headerless -- the existing convention for everything in
+    ``svar2_ranges/`` except ``sample_cols.npy`` -- so they can simply be
+    appended to. A real ``.npy`` would need a placeholder header pre-written and
+    patched at the end, because ``N`` is unknown until the last contig is done.
+
+    The same consequence applies to ``svar2_meta.json``: it can only be written
+    *after* the loop, so an aborted write leaves data files with no meta. That is
+    safe only because ``write`` builds into an ``atomic_dir`` tmp that is
+    discarded on failure.
+
+    Use it as a context manager. ``region_ptr`` is published only on clean exit,
+    because a ``region_ptr`` written from a ``finally`` would index a truncated
+    ``cell_id``/``cell_vk`` -- a dataset that opens and silently returns garbage
+    rather than one that fails.
+    """
+
+    ranges_dir: "Path"
+    n_samples: int
+    ploidy: int
+    n_entries: int = 0
+    # Every attribute must be declared: `slots=True` gives the class no __dict__,
+    # so an undeclared `self._span = ...` in __post_init__ raises AttributeError.
+    _span: int = field(init=False, repr=False, default=0)
+    _ptr: "list[NDArray[np.int64]]" = field(
+        init=False, repr=False, default_factory=list
+    )
+    _regions_done: int = field(init=False, repr=False, default=0)
+    _f_cell: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
+    _f_vk: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
+
+    def __post_init__(self):
+        span = self.n_samples * self.ploidy
+        if span >= 2**31:
+            raise ValueError(
+                f"n_samples * ploidy = {span} does not fit int32, so the sparse"
+                " range cache cannot address a cell. Shard the samples."
+            )
+        self._span = span
+        self._ptr = [np.zeros(1, np.int64)]
+        self._f_cell = open(self.ranges_dir / "cell_id.npy", "wb")
+        self._f_vk = open(self.ranges_dir / "cell_vk.npy", "wb")
+
+    def __enter__(self) -> "_SparseWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Close the handles unconditionally: `atomic_dir` discards the tmp tree on
+        # failure, but the handles are pinned by the propagating traceback's frame
+        # until GC, which on a long write is an open-fd leak per shard.
+        if exc_type is None:
+            self.close()
+        else:
+            self._close_files()
+        return False
+
+    def _counts(self, r: NDArray[np.integer], rc: int) -> NDArray[np.int64]:
+        """Per-region entry counts, with the overshoot guard.
+
+        ``np.bincount(x, minlength=rc)`` silently returns a **longer** array when
+        an index exceeds ``rc`` (index 9 with ``minlength=5`` gives 10 bins).
+        Unchecked, that lengthens ``region_ptr`` past ``R + 1`` while the meta
+        still declares ``[R + 1]``, and the reader memmaps a truncated prefix --
+        a silently corrupt dataset rather than a crash. Keys must be contig-local.
+        """
+        cnt = np.bincount(r, minlength=rc)
+        if len(cnt) != rc:
+            raise ValueError(
+                f"svar2 range cache got region index {len(cnt) - 1} for a contig"
+                f" of {rc} regions; indices must be contig-local."
+            )
+        return cnt.astype(np.int64, copy=False)
+
+    def append(self, key: NDArray[np.int64], ent: NDArray[np.void], lo: int, rc: int):
+        """Append one already-ordered block of entries.
+
+        The key-based entry point, used by ``concat``'s merge. The write path
+        calls :meth:`append_contig` instead, which does the ordering itself.
+
+        Args:
+            key: Strictly ascending **region-local** keys,
+                ``(r - lo) * n_samples * ploidy + slot * ploidy + ploid``.
+            ent: Parallel :data:`ENTRY_DTYPE` entries.
+            lo: The contig's first region index in the dataset.
+            rc: The contig's region count.
+
+        Raises:
+            ValueError: If the caller's regions are not contiguous and in order,
+                if the keys are not strictly ascending, or if a key is out of
+                range for this block. Contiguity is the one load-bearing
+                invariant of the write path: blocks from ``bed.partition_by``
+                must partition ``[0, R)`` in the same order as the running
+                ``contig_offset``. Asserting it directly covers every way a
+                future bed could break it.
+        """
+        self._check_lo(lo)
+        if len(key) and not np.all(np.diff(key) > 0):
+            raise ValueError("svar2 range cache entries are not strictly ascending")
+
+        ri = (key // self._span).astype(np.int64)
+        cnt = self._counts(ri, rc)
+        np.asarray(key % self._span, np.int32).tofile(self._f_cell)
+        np.asarray(ent, ENTRY_DTYPE).tofile(self._f_vk)
+
+        self._ptr.append(self.n_entries + cnt.cumsum())
+        self.n_entries += len(key)
+        self._regions_done += rc
+
+    def append_contig(
+        self,
+        regions: "list[NDArray[np.int32]]",
+        cells: "list[NDArray[np.int32]]",
+        ents: "list[NDArray[np.void]]",
+        lo: int,
+        rc: int,
+    ) -> None:
+        """Merge one contig's per-chunk blocks into region-major order and append.
+
+        Each block from :func:`nonempty_entries` is already region-major, and
+        chunk ``i``'s sample slots lie entirely below chunk ``i + 1``'s, so the
+        merged order is fixed by region alone. That makes this a stable counting
+        sort with ``O(rc)`` of auxiliary state, not a comparison sort.
+
+        This is not a micro-optimization over ``np.argsort(key, kind="stable")``:
+        numpy maps ``kind="stable"`` to radix **only** for integer types of 16
+        bits or fewer, whatever its docstring says. int32 and int64 get timsort,
+        ``O(N log N)`` -- measured 98 and 136 ns/element on random input against
+        2.9 ns for int16. An int64 key sort only *looks* linear here because
+        timsort's run detection fires on the per-chunk runs, and that degrades as
+        chunks get smaller, which is exactly the regime the sort was chosen to
+        survive. Measured at ``N = 18e6``: 914 ms (k=30) / 1369 ms (k=500) for the
+        sort against 532 / 528 ms here, byte-identical output.
+
+        Args:
+            regions: Per-chunk contig-local region indices, chunks in ascending
+                sample order.
+            cells: Parallel ``slot * ploidy + ploid`` values.
+            ents: Parallel :data:`ENTRY_DTYPE` entries.
+            lo: The contig's first region index in the dataset.
+            rc: The contig's region count.
+
+        Raises:
+            ValueError: If the caller's regions are not contiguous and in order,
+                or if a region index is out of range for this contig.
+        """
+        self._check_lo(lo)
+
+        # Pass 1: per-region totals. O(rc) of state -- never (n_chunks x rc),
+        # which is what makes this safe at samples_per_chunk == 1 (535k chunks at
+        # cohort scale).
+        total = np.zeros(rc, np.int64)
+        for r in regions:
+            total += self._counts(r, rc)
+
+        n = int(total.sum())
+        cursor = np.empty(rc, np.int64)
+        cursor[0] = 0
+        np.cumsum(total[:-1], out=cursor[1:])
+
+        # Pass 2: scatter each chunk to its final offsets. `arange - start[r]` is
+        # the within-region rank, valid because each block is region-grouped.
+        out_cell = np.empty(n, np.int32)
+        out_ent = np.empty(n, ENTRY_DTYPE)
+        for r, c, e in zip(regions, cells, ents):
+            cnt = self._counts(r, rc)
+            start = np.empty(rc, np.int64)
+            start[0] = 0
+            np.cumsum(cnt[:-1], out=start[1:])
+            dst = cursor[r]
+            dst += np.arange(len(r), dtype=np.int64)
+            dst -= start[r]
+            out_cell[dst] = c
+            out_ent[dst] = e
+            cursor += cnt
+
+        out_cell.tofile(self._f_cell)
+        out_ent.tofile(self._f_vk)
+        self._ptr.append(self.n_entries + total.cumsum())
+        self.n_entries += n
+        self._regions_done += rc
+
+    def _check_lo(self, lo: int) -> None:
+        if lo != self._regions_done:
+            raise ValueError(
+                f"svar2 range cache requires contiguous region blocks in order:"
+                f" got a block starting at region {lo} after {self._regions_done}"
+                f" regions. Is the bed still contig-grouped (sp.bed.sort)?"
+            )
+
+    def _close_files(self) -> None:
+        try:
+            self._f_cell.close()
+        finally:
+            self._f_vk.close()
+
+    def close(self) -> int:
+        """Close the data files, publish ``region_ptr``, and return ``N``."""
+        self._close_files()
+        np.concatenate(self._ptr).astype(np.int64).tofile(
+            self.ranges_dir / "region_ptr.npy"
+        )
+        return self.n_entries
+
+
+def nonempty_entries(
+    snp: NDArray[np.int64], indel: NDArray[np.int64], slot0: int, ploidy: int
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.void]]:
+    """Extract non-empty cells from a ``(rc, ns, P, 2)`` pair of range blocks.
+
+    Args:
+        snp: SNP ranges, ``(rc, ns, P, 2)`` -- normally a ``transpose(2, 0, 1, 3)``
+            view of a hap-major genoray chunk.
+        indel: Indel ranges, same shape.
+        slot0: Dataset sample slot of this block's first column.
+        ploidy: ``P``.
+
+    Returns:
+        ``(region, cell, entries)``, region-major: ``region`` is **contig-local**
+        and non-decreasing, ``cell`` is ``slot * ploidy + ploid`` and ascends
+        within each region. Split rather than combined into one key because
+        :meth:`_SparseWriter.append_contig` needs the region axis on its own to
+        count, and ``cell`` is what lands on disk -- combining them would only be
+        undone again.
+    """
+    ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+    # np.nonzero walks the LOGICAL shape in C order, so (r, slot, ploid) comes
+    # out ascending even though `ne` is NOT C-contiguous: the `>` above inherits
+    # the transposed view's stride permutation, because numpy allocates ufunc
+    # output with NPY_KEEPORDER. Do not "fix" that with ascontiguousarray --
+    # materializing (rc, ns, P) in C order is a strided scatter costing ~11x the
+    # comparison itself (97.7 ms vs 8.8 ms on a 15e6-cell chunk).
+    ri, sj, pj = np.nonzero(ne)
+    ent = np.empty(len(ri), ENTRY_DTYPE)
+    ent["snp_start"] = snp[ri, sj, pj, 0]
+    ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
+    ent["indel_start"] = indel[ri, sj, pj, 0]
+    ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
+    return ri.astype(np.int32), ((slot0 + sj) * ploidy + pj).astype(np.int32), ent

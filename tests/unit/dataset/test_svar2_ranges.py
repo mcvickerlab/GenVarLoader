@@ -689,3 +689,49 @@ def test_impl_signature_matches_protocol(impl: type) -> None:
             f" {impl_sig.return_annotation!r} diverges from _RangeLookup.{name}'s"
             f" {proto_sig.return_annotation!r}"
         )
+
+
+def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
+    """append_contig's counting sort must equal the stable key sort it replaced.
+
+    The chunks deliberately interleave: chunk 0 holds slots [0, 2) and chunk 1
+    slots [2, 4), so every region draws from both and the merge is a real
+    interleave rather than a concatenation.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    rng = np.random.default_rng(11)
+    rc, S, P = 6, 4, 2
+    dense = _random_dense(rng, rc, S, P, fill=0.5)  # (2, rc, S, P, 2)
+
+    regions, cells, ents, keys = [], [], [], []
+    for s0, s1 in ((0, 2), (2, 4)):
+        snp = dense[0][:, s0:s1]
+        indel = dense[1][:, s0:s1]
+        ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+        ri, sj, pj = np.nonzero(ne)
+        ent = np.empty(len(ri), ENTRY_DTYPE)
+        ent["snp_start"] = snp[ri, sj, pj, 0]
+        ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
+        ent["indel_start"] = indel[ri, sj, pj, 0]
+        ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
+        cell = ((s0 + sj) * P + pj).astype(np.int32)
+        regions.append(ri.astype(np.int32))
+        cells.append(cell)
+        ents.append(ent)
+        keys.append(ri.astype(np.int64) * (S * P) + cell)
+
+    w = _SparseWriter(tmp_path, n_samples=S, ploidy=P)
+    w.append_contig(regions, cells, ents, lo=0, rc=rc)
+    n = w.close()
+
+    key = np.concatenate(keys)
+    ent = np.concatenate(ents)
+    perm = np.argsort(key, kind="stable")
+    assert n == len(key)
+    got_cell = np.fromfile(tmp_path / "cell_id.npy", np.int32)
+    got_ent = np.fromfile(tmp_path / "cell_vk.npy", ENTRY_DTYPE)
+    np.testing.assert_array_equal(got_cell, (key[perm] % (S * P)).astype(np.int32))
+    np.testing.assert_array_equal(got_ent, ent[perm])
+    ptr = np.fromfile(tmp_path / "region_ptr.npy", np.int64)
+    assert len(ptr) == rc + 1 and ptr[0] == 0 and ptr[-1] == n

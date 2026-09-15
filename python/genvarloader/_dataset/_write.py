@@ -44,6 +44,7 @@ from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._indexing import s2i
 from ._svar2_link import Svar2Link
+from ._svar2_ranges import ENTRY_DTYPE, _SparseWriter, nonempty_entries
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
 
@@ -1161,10 +1162,6 @@ def _write_from_svar2(
 
     R, S, P = bed.height, len(samples), svar2.ploidy
     _svar2_preflight(out_dir, R, S, P)
-    vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
-    vk_indel = np.memmap(
-        out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
-    )
     dense_snp = np.memmap(out_dir / "dense_snp_range.npy", np.int64, "w+", shape=(R, 2))
     dense_indel = np.memmap(
         out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
@@ -1196,11 +1193,102 @@ def _write_from_svar2(
     # store whose own order is sorted.
     sel: list[str] | None = None if samples == avail.tolist() else samples
 
+    max_ends = np.empty(R, np.int32)
+    contig_offset = 0
+    pbar = tqdm(total=R, unit=" region")
+    with _SparseWriter(out_dir, n_samples=S, ploidy=P) as writer:
+        for (c,), df in bed.partition_by(
+            "chrom", as_dict=True, maintain_order=True
+        ).items():
+            c = cast(str, c)
+            pbar.set_description(
+                f"Processing svar2 ranges for {df.height} regions on {c}"
+            )
+            lo, hi = contig_offset, contig_offset + df.height
+            rc = df.height
+            starts = df["chromStart"].to_numpy()
+            ends = df["chromEnd"].to_numpy()
+            # extend_to_length is validated at function entry (False raises); the
+            # read-bound kernel sizes haplotype output at read time.
+            stream = svar2._find_ranges_chunked(
+                c, starts, ends, samples=sel, max_mem=max_mem
+            )
+            dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(
+                rc, 2
+            )
+            dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(
+                rc, 2
+            )
+
+            # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity
+            # picks the highest-POSITION variant (ties by end), so a
+            # lower-position variant with a longer deletion must not win the
+            # cross-chunk reduction.
+            keys = stream.dense_max_end_keys.copy()
+            acc_r: list[NDArray[np.int32]] = []
+            acc_c: list[NDArray[np.int32]] = []
+            acc_e: list[NDArray[np.void]] = []
+            for ch in stream.chunks:
+                # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
+                # region-major (regions, samples, ploidy, 2). transpose() is a
+                # view, and nonempty_entries relies on that -- see its comment on
+                # np.nonzero and NPY_KEEPORDER.
+                r, cell, ent = nonempty_entries(
+                    ch.vk_snp_range.transpose(2, 0, 1, 3),
+                    ch.vk_indel_range.transpose(2, 0, 1, 3),
+                    slot0=ch.sample_start,
+                    ploidy=P,
+                )
+                # `nonempty_entries` filters on width, not on genoray's raw start ==
+                # end insertion point (which is what a *dense* cell would carry at
+                # the same coordinate). An all-empty (region, sample, ploid) cell
+                # is therefore never written here, so a real dataset's
+                # `_SparseRanges.lookup` always returns (0, 0) for it, never
+                # genoray's insertion point -- unlike `_DenseRanges.lookup`, which
+                # would surface (x, x). That is the one place the two layouts are
+                # not byte-identical (see `_SparseRanges`'s docstring).
+                acc_r.append(r)
+                acc_c.append(cell)
+                acc_e.append(ent)
+                np.maximum(keys, ch.max_end_keys, out=keys)
+                pbar.update(rc * ch.n_samples / S)
+
+            # Merge the contig's chunks into region-major order and append. Each
+            # chunk is already region-major over a contiguous, ascending slot
+            # block, so the merge is a counting sort keyed on region alone -- see
+            # _SparseWriter.append_contig for why this is not an argsort.
+            writer.append_contig(acc_r, acc_c, acc_e, lo=lo, rc=rc)
+            del acc_r, acc_c, acc_e
+
+            mask = (1 << MAX_END_SHIFT) - 1
+            region_ends = np.asarray(ends, np.int64).copy()
+            has = keys > 0  # 0 is the "no variant in this region" sentinel
+            region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
+            max_ends[lo:hi] = region_ends.astype(np.int32)
+
+            contig_offset += df.height
+
+    # Outside the `with`: the writer has closed its handles and published
+    # region_ptr, so n_entries is final.
+    pbar.close()
+    n_entries = writer.n_entries
+    # dense_snp/dense_indel are still memmaps (dense_abs_row uses .start as an
+    # index base, so those two stay dense); flush them before the meta claims
+    # they exist.
+    for mm in (dense_snp, dense_indel):
+        mm.flush()
+
     with open(out_dir / "svar2_meta.json", "w") as f:
         json.dump(
             {
-                "vk_snp_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
-                "vk_indel_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
+                "layout": "sparse",
+                "n_regions": R,
+                "n_samples": S,
+                "n_entries": n_entries,
+                "fill": (n_entries / (R * S * P)) if R * S * P else 0.0,
+                "region_ptr": {"shape": [R + 1], "dtype": "<i8"},
+                "cell_id": {"shape": [n_entries], "dtype": "<i4"},
+                "cell_vk": {"shape": [n_entries], "dtype": ENTRY_DTYPE.descr},
                 "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
                 "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
                 "sample_cols": {"shape": [S], "dtype": "<i8"},
@@ -1208,57 +1296,6 @@ def _write_from_svar2(
             },
             f,
         )
-
-    max_ends = np.empty(R, np.int32)
-    contig_offset = 0
-    pbar = tqdm(total=R, unit=" region")
-    for (c,), df in bed.partition_by(
-        "chrom", as_dict=True, maintain_order=True
-    ).items():
-        c = cast(str, c)
-        pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
-        lo, hi = contig_offset, contig_offset + df.height
-        rc = df.height
-        starts = df["chromStart"].to_numpy()
-        ends = df["chromEnd"].to_numpy()
-        # extend_to_length is validated at function entry (False raises); the
-        # read-bound kernel sizes haplotype output at read time.
-        stream = svar2._find_ranges_chunked(
-            c, starts, ends, samples=sel, max_mem=max_mem
-        )
-        dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(rc, 2)
-        dense_indel[lo:hi] = np.asarray(stream.dense_indel_range, np.int64).reshape(
-            rc, 2
-        )
-
-        # Packed (pos << SHIFT) | ext keys, NOT unpacked ends: SVAR1 parity picks
-        # the highest-POSITION variant (ties by end), so a lower-position variant
-        # with a longer deletion must not win the cross-chunk reduction.
-        keys = stream.dense_max_end_keys.copy()
-        for ch in stream.chunks:
-            s0, s1 = ch.sample_start, ch.sample_start + ch.n_samples
-            # Chunks are hap-major (samples, ploidy, regions, 2); the cache is
-            # region-major. transpose() is a view -- numpy copies straight into
-            # the memmap with no intermediate array.
-            vk_snp[lo:hi, s0:s1] = ch.vk_snp_range.transpose(2, 0, 1, 3)
-            vk_indel[lo:hi, s0:s1] = ch.vk_indel_range.transpose(2, 0, 1, 3)
-            np.maximum(keys, ch.max_end_keys, out=keys)
-            # Bound the dirty page cache: at cohort scale these memmaps are tens
-            # of GiB and the kernel would otherwise reclaim at unpredictable times.
-            vk_snp.flush()
-            vk_indel.flush()
-            pbar.update(rc * ch.n_samples / S)
-
-        mask = (1 << MAX_END_SHIFT) - 1
-        region_ends = np.asarray(ends, np.int64).copy()
-        has = keys > 0  # 0 is the "no variant in this region" sentinel
-        region_ends[has] = (keys[has] >> MAX_END_SHIFT) + (keys[has] & mask)
-        max_ends[lo:hi] = region_ends.astype(np.int32)
-
-        contig_offset += df.height
-    pbar.close()
-    for mm in (vk_snp, vk_indel, dense_snp, dense_indel):
-        mm.flush()
 
     from ._svar2_link import make_svar2_link
 

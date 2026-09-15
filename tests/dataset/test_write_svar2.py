@@ -41,13 +41,21 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
 
     rd = out / "genotypes" / "svar2_ranges"
     meta = json.loads((rd / "svar2_meta.json").read_text())
+    assert meta["layout"] == "sparse"
     assert set(meta) >= {
-        "vk_snp_range",
-        "vk_indel_range",
+        "layout",
+        "n_regions",
+        "n_samples",
+        "n_entries",
+        "fill",
+        "region_ptr",
+        "cell_id",
+        "cell_vk",
         "dense_snp_range",
         "dense_indel_range",
         "sample_cols",
     }
+    assert "vk_snp_range" not in meta, "the dense layout must no longer be written"
     assert meta["ploidy"] == svar2.ploidy
 
     md = json.loads((out / "metadata.json").read_text())
@@ -55,36 +63,37 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     assert md["ploidy"] == svar2.ploidy
     Svar2Link.model_validate(md["svar2_link"])  # shape check
 
-    # ---- FIX 1: verify cache CONTENTS (not just shapes/keys) against a direct
-    # _find_ranges call over the same regions. gvl sorts the written samples, so
-    # replay _find_ranges with the sorted sample list to match slot ordering.
-    # This LOCKS the row-major (R, S, P) reshape and per-contig layout: a
-    # scrambled / mis-transposed cache would fail loudly here.
-    sorted_samples = sorted(
-        svar2.available_samples
-    )  # what gvl.write wrote (samples.sort())
+    # ---- The layout oracle. Replays _find_ranges over the same regions and the
+    # sorted sample list gvl.write wrote, then compares through _ranges_reader.
+    # This LOCKS the region-major (R, S, P) ordering: a scrambled or
+    # mis-transposed cache fails loudly here.
+    #
+    # It compares WIDTHS and NON-EMPTY entries, not raw bytes: the sparse layout
+    # deliberately discards an empty cell's insertion point, which is exactly the
+    # semantic #357 buys. Asserting byte-equality would assert the bug back in.
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    sorted_samples = sorted(svar2.available_samples)
     S, P = len(sorted_samples), svar2.ploidy
+    reader = _ranges_reader(rd)
+    assert (reader.n_regions, reader.n_samples, reader.ploidy) == (bed.height, S, P)
 
-    def mm(name: str) -> np.ndarray:
-        # raw memmaps are written as "<name>.npy" (no .npy header); the meta key
-        # is the bare name. Read via np.memmap with the recorded shape/dtype.
-        shape = tuple(meta[name]["shape"])
-        return np.array(
-            np.memmap(rd / f"{name}.npy", dtype=np.int64, mode="r", shape=shape)
-        )
-
-    vk_snp = mm("vk_snp_range")  # (R, S, P, 2)
-    vk_indel = mm("vk_indel_range")  # (R, S, P, 2)
-    dense_snp = mm("dense_snp_range")  # (R, 2)
-    dense_indel = mm("dense_indel_range")  # (R, 2)
-
-    # sample_cols is written with np.save (has a .npy header): read with np.load.
     sample_cols = np.load(rd / "sample_cols.npy")
     assert sample_cols.tolist() == [
         svar2.available_samples.index(s) for s in sorted_samples
     ]
 
+    def mm(name: str) -> np.ndarray:
+        shape = tuple(meta[name]["shape"])
+        return np.array(
+            np.memmap(rd / f"{name}.npy", dtype=np.int64, mode="r", shape=shape)
+        )
+
+    dense_snp = mm("dense_snp_range")  # (R, 2), still dense: dense_abs_row
+    dense_indel = mm("dense_indel_range")  # uses .start as an index base.
+
     contig_offset = 0
+    n_empty_seen = 0
     for (c,), df in bed.partition_by(
         "chrom", as_dict=True, maintain_order=True
     ).items():
@@ -96,20 +105,20 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
             df["chromEnd"].to_numpy(),
             samples=sorted_samples,
         )
-        # vk ranges: reshape (rc, S, P, 2) -> (rc*S*P, 2) must equal _find_ranges'
-        # row-major (R*S*P, 2). This is the layout oracle: it pins the transposed,
-        # chunked write in _write_from_svar2 (hap-major chunks reordered via
-        # `.transpose(2, 0, 1, 3)` into the region-major memmap) against genoray's
-        # unchunked, row-major `_find_ranges` bundle.
-        np.testing.assert_array_equal(
-            vk_snp[lo:hi].reshape(rc * S * P, 2),
-            np.asarray(d["vk_snp_range"], np.int64),
-        )
-        np.testing.assert_array_equal(
-            vk_indel[lo:hi].reshape(rc * S * P, 2),
-            np.asarray(d["vk_indel_range"], np.int64),
-        )
-        # dense ranges: per-region (rc, 2), upcast int32 -> int64.
+        exp_snp = np.asarray(d["vk_snp_range"], np.int64)  # (rc*S*P, 2)
+        exp_indel = np.asarray(d["vk_indel_range"], np.int64)
+
+        r_q, si_q = np.unravel_index(np.arange(rc * S), (rc, S))
+        got_snp, got_indel = reader.lookup(r_q + lo, si_q, P)
+
+        for got, exp in ((got_snp, exp_snp), (got_indel, exp_indel)):
+            widths = exp[:, 1] - exp[:, 0]
+            np.testing.assert_array_equal(got[:, 1] - got[:, 0], widths)
+            ne = widths > 0
+            np.testing.assert_array_equal(got[ne], exp[ne])
+            np.testing.assert_array_equal(got[~ne], 0)
+            n_empty_seen += int((~ne).sum())
+
         np.testing.assert_array_equal(
             dense_snp[lo:hi], np.asarray(d["dense_snp_range"], np.int64)
         )
@@ -117,6 +126,13 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
             dense_indel[lo:hi], np.asarray(d["dense_indel_range"], np.int64)
         )
         contig_offset += rc
+
+    assert n_empty_seen > 0, "fixture regressed to 100% fill (see Task 1)"
+
+    # Sparse must be smaller than the dense layout would have been, at this fill.
+    n = meta["n_entries"]
+    assert n * 28 < bed.height * S * P * 32
+    assert meta["fill"] == pytest.approx(n / (bed.height * S * P))
 
 
 def test_write_svar2_max_ends_matches_svar1(
@@ -327,11 +343,13 @@ def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
     )
 
     for name in (
-        "vk_snp_range.npy",
-        "vk_indel_range.npy",
+        "region_ptr.npy",
+        "cell_id.npy",
+        "cell_vk.npy",
         "dense_snp_range.npy",
         "dense_indel_range.npy",
         "sample_cols.npy",
+        "svar2_meta.json",
     ):
         a = (big / "genotypes" / "svar2_ranges" / name).read_bytes()
         b = (small / "genotypes" / "svar2_ranges" / name).read_bytes()
@@ -462,20 +480,23 @@ def test_write_svar2_sample_cols_permutes_unsorted_store(
     # The cache must be laid out in the SORTED slot order, i.e. match a direct
     # _find_ranges over the sorted names -- the `samples=None` fast path must not
     # have fired and silently written the store's own order.
-    meta = json.loads((rd / "svar2_meta.json").read_text())
-    shape = tuple(meta["vk_snp_range"]["shape"])
-    vk_snp = np.array(
-        np.memmap(rd / "vk_snp_range.npy", dtype=np.int64, mode="r", shape=shape)
-    )
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    reader = _ranges_reader(rd)
+    S, P = len(sorted_samples), svar2.ploidy
+    r_q, si_q = np.unravel_index(np.arange(bed.height * S), (bed.height, S))
+    got_snp, _ = reader.lookup(r_q, si_q, P)
+
     d = svar2._find_ranges(
         "chr1",
         bed["chromStart"].to_numpy(),
         bed["chromEnd"].to_numpy(),
         samples=sorted_samples,
     )
-    np.testing.assert_array_equal(
-        vk_snp.reshape(-1, 2), np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
-    )
+    exp = np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
+    ne = exp[:, 1] > exp[:, 0]
+    np.testing.assert_array_equal(got_snp[ne], exp[ne])
+    np.testing.assert_array_equal(got_snp[~ne], 0)
 
 
 def test_write_svar2_duplicate_store_samples_raises(
@@ -562,3 +583,85 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     assert grid[0, sorted_samples.index("S0"), 0], (
         "the fixture's one sparse-channel cell (region 0, S0, ploid 0) is gone"
     )
+
+
+def test_sparse_writer_rejects_oversized_grid(tmp_path):
+    """cell_id is int32, so S * P must stay under 2**31."""
+    from genvarloader._dataset._svar2_ranges import _SparseWriter
+
+    with pytest.raises(ValueError, match="int32"):
+        _SparseWriter(tmp_path, n_samples=2**30, ploidy=2)
+
+
+def test_sparse_writer_rejects_noncontiguous_regions(tmp_path):
+    """The write path's one load-bearing invariant, asserted directly."""
+    import numpy as np
+
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=2)
+    w.append(np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE), lo=0, rc=3)
+    with pytest.raises(ValueError, match="contiguous region blocks"):
+        w.append(np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE), lo=7, rc=2)
+    w.close()
+
+
+def test_sparse_writer_rejects_global_region_indices(tmp_path):
+    """bincount overshoot would silently lengthen region_ptr past R + 1.
+
+    `np.bincount(x, minlength=rc)` returns MORE than `rc` bins when an index
+    exceeds `rc` rather than raising, so a caller that passed dataset-global
+    region indices would write a longer `region_ptr` than the meta declares and
+    the reader would memmap a truncated prefix -- garbage lookups, no error.
+    """
+    import numpy as np
+
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=2)
+    with pytest.raises(ValueError, match="contig-local"):
+        w.append_contig(
+            [np.array([7], np.int32)],
+            [np.zeros(1, np.int32)],
+            [np.zeros(1, ENTRY_DTYPE)],
+            lo=0,
+            rc=3,
+        )
+    w.close()
+
+
+def test_dense_layout_dataset_still_opens_and_reads(
+    svar2_store: Path, vcf_and_ref: tuple[Path, Path], tmp_path: Path
+):
+    """A pre-0.43.0 dataset must read identically under the new reader.
+
+    #357 bumps the on-disk layout but NOT DATASET_FORMAT_VERSION (which matches
+    on MAJOR only, so a bump would make new GVL refuse every old dataset). The
+    dense reader is what keeps old datasets openable.
+
+    Deviation from the brief: `Dataset.open` (not `gvl.write`) is what takes
+    `reference=` -- `with_seqs("haplotypes")` raises `ValueError` without one,
+    which the brief's snippet omitted. Added `vcf_and_ref` for the FASTA path.
+    """
+    from genoray import SparseVar2
+
+    from tests._oracles.svar2_dense_layout import rewrite_as_dense
+
+    _bcf, ref = vcf_and_ref
+    bed = pl.DataFrame(
+        {"chrom": ["chr1"] * 3, "chromStart": [0, 5, 25], "chromEnd": [20, 15, 40]}
+    )
+    sparse_ds = tmp_path / "sparse.gvl"
+    gvl.write(
+        sparse_ds, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True
+    )
+    dense_ds = rewrite_as_dense(sparse_ds, tmp_path / "dense.gvl")
+
+    a = gvl.Dataset.open(sparse_ds, reference=ref).with_seqs("haplotypes")
+    b = gvl.Dataset.open(dense_ds, reference=ref).with_seqs("haplotypes")
+    for r in range(a.n_regions):
+        for s in range(a.n_samples):
+            np.testing.assert_array_equal(
+                np.asarray(a[r, s].to_padded(b"N")),
+                np.asarray(b[r, s].to_padded(b"N")),
+            )
