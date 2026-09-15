@@ -161,10 +161,17 @@ def write(
             For a ``.svar2`` variant source this also bounds the genotype
             range-cache write: ranges are produced in per-sample chunks sized to
             fit the budget rather than a whole contig at once. The cache itself is
-            **outside** this budget: it is two ``(n_regions, n_samples, ploidy, 2)``
-            int64 memmaps on disk, which reaches tens of GiB at cohort scale (60.7 GiB
-            for 1,901 regions x 535,662 diploid samples). :func:`write` logs the
-            projected size and warns when the filesystem reports too little free space.
+            **outside** this budget: it stores 28 bytes per ``(region, sample,
+            ploid)`` window that holds a variant, so it scales with variants
+            observed inside regions rather than with ``regions x samples`` -- the
+            All of Us chr22 grid (3,734 regions x 535,662 diploid samples) is
+            ~504 MB, not the ~128 GB a dense cache of that shape would need.
+            ``max_mem`` does **not** bound the per-contig accumulator that builds
+            this cache: it peaks at roughly 60 bytes per entry on the largest
+            contig, live alongside the per-chunk blocks genoray streams.
+            :func:`write` logs realized fill after the first contig and projects
+            the final size from it, warning when the filesystem reports too
+            little free space.
         extend_to_length: Whether to continue reading/writing variants until all haplotypes have a length at least as long as the intervals in `bed`.
             Otherwise, deletions can cause the length of haplotypes to be less than the intervals in `bed`. This can be disabled if having
             haplotypes shorter than the intervals is acceptable, in which case they will be padded with reference bases when appropriate.

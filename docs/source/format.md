@@ -24,9 +24,11 @@ When the dataset was built from an `.svar`, the heavy per-variant arrays (`varia
 `dosages.npy`, `index.arrow`) are **not duplicated** into the dataset. Instead the dataset
 records a back-reference to the source `.svar` in `metadata.json` (see `svar_link` below).
 Likewise, a dataset built from an `.svar2` records a back-reference (`svar2_link`, below)
-and caches per-`(region, sample, ploidy)` range arrays under `genotypes/svar2_ranges/`
-— the bulk variant data stays in the `.svar2` store. See "`genotypes/svar2_ranges/` layout"
-below for the on-disk size of this cache; it is not small at cohort scale.
+and caches the var-key window for each `(region, sample, ploidy)` that holds a variant,
+under `genotypes/svar2_ranges/` — the bulk variant data stays in the `.svar2` store. See
+"`genotypes/svar2_ranges/` layout" below for the on-disk size of this cache; it scales with
+variants observed inside regions rather than with `regions x samples`, so it is small at
+cohort scale.
 
 ## `metadata.json` schema
 
@@ -81,34 +83,36 @@ keys on file count + total byte size of the store's data files rather than a var
 
 Written only when the dataset's variant source is a `.svar2` store. `R` = number of regions,
 `S` = number of the dataset's **selected** samples (not necessarily the full `.svar2` cohort),
-`P` = ploidy. All arrays are `int64`:
+`P` = ploidy. A region-CSR (compressed sparse row) table stores only the
+`(region, sample, ploid)` windows that hold a variant:
 
 | File | Shape | Notes |
 |------|-------|-------|
-| `vk_snp_range.npy` | `(R, S, P, 2)` | Per-`(region, sample, ploid)` half-open range into the `.svar2` store's SNP variant-key column. |
-| `vk_indel_range.npy` | `(R, S, P, 2)` | Same, for the indel variant-key column. |
-| `dense_snp_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense SNP store. |
-| `dense_indel_range.npy` | `(R, 2)` | Per-region (sample-independent) range into the dense indel store. |
-| `sample_cols.npy` | `(S,)` | Maps the dataset's selected-sample slot to the `.svar2` store's original sample index. |
-| `svar2_meta.json` | — | Records each array's `shape`/`dtype` plus `ploidy`. |
+| `region_ptr.npy` | `(R + 1,)` int64 | CSR row pointer: region `r`'s non-empty cells are `cell_id[region_ptr[r]:region_ptr[r + 1]]` (and the parallel slice of `cell_vk`). |
+| `cell_id.npy` | `(N,)` int32 | `slot * ploidy + ploid` for each non-empty cell, ascending within a region's block. `N` is the total non-empty cell count (`svar2_meta.json`'s `n_entries`). |
+| `cell_vk.npy` | `(N,)` | A 24-byte record per non-empty cell: `snp_start` int64, `indel_start` int64, `snp_len` int32, `indel_len` int32 — the half-open SNP/indel variant-key ranges into the `.svar2` store, as a start + length rather than start/end. |
+| `dense_snp_range.npy` | `(R, 2)` int64 | Per-region (sample-independent) range into the dense SNP store. |
+| `dense_indel_range.npy` | `(R, 2)` int64 | Per-region (sample-independent) range into the dense indel store. |
+| `sample_cols.npy` | `(S,)` int64 | Maps the dataset's selected-sample slot to the `.svar2` store's original sample index. |
+| `svar2_meta.json` | — | Records `layout` (`"sparse"`), `n_regions`, `n_samples`, `n_entries`, `fill` (`n_entries / (n_regions * n_samples * ploidy)`), each array's `shape`/`dtype`, and `ploidy`. |
 
-`vk_snp_range.npy` and `vk_indel_range.npy` are each
-`(regions, samples, ploidy, 2)` int64, so the two together occupy
+`region_ptr.npy`, `cell_id.npy`, and `cell_vk.npy` are raw, headerless `tofile` dumps despite
+the `.npy` extension, like `dense_snp_range.npy` and `dense_indel_range.npy`. Only
+`sample_cols.npy` is a real `.npy` file (written with `np.save`).
 
-```
-2 x regions x samples x ploidy x 2 x 8 bytes
-```
+Each non-empty cell costs 28 bytes (24 for `cell_vk` + 4 for `cell_id`), so size scales with
+the number of variants observed inside regions rather than with `regions x samples`: a dense
+`(R, S, P, 2)` int64 cache — 32 bytes for every cell, including empty ones — would be 128 GB
+for the All of Us chr22 grid (`R` = 3,734, `S` = 535,662, `P` = 2); the sparse layout is 504 MB
+there, at a realized fill of 0.45%. `gvl.write` logs realized fill after the first contig and
+projects the final on-disk size from it, warning when the filesystem reports too little free
+space.
 
-This grows linearly in **both** the number of BED rows and the number of
-selected samples. It is not small at cohort scale: ~4,000 regions over 414,830
-diploid samples is approximately **98 GiB** for a single chromosome/panel.
-`gvl.write` logs the projected size before allocating and warns when it exceeds
-free disk. Budget disk accordingly, or reduce the region count or sample
-selection.
-
-At read time, `Dataset.__getitem__` slices these memmaps (numpy fancy-indexing; no interval
-search) to build the flat per-query inputs for the read-bound Rust kernels — no interval-search
-tree and no dense-union rebuild happen per read, unlike the `.svar` path.
+At read time, `Dataset.__getitem__` looks up each queried `(region, sample, ploid)` with a
+bounded binary search within that region's `region_ptr` block (no search at all when the block
+is fully occupied, i.e. every sample/ploid combination in the region holds a variant) to build
+the flat per-query inputs for the read-bound Rust kernels — no interval-search tree and no
+dense-union rebuild happen per read, unlike the `.svar` path.
 
 ## SVAR resolution at open time
 
@@ -186,9 +190,17 @@ See the `genvarloader` skill's `.svar2` section for the full narrative and `var_
 | `0.18.0` | Variant coordinates switched to 1-based. |
 | `0.25.0` | `metadata.json` gains `svar_link`; old `genotypes/link.svar` symlink layout deprecated. `Metadata.version` typed as `SemanticVersion` (on-disk JSON unchanged). |
 | `0.37.0` | `metadata.json` gains `svar2_link`; `.svar2` accepted as a `gvl.write` variant source, cached under `genotypes/svar2_ranges/` and read via a read-bound, all-Rust path. |
-| `0.42.0 (unreleased)` | `metadata.json` gains `variants_fingerprint`, set when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from an input dataset; `Dataset.open` verifies it and raises on mismatch. |
+| `0.42.0` | `metadata.json` gains `variants_fingerprint`, set when [`gvl.concat`](api.md#genvarloader.concat) hardlinks `variants.arrow` from an input dataset; `Dataset.open` verifies it and raises on mismatch. |
+| `0.43.0` | `genotypes/svar2_ranges/` switches from the dense `(R, S, P, 2)` `vk_snp_range.npy`/`vk_indel_range.npy` layout to the sparse region-CSR `region_ptr.npy`/`cell_id.npy`/`cell_vk.npy` layout described above. |
 
 > **Upgrading legacy datasets.** A dataset written before `0.25.0` that was built from an
 > `.svar` will still open (with a `DeprecationWarning`). Run
 > `genvarloader.migrate_svar_link(path)` to convert the symlink layout to the new metadata
 > layout in place.
+>
+> **Shrinking a `.svar2` dataset's range cache.** `gvl.migrate` does **not** convert the
+> `0.42.x` dense range-cache layout to `0.43.0`'s sparse one — it only handles the 1.x -> 2.0
+> track array-of-structs to struct-of-arrays migration. To shrink an existing `.svar2`-backed
+> dataset, re-run `gvl.write` against the same `bed`/`variants`/`samples`. GVL `<= 0.42.1`
+> cannot open a `0.43.0`-or-later `.svar2` dataset: it fails with a bare `KeyError:
+> 'vk_snp_range'` — loud, not silently wrong, but unhelpful; upgrade GVL to open it instead.
