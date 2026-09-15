@@ -19,6 +19,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray._contigs import ContigNormalizer
+from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
@@ -66,19 +67,32 @@ _SEQ_KIND_NAMES: dict[type, str] = {
 # FFI concern: "alt"/"start"/"ilen"/"ref" already name the builtin fields, so a
 # same-named INFO/index column would be ambiguous to request even if it could be
 # threaded through safely.
+# Issue #328: `variant-windows` mode builds a SEPARATE FFI dict with its own fixed
+# keys -- `ref_window`/`alt_window` token buffers plus their `<name>_offsets`, on top
+# of the `ref`/`alt`/`start`/`ilen`/`offsets` keys the plain "variants" dict already
+# uses. Now that window-mode ride-alongs are enabled (see `_iter_batches`), a
+# user-requested column named e.g. `ref_window` could clobber a token buffer through
+# the very same `PyDict::set_item` silent-overwrite hazard, so those keys join the
+# set. One set covers both output kinds deliberately: which kind a name would collide
+# with depends on `with_seqs`/`VarWindowOpt` state that `available_var_fields` (a
+# construction-time, output-kind-agnostic property) does not have, and a field that is
+# requestable only under some later configuration would be a worse API than one that
+# is uniformly unavailable.
 _RESERVED_VAR_FIELD_NAMES = frozenset(
-    {"alt", "alt_offsets", "start", "ilen", "offsets", "ref", "ref_offsets"}
+    {
+        "alt",
+        "alt_offsets",
+        "start",
+        "ilen",
+        "offsets",
+        "ref",
+        "ref_offsets",
+        "ref_window",
+        "ref_window_offsets",
+        "alt_window",
+        "alt_window_offsets",
+    }
 )
-# Forward-looking note (final review, PR-B3a/B3b, #304): `variant-windows` mode
-# builds a SEPARATE FFI dict with its own fixed keys -- `ref_window`/`alt_window`/
-# `ref`/`alt` token buffers plus their `<name>_offsets` (see `with_seqs`'s
-# `_variant_windows` branch) -- that aren't in this set. `var_fields` ride-alongs
-# are currently guarded OFF in window mode (see `active_var_fields`/`with_seqs`),
-# so no user column can collide there YET. If/when window-mode ride-alongs are
-# enabled (tracked follow-up), this exclusion set must also cover those
-# windows-dict token-buffer keys, or a same-named INFO/index column could clobber
-# a token buffer via the same `PyDict::set_item` silent-overwrite hazard this set
-# already guards against for the plain "variants" dict.
 
 # Wave B PR-B3a (#304): `with_seqs("variants")`'s pre-var_fields default, reproduced
 # byte-for-byte when `var_fields` is never set (see `active_var_fields` and every
@@ -2053,7 +2067,14 @@ class StreamingDataset:
             # Minor (Wave B PR-B3a review): resolve ONCE per `_iter_batches` call, not
             # once per batch inside the packing loop below -- `active_var_fields`
             # allocates a new list every call.
-            _active_var_fields = self.active_var_fields if _variants else []
+            # Issue #328: `variant-windows` output carries the same ride-along
+            # columns as `"variants"` -- the written `_FlatVariantWindows.fields`
+            # and `_FlatVariants.fields` are built by ONE shared block in
+            # `_flat_variants.py`, so the two kinds agree on the scalar field set
+            # by construction and streaming must too.
+            _active_var_fields = (
+                self.active_var_fields if (_variants or _variant_windows) else []
+            )
             # Wave B PR-B2 (#317): min_af/max_af filtering is only implemented for
             # `with_seqs("variants")` output -- mirroring the written `Dataset`, which
             # raises for haplotype/annotated output when AF bounds are requested (AF
@@ -2066,13 +2087,16 @@ class StreamingDataset:
                     "output (matching the written Dataset, which raises for "
                     "haplotype/annotated output)."
                 )
-            # Wave B PR-B3a (#304): `var_fields` only shapes `with_seqs("variants")`
-            # output. The written path silently ignores it elsewhere; streaming fails
-            # fast instead, matching how it treats every other ignorable setting (the
-            # AF guard just above, and the jitter/out_len/annotated SVAR2 guard below).
-            if self._var_fields is not None and not _variants:
+            # Wave B PR-B3a (#304): `var_fields` shapes only the two VARIANT output
+            # kinds -- `"variants"` and, as of issue #328, `"variant-windows"`. For
+            # haplotype/annotated output the written path silently ignores it;
+            # streaming fails fast instead, matching how it treats every other
+            # ignorable setting (the AF guard just above, and the
+            # jitter/out_len/annotated SVAR2 guard below).
+            if self._var_fields is not None and not (_variants or _variant_windows):
                 raise NotImplementedError(
-                    'var_fields only applies to with_seqs("variants") output; got '
+                    'var_fields only applies to with_seqs("variants") and '
+                    'with_seqs("variant-windows") output; got '
                     f"with_seqs({_SEQ_KIND_NAMES.get(self._seq_kind, self._seq_kind)!r})."
                 )
             # Wave A output-mode knobs (issue #277) are wired only through the
@@ -2392,11 +2416,44 @@ class StreamingDataset:
                                 (b_times_p, None),
                                 row_off,
                             ).reshape(hi - lo, backend.ploidy, None)
-                            out["ilen"] = Ragged.from_offsets(
-                                np.asarray(nxt["ilen"], np.int32),
-                                (b_times_p, None),
-                                row_off,
-                            ).reshape(hi - lo, backend.ploidy, None)
+                            # Issue #328: `ilen` and the ride-along columns are packed
+                            # exactly as the `"variants"` branch above packs them, and
+                            # gated the same way -- `nxt` always carries `ilen`
+                            # regardless of what was requested, while the written
+                            # oracle emits it only when `"ilen" in var_fields`, so the
+                            # decision must be var_fields-driven rather than
+                            # presence-driven or the two field SETS diverge. `alt`/
+                            # `ref` are skipped here (unlike the `"variants"` branch,
+                            # where they are real scalar fields): in window mode they
+                            # name TOKEN BUFFERS selected by `VarWindowOpt`, already
+                            # emitted by the `tok_bufs` loop above, and the written
+                            # path likewise excludes them from `_FlatVariantWindows
+                            # .fields`.
+                            if "ilen" in _active_var_fields:
+                                out["ilen"] = Ragged.from_offsets(
+                                    np.asarray(nxt["ilen"], np.int32),
+                                    (b_times_p, None),
+                                    row_off,
+                                ).reshape(hi - lo, backend.ploidy, None)
+                            for _name in _active_var_fields:
+                                if _name in ("alt", "start", "ilen", "ref"):
+                                    continue
+                                if _name not in nxt:
+                                    # Same defensive assert as the `"variants"` branch
+                                    # -- unreachable via the public API, since
+                                    # `with_settings`'s `servable_var_fields` check
+                                    # rejects an available-but-unservable field before
+                                    # any `build_engine` happens.
+                                    raise NotImplementedError(
+                                        f"var_fields={_name!r} is not yet forwarded by "
+                                        "the streaming engine for this backend "
+                                        "(deferred follow-up work)."
+                                    )
+                                out[_name] = Ragged.from_offsets(
+                                    np.asarray(nxt[_name]),
+                                    (b_times_p, None),
+                                    row_off,
+                                ).reshape(hi - lo, backend.ploidy, None)
                         elif _annotated:
                             data, annot_v, annot_pos, offsets = nxt
                             shape = (hi - lo, backend.ploidy, None)
@@ -4654,10 +4711,13 @@ class _VcfBackend:
         self._ref = Reference.from_path(reference_path, self._contigs)
 
         # Whether the source VCF header declares an INFO/AF field (Wave B
-        # PR-B2, #319) -- the SAME condition `gvl.write` uses (Task 5) to cache
-        # AF into the written `.gvi`, so streaming and written agree on AF
-        # availability.
-        self._has_cached_af = bool(vcf._declared_info_fields(("AF",)))
+        # PR-B2, #319) -- the first half of the SAME condition `gvl.write` uses
+        # (Task 5) to cache AF into the written `.gvi`, so streaming and written
+        # agree on AF availability. The second half -- that no record carries
+        # more than ONE AF value -- is a question about the data, not the
+        # header, so it is resolved lazily in `has_cached_af` (issue #324).
+        self._af_declared = bool(vcf._declared_info_fields(("AF",)))
+        self._af_unambiguous: bool | None = None
 
         # Wave B PR-B3a (#304): declared numeric INFO fields are requestable
         # `var_fields` -- non-numeric types (Flag/String/Character) are excluded,
@@ -4688,12 +4748,70 @@ class _VcfBackend:
 
     @property
     def has_cached_af(self) -> bool:
-        """Whether the source VCF header declares an INFO/AF field.
+        """Whether this VCF's ``INFO/AF`` is usable for AF filtering.
 
-        Wave B PR-B2, #319 -- the SAME condition gvl.write uses to cache AF into
-        the written .gvi, so streaming <-> written agree on AF availability.
+        Wave B PR-B2, #319 -- the SAME condition ``gvl.write`` uses to cache AF
+        into the written ``.gvi``, so streaming <-> written agree on AF
+        availability. That condition has two halves, and only the first is a
+        header question:
+
+        1. the header declares an ``INFO/AF`` field, and
+        2. no record carries MORE than one AF value.
+
+        Half 2 exists because a record with several AF values has an ambiguous
+        ALT->AF mapping -- e.g. a ``Number=.`` field left un-subset by a
+        ``bcftools norm -m`` split, so a bi-allelic ``G>A`` still lists
+        ``AF=0.333,0.667``. ``_attach_af_column`` (``_write.py``) declines to
+        cache AF in that case, and the written ``Dataset`` then raises the
+        AF-missing guard. Streaming checked only half 1 (issue #324), so it
+        reported AF available and read it live, with genoray's
+        ``resolve_scalar`` silently taking the FIRST value -- filtering where
+        written raised.
+
+        The check reads the DATA, not the declared ``Number=``: the written path
+        trusts the data, so trusting the header here would diverge again for a
+        ``Number=A``-declared-but-multi-valued file, and would wrongly decline a
+        single-valued ``Number=.`` file that written accepts.
+
+        Lazy because half 2 costs a one-time full-source INFO scan. Its only
+        consumer is the ``_af_filter`` guard in
+        :meth:`StreamingDataset._iter_batches`, so a stream that never
+        AF-filters never pays it, and one that does pays it once per backend.
         """
-        return self._has_cached_af
+        if not self._af_declared:
+            return False
+        if self._af_unambiguous is None:
+            self._af_unambiguous = self._af_is_unambiguous()
+        return self._af_unambiguous
+
+    def _af_is_unambiguous(self) -> bool:
+        """True iff no record carries more than one ``INFO/AF`` value.
+
+        Mirrors ``_attach_af_column``'s data check, including its use of
+        ``_fetch_info_cols`` rather than ``get_record_info(info=[...])`` -- the
+        latter silently drops the requested INFO column under polars' projection
+        pushdown (see that function's docstring, and genoray issue 139).
+        """
+        from genoray import VCF
+
+        af = VCF(self._vcf_path)._fetch_info_cols(["AF"]).collect()
+        if not isinstance(af.schema["AF"], pl.List):
+            # Already scalar (``Number=1``): one value per record by construction.
+            return True
+        # ``max()`` is None only for an empty frame (no records) -- nothing is
+        # ambiguous there, and AF filtering over it is a well-defined no-op.
+        max_len = af["AF"].list.len().max()
+        if max_len is not None and max_len > 1:
+            logger.warning(
+                "VCF INFO/AF carries multiple values for at least one record "
+                "(ambiguous ALT->AF mapping, e.g. an un-subset Number=. field after "
+                "`bcftools norm -m`); treating AF as unavailable. AF filtering on this "
+                "StreamingDataset will raise until the VCF is normalized so each record "
+                "has a single AF. This matches `gvl.write`, which declines to cache AF "
+                "for the same file."
+            )
+            return False
+        return True
 
     def _mixed_engine(self) -> object:
         """A zero-job engine kept solely for `window_realign_inputs` calls.

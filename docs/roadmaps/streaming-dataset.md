@@ -618,14 +618,32 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `FieldSpec` staging and `_write_gvi_index`-adjacent AF-attach path already existed at the
   pinned rev. No new exported symbol (two new `with_settings` kwargs only) — no `api.md`
   change. Design: `docs/superpowers/specs/2026-07-21-streaming-variants-min-max-af-b2-design.md`.
+- ✅ **AF availability must be a DATA question, not a header one — issue
+  [#324](https://github.com/mcvickerlab/GenVarLoader/issues/324).** `_VcfBackend.has_cached_af` checked only that the header declared
+  `INFO/AF`, but `gvl.write`'s `_attach_af_column` also requires that no record carries
+  more than ONE AF value: a multi-value record (e.g. a `Number=.` field left un-subset by
+  a `bcftools norm -m` split, so a bi-allelic `G>A` still lists `AF=0.333,0.667`) has an
+  ambiguous ALT→AF mapping. Written declined and raised the AF-missing guard; streaming
+  reported AF available and filtered on genoray's `resolve_scalar`, which silently takes
+  the FIRST value — breaking streaming↔written byte-identity precisely where the written
+  path refuses to answer. Streaming now mirrors the same data check. Two deliberate
+  choices: (1) the criterion is the **data**, not the declared `Number=` — keying off
+  `Number=.` would diverge again for a `Number=A`-declared-but-multi-valued file and would
+  wrongly decline a single-valued `Number=.` file that written accepts (pinned by an
+  anti-over-correction test); (2) the check is **lazy**, since it costs a one-time
+  full-source INFO scan and its only consumer is the `_af_filter` guard — a stream that
+  never AF-filters never pays it. Regression tests:
+  `tests/dataset/test_streaming_af_multivalue.py` (3 cases), the streaming twin of
+  `test_write_af.py::test_write_multivalue_af_writes_without_af_column`; verified
+  non-vacuous (the guard test fails `DID NOT RAISE` against the pre-fix backend).
 - ✅ **Variants-output surface, Wave B PR-B3a (`var_fields`) — issue
   [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** `StreamingDataset
   .with_settings(var_fields=[...])` selects which extra per-variant fields ride along on
-  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)` but valid
-  **only** for `with_seqs("variants")` (raises `NotImplementedError` on any other output kind —
-  stricter than the written path, which also allows `var_fields` on `"variant-windows"`;
-  streaming's `"variant-windows"` output, wired as of PR-B4 Task 9, has no `var_fields`-
-  equivalent knob of its own yet). New `available_var_fields`,
+  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`. Scoped
+  **only** to `with_seqs("variants")` at the time (raising `NotImplementedError` on any other
+  output kind — stricter than the written path, which also allows `var_fields` on
+  `"variant-windows"`); that Phase-1 restriction was lifted for `"variant-windows"` by
+  [#328](https://github.com/mcvickerlab/GenVarLoader/issues/328), see below. New `available_var_fields`,
   `servable_var_fields`, and `active_var_fields` properties. The requestable set is
   **backend-derived**: SVAR1 offers its numeric index columns (e.g. `AF`) + `ref`; VCF/BCF
   offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
@@ -744,6 +762,34 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-10). Branch:
   `spec/streaming-waveb-b3b4`.
 
+- ✅ **`var_fields` ride-alongs for `with_seqs("variant-windows")` — issue
+  [#328](https://github.com/mcvickerlab/GenVarLoader/issues/328).** Split out of PR-B4's final review. PR-B3a's Phase-1 guard rejected
+  `var_fields` for every output kind but `"variants"`, which made streaming **stricter than the
+  written path** — `_flat_variants.py` builds `_FlatVariantWindows.fields` and
+  `_FlatVariants.fields` from ONE shared block, so the two kinds agree on the scalar field set
+  by construction. It also left PR-B4's Rust plumbing permanently dead: `gather_info_out` and
+  both engines' `next_batch_variant_windows` marshaling loops ran on every batch and always
+  iterated zero items — untested code on a parity-critical path. The guard now admits
+  `"variant-windows"`, and the Python packing actually consumes the `info_out` it was silently
+  dropping. Three details worth recording: (1) `ilen` is emitted **only when requested**, as on
+  the `"variants"` path — the engine always ships it, so an unconditional emit passes every
+  value comparison and diverges only in the field SET; (2) `alt`/`ref` are not added as scalar
+  columns in window mode, because there those names denote `VarWindowOpt`-selected token
+  buffers, matching the written path's own exclusion; (3) `ref_window`/`alt_window` and their
+  `_offsets` variants join `_RESERVED_VAR_FIELD_NAMES`, since the windows dict is marshaled by
+  the same silently-overwriting `PyDict::set_item` the set already guards — kept uniform across
+  output kinds rather than conditional on `with_seqs` state, which `available_var_fields` (a
+  construction-time property) does not have. **No Rust change was needed**: the engines already
+  gathered the columns. Parity gated against the written `FlatVariantWindows.fields` oracle —
+  `AF` (Float INFO, VCF) across all four `(ref, alt)` mode combinations, `dosage` (SVAR1's
+  CSR-position-indexed ride-along, a different gather from an INFO column), the `ilen`-omitted
+  field-set case on all three backends, and a reserved-name exclusion test. All four verified
+  non-vacuous against the pre-fix module. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`.
+
+**Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
+(PR-B0 through PR-B4, per the ✅ entries above, plus the #328 follow-up).
+
 - ✅ **Per-dataset parallelism policy on `StreamingDataset` — issue [#359](https://github.com/mcvickerlab/GenVarLoader/issues/359).**
   Feature-parity follow-up to the `main`→`streaming` reconcile ([#358](https://github.com/mcvickerlab/GenVarLoader/issues/358)), which
   deliberately shipped no features: `main` gained
@@ -780,8 +826,6 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   keyword. Public-API change, so `skills/genvarloader/SKILL.md` and `docs/source/faq.md` are
   updated (`docs/source/api.md` needs no change — no new `__all__` symbol).
 
-**Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
-(PR-B0 through PR-B4, per the ✅ entries above).
 
 ## Sequencing
 
