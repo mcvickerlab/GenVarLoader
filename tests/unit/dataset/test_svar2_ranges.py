@@ -902,11 +902,22 @@ def test_append_contig_rejects_out_of_range_cell_id(tmp_path):
 
     w = _SparseWriter(tmp_path, n_samples=2, ploidy=1)
     ent = np.zeros(1, ENTRY_DTYPE)
-    with pytest.raises(ValueError, match="cell id"):
+    with pytest.raises(ValueError, match="cell id 2"):
         w.append_contig(
             [np.array([0], np.int32)],
             [np.array([2], np.int32)],  # span is 2, so valid cells are {0, 1}
             [ent],
+            lo=0,
+            rc=1,
+        )
+
+    # A negative id must name itself, not the (in-range) maximum beside it --
+    # reporting `cells.max()` here would print "cell id 1", which is valid.
+    with pytest.raises(ValueError, match="cell id -1"):
+        w.append_contig(
+            [np.array([0, 0], np.int32)],
+            [np.array([-1, 1], np.int32)],
+            [np.zeros(2, ENTRY_DTYPE)],
             lo=0,
             rc=1,
         )

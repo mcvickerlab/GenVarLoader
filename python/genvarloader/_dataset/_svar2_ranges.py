@@ -771,8 +771,11 @@ class _SparseWriter:
             # in such a region would return silently wrong entries rather than a
             # miss. One O(N) bool pass, cheap against the 532 ms counting sort.
             if len(c) and (c.max() >= self._span or c.min() < 0):
+                # Name the offending id, not c.max(): a negative cell id would
+                # otherwise be reported as a max that is itself in range.
+                bad = int(c.min()) if c.min() < 0 else int(c.max())
                 raise ValueError(
-                    f"svar2 range cache got cell id {int(c.max())} for a grid of"
+                    f"svar2 range cache got cell id {bad} for a grid of"
                     f" {self._span} cells; cells must be slot * ploidy + ploid."
                 )
             total += self._counts(r, rc)
