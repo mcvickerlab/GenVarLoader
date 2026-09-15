@@ -14,6 +14,7 @@ from hypothesis import strategies as st
 
 from genvarloader._dataset._svar2_ranges import (
     ENTRY_DTYPE,
+    _RangeLookup,
     _SparseRanges,
 )
 
@@ -212,8 +213,16 @@ def test_lookup_out_of_bounds_raises(bad: str):
         sparse.lookup(r_q, si_q, P)
 
 
-def test_lookup_int32_indices_do_not_wrap():
-    """int32 r_q * S wraps silently and the later promotion hides it."""
+def test_lookup_int32_indices_are_accepted():
+    """int32 r_q/si_q are accepted and agree with int64 on the same query.
+
+    This does NOT exercise wrapping: under the spec's own ``S * P < 2**31``
+    invariant, ``si_q * P`` cannot overflow int32 at these (or any legal)
+    sizes, and the subsequent ``+ arange(P)`` promotes to int64 regardless of
+    whether ``si_q * P`` wrapped. The ``dtype=np.int64`` on that multiply is
+    defence in depth against a hypothetical caller that violates the
+    invariant, not something this test can force to matter.
+    """
     R, S, P = 3, 4, 2
     rng = np.random.default_rng(3)
     dense = _random_dense(rng, R, S, P, fill=0.5)
@@ -289,3 +298,152 @@ def test_iter_entries_empty_table():
         P,
     )
     assert list(sparse.iter_entries()) == []
+
+
+def test_sparse_ranges_satisfies_range_lookup_protocol() -> None:
+    """Static, not runtime: pyrefly checks this assignment against `_RangeLookup`.
+
+    The assignment itself has no runtime effect -- annotating a local doesn't
+    check anything at import time or under pytest. It exists so a `pyrefly
+    check` run fails the moment `_SparseRanges`'s public methods drift from the
+    Protocol Tasks 4 and 5 must also match; nothing else in this module binds
+    the two together.
+    """
+    lookup_iface: _RangeLookup = _SparseRanges(
+        np.zeros(4, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), 3, 4, 2
+    )
+    assert lookup_iface.n_regions == 3
+
+
+def test_post_init_rejects_region_ptr_length_mismatch():
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="n_regions"):
+        _SparseRanges(
+            np.zeros(R, np.int64),  # one short of n_regions + 1
+            np.empty(0, np.int32),
+            np.empty(0, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_cell_id_cell_vk_length_mismatch():
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="parallel"):
+        _SparseRanges(
+            np.array([0, 0, 0, 1], np.int64),
+            np.zeros(1, np.int32),
+            np.empty(0, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_non_monotonic_region_ptr():
+    """A writer bug that emits a decreasing region_ptr must raise construction,
+    not silently mis-route `lookup` to the wrong region's block.
+
+    Before this fix, `region_ptr=[0, 2, 1, 3]` constructed without error and
+    `lookup` silently returned `(0, 0)` for affected queries -- a
+    reference-only haplotype with no signal anything was wrong.
+    """
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _SparseRanges(
+            np.array([0, 2, 1, 3], np.int64),
+            np.zeros(3, np.int32),
+            np.zeros(3, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_truncated_region_ptr():
+    """`region_ptr[-1]` must equal `len(cell_id)`.
+
+    Before this fix, `region_ptr=[0, 1, 2]` against a 3-entry `cell_id`
+    constructed without error, permanently stranding the third entry: no
+    region's block could ever reach it, and `lookup` would return
+    wrong-but-plausible ranges for the regions that do validate.
+    """
+    S, P = 4, 2
+    cell_id = np.zeros(3, np.int32)
+    ent = np.zeros(3, ENTRY_DTYPE)
+    region_ptr = np.array([0, 1, 2], np.int64)  # claims 2 entries, cell_id has 3
+    with pytest.raises(ValueError, match=r"region_ptr\[-1\]"):
+        _SparseRanges(region_ptr, cell_id, ent, 2, S, P)
+
+
+def test_lookup_rejects_ploidy_mismatch():
+    R, S, P = 3, 4, 2
+    sparse = _SparseRanges(
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
+    )
+    with pytest.raises(ValueError, match="ploidy"):
+        sparse.lookup(np.array([0]), np.array([0]), P + 1)
+
+
+@pytest.mark.parametrize("r0,r1", [(2, 0), (-1, 2), (0, 10)])
+def test_entries_for_regions_rejects_invalid_range(r0: int, r1: int):
+    """Inverted, negative, or past-n_regions bounds must raise -- not silently
+    return empty, which is indistinguishable from "the range held no cells".
+
+    Before this fix, `entries_for_regions(2, 0)` and `entries_for_regions(-1, 2)`
+    both returned empty with no error (the inverted range's `b <= a` guard
+    absorbed the first; negative indices simply wrapped into `region_ptr` for
+    the second), while `r1 > n_regions` already raised a numpy IndexError --
+    an asymmetric guard on the one primitive `concat`'s merge is built on.
+    """
+    R, S, P = 3, 4, 2
+    sparse = _SparseRanges(
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
+    )
+    with pytest.raises(IndexError):
+        sparse.entries_for_regions(r0, r1)
+
+
+def test_lookup_needs_both_lo_and_hi_bound_checks():
+    """The two-sided `lo <= pos < hi` hit test has two independently necessary
+    halves, each guarding a distinct miss shape that the `cid[clamped] ==
+    target` check alone does NOT catch.
+
+    `_lower_bound`'s docstring says the `np.minimum` clamp exists only for a
+    trailing empty region block; none of the other nine deterministic tests
+    constructs one, and `test_lookup_parity_partial_fill` (R=7, S=5, fill=0.3)
+    has roughly a 0.1% chance of doing so by chance. This table is built so the
+    *coincidentally adjacent* `cid` value equals each query's target -- which
+    is what makes each half of the hit test load-bearing rather than redundant
+    with the `cid` equality check:
+
+    - r=0, slot 2 is absent from region 0's block (only slots 0, 1 are
+      present), but region 1's single entry has `cid == 2` right after region
+      0's block ends. The search lands at `pos == hi`; only `pos < hi` rejects
+      the bleed into region 1's entry.
+    - r=2 (the LAST region) is empty, so `pos` clamps below `lo` to region 1's
+      last entry, whose `cid` also happens to equal 2. Only `lo <= pos` rejects
+      matching that unrelated, out-of-block entry.
+    """
+    R, S, P = 3, 3, 1
+    cell_id = np.array([0, 1, 2], np.int32)  # region 0: slots 0, 1; region 1: slot 2
+    ent = np.zeros(3, ENTRY_DTYPE)
+    ent["snp_start"] = [10, 20, 30]
+    ent["snp_len"] = [1, 1, 1]
+    region_ptr = np.array([0, 2, 3, 3], np.int64)  # region 2 (LAST) is empty
+    sparse = _SparseRanges(region_ptr, cell_id, ent, R, S, P)
+
+    snp, indel = sparse.lookup(np.array([0, 2]), np.array([2, 2]), P)
+    np.testing.assert_array_equal(snp, 0)
+    np.testing.assert_array_equal(indel, 0)

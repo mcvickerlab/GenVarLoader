@@ -47,7 +47,12 @@ record is naturally aligned and numpy adds no padding.
 """
 
 ITER_BLOCK_ENTRIES = 1 << 20
-"""Entries per :meth:`_RangeLookup.iter_entries` block (~28 MB sparse)."""
+"""Target entries per :meth:`_RangeLookup.iter_entries` block (~28 MB sparse).
+
+A target, not a hard cap: a block never splits one region's cells across two
+yields, so one region is the floor and a single region wider than this (only
+possible if ``S * P > 2**20``) yields as one block larger than the target.
+"""
 
 
 class _RangeLookup(Protocol):
@@ -81,6 +86,8 @@ class _RangeLookup(Protocol):
             IndexError: If any region or sample index is out of bounds. A sparse
                 miss is indistinguishable from an empty cell, so this cannot be
                 left to fancy-indexing.
+            ValueError: If ``r_q`` and ``si_q`` have different lengths, or ``P``
+                does not equal :attr:`ploidy`.
         """
         ...
 
@@ -103,6 +110,11 @@ class _RangeLookup(Protocol):
             ``r * (n_samples * ploidy) + slot * ploidy + ploid`` and ``entries``
             is a parallel :data:`ENTRY_DTYPE` array. Both are empty if the
             region range holds no non-empty cell.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
+                An inverted or negative range must not be indistinguishable
+                from a valid range that simply holds no cells.
         """
         ...
 
@@ -148,9 +160,11 @@ class _SparseRanges:
 
     ``region_ptr[r]:region_ptr[r + 1]`` is region ``r``'s block; within a block,
     ``cell_id == slot * ploidy + ploid`` ascends, so a cell is found by bounded
-    binary search. Depth is ``log2(N / R)`` rather than ``log2(N)`` -- 12.2 vs
-    24.1 bits at All of Us chr22 -- on the term measured at 91% of lookup cost,
-    and ``region_ptr`` costs 1.6 MB genome-wide against a 27 GB table.
+    binary search. Search depth is fixed once from the table's WIDEST region
+    block, not its average: one densely-filled region forces that many
+    iterations for every query this table ever serves, including ones landing
+    on sparse regions. ``region_ptr`` itself costs 1.6 MB genome-wide against a
+    27 GB table.
     """
 
     region_ptr: NDArray[np.int64]
@@ -177,13 +191,30 @@ class _SparseRanges:
         # Hoisted out of the probe. Computing this per lookup() is an O(R) pass
         # over a memmap-backed array: measured 1.5 us at R = 3,734 but 98 us at a
         # genome-scale R = 202,053, i.e. 2.9% of the whole 3.42 ms lookup budget
-        # spent recomputing a constant.
+        # spent recomputing a constant. The same pass doubles as validation: a
+        # truncated or mis-cumsum'd region_ptr is otherwise silent -- `lookup`
+        # would return a wrong-but-plausible range instead of raising, because a
+        # bad probe result looks exactly like a miss.
         w = self.region_ptr[1:] - self.region_ptr[:-1]
+        if len(w) and w.min() < 0:
+            bad = int(w.argmin())
+            raise ValueError(
+                "region_ptr must be non-decreasing, got region_ptr"
+                f"[{bad}]={int(self.region_ptr[bad])} > region_ptr[{bad + 1}]="
+                f"{int(self.region_ptr[bad + 1])}"
+            )
+        if len(self.region_ptr) and int(self.region_ptr[-1]) != len(self.cell_id):
+            raise ValueError(
+                f"region_ptr[-1] ({int(self.region_ptr[-1])}) must equal"
+                f" len(cell_id) ({len(self.cell_id)}); the table is truncated"
+            )
         widest = int(w.max()) if len(w) else 0
         # partition_point halves `size` to 1 in exactly ceil(log2(widest)) steps.
         self._depth = max(1, (widest - 1).bit_length())
 
-    def lookup(self, r_q, si_q, P):
+    def lookup(
+        self, r_q: NDArray[np.integer], si_q: NDArray[np.integer], P: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         if P != self.ploidy:
             raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
         r_q = np.atleast_1d(np.asarray(r_q))
@@ -216,8 +247,7 @@ class _SparseRanges:
             # arange(S * P) there and position = lo + target with no search and no
             # hit test. This is the whole high-fill regime -- sequence-model
             # windows run at ~100% fill -- measured at 0.35 ms against 0.89 ms.
-            pos = lo
-            pos += target
+            pos = lo + target
             e = self.cell_vk[pos]
             vk_snp[:, 0] = e["snp_start"]
             np.add(e["snp_start"], e["snp_len"], out=vk_snp[:, 1])
@@ -285,13 +315,23 @@ class _SparseRanges:
         base += go
         return base
 
-    def entries_for_regions(self, r0: int, r1: int):
+    def entries_for_regions(
+        self, r0: int, r1: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.void]]:
         """Non-empty cells of regions ``[r0, r1)``, key-ascending.
 
         The primitive both :meth:`iter_entries` and ``concat``'s region-batched
         merge are built on. Keys are dataset-global
         ``r * (n_samples * ploidy) + slot * ploidy + ploid``.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
         """
+        if not 0 <= r0 <= r1 <= self.n_regions:
+            raise IndexError(
+                f"region range out of bounds: got r0={r0}, r1={r1}, expected"
+                f" 0 <= r0 <= r1 <= n_regions={self.n_regions}"
+            )
         a, b = int(self.region_ptr[r0]), int(self.region_ptr[r1])
         if b <= a:
             return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
@@ -303,7 +343,7 @@ class _SparseRanges:
             np.asarray(self.cell_vk[a:b]),
         )
 
-    def iter_entries(self):
+    def iter_entries(self) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
         rows = max(1, ITER_BLOCK_ENTRIES // max(self._cell_span, 1))
         for r0 in range(0, self.n_regions, rows):
             key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
