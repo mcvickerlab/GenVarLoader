@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Any, Iterator, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -392,10 +392,12 @@ class _DenseRanges:
     ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         if P != self.ploidy:
             raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
-        r_q = np.asarray(r_q)
-        si_q = np.asarray(si_q)
+        r_q = np.atleast_1d(np.asarray(r_q))
+        si_q = np.atleast_1d(np.asarray(si_q))
         # Fancy-indexing would raise on its own, but only for the region axis in
-        # some shapes; check both so the two layouts fail identically.
+        # some shapes; check both so the two layouts fail identically. atleast_1d
+        # matches _SparseRanges.lookup so a scalar query behaves the same on
+        # either layout instead of raising only on dense.
         _check_bounds(r_q, si_q, self.n_regions, self.n_samples)
         snp = np.ascontiguousarray(
             np.asarray(self.vk_snp_range[r_q, si_q]).reshape(-1, 2), np.int64
@@ -451,12 +453,23 @@ class _DenseRanges:
                 yield key, ent
 
 
-def _raw(path: Path, dtype, shape) -> NDArray:
+def _raw(
+    path: Path, dtype: "np.dtype[Any] | type[np.generic]", shape: tuple[int, ...]
+) -> NDArray[Any]:
     """Memmap a raw headerless cache file, or an empty array if it holds nothing.
 
     ``np.memmap`` raises ``ValueError: cannot mmap an empty file`` on a 0-byte
     file, which a variant-free dataset or a per-contig shard can legitimately
     produce.
+
+    Args:
+        path: The raw ``tofile``-dumped file to open.
+        dtype: The file's element dtype.
+        shape: The file's shape, as recorded in ``svar2_meta.json``.
+
+    Returns:
+        A read-only memmap of ``path``, or an in-memory empty array of
+        ``shape``/``dtype`` if ``shape`` has zero elements (no file needed).
     """
     n = int(np.prod(shape)) if len(shape) else 0
     if n == 0:
@@ -513,6 +526,18 @@ def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
         )
 
     if layout == "dense":
+        # vk_snp_range.npy / vk_indel_range.npy are raw headerless tofile dumps,
+        # so meta["vk_snp_range"]["shape"] is the ONLY record of how to interpret
+        # the bytes. np.memmap only raises if the file is too SHORT for the shape
+        # we ask for, so a stale/wrong recorded shape that is too LONG would
+        # otherwise be absorbed silently -- reading a truncated prefix of the
+        # real grid with no error.
+        for k in ("vk_snp_range", "vk_indel_range"):
+            if tuple(meta[k]["shape"]) != (R, S, P, 2):
+                raise ValueError(
+                    f"svar2 cache meta: {k} shape {meta[k]['shape']} != grid"
+                    f" {(R, S, P, 2)}"
+                )
         return _DenseRanges(
             vk_snp_range=_raw(ranges_dir / "vk_snp_range.npy", np.int64, (R, S, P, 2)),
             vk_indel_range=_raw(
