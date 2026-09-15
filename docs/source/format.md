@@ -104,9 +104,9 @@ Each non-empty cell costs 28 bytes (24 for `cell_vk` + 4 for `cell_id`), so size
 the number of variants observed inside regions rather than with `regions x samples`: a dense
 `(R, S, P, 2)` int64 cache — 32 bytes for every cell, including empty ones — would be 128 GB
 for the All of Us chr22 grid (`R` = 3,734, `S` = 535,662, `P` = 2); the sparse layout is 504 MB
-there, at a realized fill of 0.45%. `gvl.write` logs realized fill after the first contig and
-projects the final on-disk size from it, warning when the filesystem reports too little free
-space.
+there, at a realized fill of 0.45%. Genome-wide, the same comparison is 6.93 TB dense against
+27.3 GB sparse. `gvl.write` logs realized fill after the first contig and projects the final
+on-disk size from it, warning when the filesystem reports too little free space.
 
 At read time, `Dataset.__getitem__` looks up each queried `(region, sample, ploid)` with a
 bounded binary search within that region's `region_ptr` block (no search at all when the block

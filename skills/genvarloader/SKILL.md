@@ -508,7 +508,7 @@ See `docs/source/format.md` for the full schema, versioning, and SVAR-link detai
   is at write time: `max_mem` bounds the genoray chunk stream but not the per-contig entry
   accumulator, which peaks at roughly 60 bytes per entry on the largest contig — the per-chunk
   `(region int32, cell int32, 24-byte entry)` blocks plus the merged `(cell, entry)` output live
-  at the same time (well under 1 GB at chr22, low single-digit GB on the largest contigs).
+  at the same time (~1.1 GB at chr22, low single-digit GB on the largest contigs).
 - **`Dataset.samples` is sorted lexicographically, not numerically.** Cohorts with integer-like IDs of mixed digit counts come out in an order that differs from the numeric sort a phenotype table typically has (`"1000" < "999"` as strings). A positional join between the two is silently wrong; join on the sample name.
 - **`gvl.concat` requires one shared variant source and at least two inputs.** Mismatched variant
   sources (checked by fingerprint, not just backend type), `axis="regions"` with differing sample
