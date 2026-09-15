@@ -451,9 +451,27 @@ serial. A single iterator saturates the machine; `num_workers > 0` is **not** th
 scaling path — worker-process sharding would only add per-worker RAM, IPC, and idle-core
 overhead. Iteration order is deterministic regardless of core count.
 
+**`with_settings(parallel=...)` (issue #359)** — the same per-dataset policy
+`Dataset.with_settings(parallel=...)` takes (see its entry above), with the same accepted
+values (`True` / `False` / `"auto"`, the default) and the same precedence: an explicit
+`True`/`False` beats an ambient `gvl.parallel_policy(...)` block and the
+`GVL_FORCE_PARALLEL` environment variable. `StreamingDataset.parallel` reports the current
+setting. Two streaming-specific details:
+- **It is established per batch, not for the whole iteration.** `to_iter` is a generator,
+  and a generator shares its caller's context, so holding the policy across the `yield`
+  would silently re-policy whatever the consumer does between batches — including reads of
+  an unrelated `"auto"` dataset. The policy is therefore set around each advance of the
+  stream and released before the batch is handed back; inside your `for` body the ambient
+  policy is whatever it was outside the loop.
+- **`"auto"` means "let the engine parallelize" for the SVAR1/VCF/PGEN record engines.**
+  Those take a single `parallel: bool` when the engine is *built*, governing every batch it
+  will produce, so there is no per-batch byte count to gate on — unlike the SVAR2
+  super-batch and the track-realign kernels, which do consult the `should_parallelize` size
+  gate per batch. An explicit `True`/`False` is honored by all of them.
+
 **Output-mode breadth (Wave A, #277) — `with_len`, jitter, and `with_seqs("annotated")` (SVAR1, VCF, and PGEN backends):**
 - `with_len(length: int | "ragged")` — `"ragged"` (default) yields per-hap actual length; a positive `int` yields exactly that many bases per hap. **No `"variable"`** (unlike `Dataset.with_len`) — `to_iter` always yields `Ragged` (there's no `ArrayDataset` analog), so `with_len("variable")` raises `NotImplementedError`; pad the ragged output yourself for a dense array. Byte-identical to `Dataset.with_len(L)` at `jitter=0`.
-- `with_settings(*, jitter=, rng=, deterministic=)` — mirrors `Dataset.with_settings`'s parameter names (note **`rng`, not `seed`**). `jitter` non-negative int: each region's read window is translated by an offset drawn from `Uniform[-jitter, jitter]` (window size unchanged), clamped so the translated start stays `>= 0`; the translated end may run past the contig end (N-padded). `rng` (seed int or `numpy.random.Generator`) seeds those draws — one `Generator` is created per `to_iter()` call and drawn from once per region in sweep order, so a fixed `rng` reproduces the same translated windows across calls/runs. **`jitter>0` is a reproducible rng-seeded augmentation, NOT byte-parity** with a written `Dataset` — only `jitter=0` (the default) is byte-parity-gated. `jitter>0` currently only works with the default engine prefetch mode; combining it with `readahead` raises. `deterministic` is reserved for per-hap within-window sub-shifts on fixed-length output (the `deterministic=False` augmentation path) — **deferred in Wave A** (needs a Rust engine `shifts` API addition); it currently has no observable effect on `to_iter`'s output.
+- `with_settings(*, jitter=, rng=, deterministic=, parallel=)` — mirrors `Dataset.with_settings`'s parameter names (`parallel=` is documented under "Parallelism is internal to Rust" above) (note **`rng`, not `seed`**). `jitter` non-negative int: each region's read window is translated by an offset drawn from `Uniform[-jitter, jitter]` (window size unchanged), clamped so the translated start stays `>= 0`; the translated end may run past the contig end (N-padded). `rng` (seed int or `numpy.random.Generator`) seeds those draws — one `Generator` is created per `to_iter()` call and drawn from once per region in sweep order, so a fixed `rng` reproduces the same translated windows across calls/runs. **`jitter>0` is a reproducible rng-seeded augmentation, NOT byte-parity** with a written `Dataset` — only `jitter=0` (the default) is byte-parity-gated. `jitter>0` currently only works with the default engine prefetch mode; combining it with `readahead` raises. `deterministic` is reserved for per-hap within-window sub-shifts on fixed-length output (the `deterministic=False` augmentation path) — **deferred in Wave A** (needs a Rust engine `shifts` API addition); it currently has no observable effect on `to_iter`'s output.
 - `with_seqs("haplotypes" | "annotated")` — `"annotated"` returns `RaggedAnnotatedHaps` (haplotypes plus per-position `var_idxs`/`ref_coords`), byte-identical to `Dataset.with_seqs("annotated")` at `jitter=0`. **Limitation (issue #305):** SVAR1 `var_idxs` are dataset-global always; for the VCF/PGEN record backends, `var_idxs` are dataset-global only for whole-contig or from-contig-start windows — a narrowed/partial-prefix window (or a multi-contig sweep past the first contig) currently reports window-LOCAL `var_idxs` (`var_base=0`) instead of the dataset-global index. Fix is deferred.
 - `"variant-windows"` output is wired as of **Wave B PR-B4** (#304) for the SVAR1, VCF, and PGEN backends — see below. `"reference"` output remains a later follow-up — `with_seqs` raises `NotImplementedError` for `"reference"`. `"variants"` output is wired as of Wave B PR-B1, non-default `var_fields` as of Wave B PR-B3a (SVAR1's per-call `dosage`/custom FORMAT fields as of PR-B3b), and `min_af`/`max_af` filtering as of Wave B PR-B2 — see below.
 

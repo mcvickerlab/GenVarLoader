@@ -25,6 +25,7 @@ from seqpro.rag import Ragged
 from .._ragged import RaggedAnnotatedHaps, RaggedSeqs
 from ._rag_variants import RaggedVariants
 from .._torch import requires_torch
+from .._threads import Parallel
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._utils import bed_to_regions
 
@@ -138,6 +139,39 @@ def _win_mode_kwargs(
     else:
         kwargs["win_token_lut_i32"] = np.ascontiguousarray(lut, np.int32)
     return kwargs
+
+
+def _engine_parallel() -> bool:
+    """Resolve the record engines' construction-time `parallel` flag (issue #359).
+
+    SVAR1/VCF/PGEN hand rayon a single `parallel: bool` when the engine is
+    BUILT, and it governs every batch that engine ever produces -- unlike the
+    SVAR2 super-batch and the track-realign kernels, which call
+    `should_parallelize` per batch with that batch's own byte count. So the
+    size gate has no meaningful input here: there is no "this batch" yet, and a
+    flag chosen from the first batch's size would silently govern all the rest.
+
+    What IS meaningful is the explicit half of the policy. `True`/`False` --
+    from `with_settings(parallel=)` or an ambient `parallel_policy` -- is an
+    instruction, not an estimate, and is honored exactly. `"auto"` keeps its
+    pre-#359 meaning of letting the engine parallelize, which is what these
+    call sites hardcoded before this change; deferring `"auto"` to the size
+    floor instead would flip small-batch streams to serial as a side effect of
+    adding an override, which is not what #359 asked for.
+
+    Read from the `ContextVar` rather than taken as an argument for the same
+    reason `should_parallelize` is: `build_engine` is a backend method with no
+    dataset in scope, and `to_iter` establishes the scope around each advance
+    of the inner generator -- including the first, which is what builds the
+    engine.
+
+    Returns:
+        Whether the engine should dispatch its reconstruction to rayon.
+    """
+    from .._threads import _PARALLEL
+
+    policy = _PARALLEL.get()
+    return True if policy == "auto" else bool(policy)
 
 
 # SVAR2 reconstruct super-batch: the rayon dispatch grain. Sized to saturate cores
@@ -1113,6 +1147,14 @@ class StreamingDataset:
     _rng: "int | np.random.Generator | None" = None
     # Deterministic: disables random within-window shifts for fixed-length output.
     _deterministic: bool = True
+    # Per-dataset parallelism policy (issue #359), mirroring `Dataset.parallel`
+    # (#352/#353). `"auto"` (the default) is exactly the pre-#359 behavior: the
+    # per-batch consumers (SVAR2's super-batch, the track-realign kernels) defer
+    # to `GVL_FORCE_PARALLEL` and then to the size gate, while the SVAR1/VCF/PGEN
+    # engines stay parallel -- their flag is fixed at construction, so there is no
+    # per-batch size to gate on (see `_engine_parallel`). Applied in `to_iter`,
+    # not here, because it is read from a `ContextVar` at iterate time.
+    _parallel: "Parallel" = "auto"
     # Inclusive allele-frequency bounds for `with_seqs("variants")` (PR-B2, #317).
     _min_af: "float | None" = None
     _max_af: "float | None" = None
@@ -1320,6 +1362,7 @@ class StreamingDataset:
             "_jitter",
             "_rng",
             "_deterministic",
+            "_parallel",
             "_min_af",
             "_max_af",
             "_var_fields",
@@ -1432,6 +1475,22 @@ class StreamingDataset:
         data arrives at ``sample_idx == i``.
         """
         return list(self._samples)
+
+    @property
+    def parallel(self) -> "Parallel":
+        """This dataset's parallelism policy (issue #359).
+
+        ``True`` forces the Rust kernels multithreaded and ``False`` forces them
+        serial. ``"auto"`` (the default) lets each kernel decide: the per-batch
+        consumers gate on output size, while the SVAR1/VCF/PGEN engines -- whose
+        flag is fixed when the engine is built -- stay parallel. Mirrors
+        :attr:`Dataset.parallel <genvarloader.Dataset.parallel>`; set it with
+        :meth:`with_settings`.
+
+        Returns:
+            The configured policy.
+        """
+        return self._parallel
 
     @property
     def available_var_fields(self) -> list[str]:
@@ -2775,7 +2834,35 @@ class StreamingDataset:
         out of scope for this plan. ``deterministic`` currently has no effect
         beyond gating that unimplemented path.
         """
-        for data, r_idx, s_idx in self._iter_batches(batch_size):
+        it = self._iter_batches(batch_size)
+        if self._parallel == "auto":
+            # Default policy: nothing to establish, so skip the scope entirely and
+            # leave the hot path exactly as cheap as it was before #359 -- same
+            # fast path `Dataset.__getitem__` takes.
+            for data, r_idx, s_idx in it:
+                if return_indices:
+                    yield data, r_idx, s_idx
+                else:
+                    yield data
+            return
+
+        from .._threads import parallel_policy
+
+        # Established per ADVANCE of the inner generator, and released before this
+        # one yields (issue #359). A `with` spanning the `yield` would look simpler
+        # but is wrong: generators do not get their own context, so the policy would
+        # stay set in the CALLER's context while the loop body runs, silently
+        # re-policying any unrelated `"auto"` read a consumer makes between batches.
+        # Entering per advance also means the policy is established at READ time,
+        # which is what carries it into dataloader worker processes -- they receive a
+        # pickled copy of this dataset and re-enter here, and a ContextVar set in the
+        # parent would not survive a spawn (same reasoning as `Dataset.__getitem__`).
+        while True:
+            with parallel_policy(self._parallel):
+                try:
+                    data, r_idx, s_idx = next(it)
+                except StopIteration:
+                    return
             if return_indices:
                 yield data, r_idx, s_idx
             else:
@@ -2977,6 +3064,7 @@ class StreamingDataset:
         jitter: "int | None" = None,
         rng: "int | np.random.Generator | None" = None,
         deterministic: "bool | None" = None,
+        parallel: "Parallel | None" = None,
         min_af: "float | None" = None,
         max_af: "float | None" = None,
         var_fields: "list[str] | None" = None,
@@ -3003,6 +3091,17 @@ class StreamingDataset:
                 fixed-length output; not yet implemented (documented Wave A deferral --
                 needs a Rust engine API addition). Currently has no observable effect
                 on ``to_iter``'s output.
+            parallel: Parallelism policy for this dataset's reads (issue #359),
+                matching :meth:`Dataset.with_settings`. ``True`` forces the Rust
+                kernels to run multithreaded, ``False`` forces them serial, and
+                ``"auto"`` (the default) leaves each kernel's pre-#359 behavior
+                intact -- see :attr:`parallel`.
+                An explicit ``True``/``False`` set here beats both an ambient
+                :func:`~genvarloader.parallel_policy` block and the
+                ``GVL_FORCE_PARALLEL`` environment variable, so a script's
+                parallelism can be determined by reading the script. This chooses
+                *whether* to parallelize, not how many threads to use -- the
+                worker count comes from :func:`~genvarloader.set_num_threads`.
             min_af: Inclusive lower allele-frequency bound for
                 ``with_seqs("variants")``. Requires an available AF (SVAR
                 ``cache_afs()``, or a VCF ``INFO/AF`` field); otherwise raises at
@@ -3033,6 +3132,13 @@ class StreamingDataset:
                 :meth:`Dataset.with_settings`. Only meaningful when ``tracks=`` was
                 given; ignored otherwise.
 
+        Raises:
+            ValueError: ``jitter`` is negative, ``parallel`` is not ``True``,
+                ``False`` or ``"auto"``, or ``var_fields`` names a field this
+                source does not offer.
+            NotImplementedError: ``var_fields`` names an available-but-not-servable
+                field (see :attr:`servable_var_fields`).
+
         ``jitter>0`` is a documented, reproducible augmentation, NOT byte-parity
         with a written ``Dataset`` (see :meth:`to_iter`'s docstring for the full
         rng contract).
@@ -3046,6 +3152,13 @@ class StreamingDataset:
             object.__setattr__(out, "_rng", rng)
         if deterministic is not None:
             object.__setattr__(out, "_deterministic", bool(deterministic))
+        if parallel is not None:
+            from .._threads import _check_parallel
+
+            # Validate at the boundary, exactly as `Dataset.with_settings` does --
+            # a bad policy must raise where it was written, not deep inside an
+            # iteration that may not start for a while.
+            object.__setattr__(out, "_parallel", _check_parallel(parallel))
         if min_af is not None:
             object.__setattr__(out, "_min_af", float(min_af))
         if max_af is not None:
@@ -3763,7 +3876,8 @@ class _Svar1Backend:
             self._ref_alleles,
             self._ref_offsets,
             self._ref.pad_char,
-            True,
+            # `parallel` -- the per-dataset policy (#359), not a hardcoded True.
+            _engine_parallel(),
             batch_size,
             output_length,
             annotated,
@@ -4726,7 +4840,8 @@ class _VcfBackend:
             # decoder and silently diverge from the write path.
             None,
             self._ref.pad_char,
-            True,
+            # `parallel` -- the per-dataset policy (#359), not a hardcoded True.
+            _engine_parallel(),
             batch_size,
             output_length,
             annotated,
@@ -4965,7 +5080,8 @@ class _PgenBackend:
             # `contig_ref_bytes` for haplotype reconstruction padding.
             None,
             self._ref.pad_char,
-            True,
+            # `parallel` -- the per-dataset policy (#359), not a hardcoded True.
+            _engine_parallel(),
             batch_size,
             output_length,
             annotated,
