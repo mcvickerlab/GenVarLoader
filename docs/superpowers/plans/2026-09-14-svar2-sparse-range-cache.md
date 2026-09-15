@@ -1400,13 +1400,111 @@ Wire `Svar2Haps` through `_RangeLookup` **without changing the on-disk format**.
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/unit/dataset/test_svar2_ranges.py`:
+Append to `tests/unit/dataset/test_svar2_ranges.py`, and parametrize the existing `test_lookup_rejects_ploidy_mismatch` / `test_entries_for_regions_rejects_invalid_range` over both implementations through the shared `_empty_ranges` helper (the block below is everything from `test_dense_post_init_rejects_wrong_shape` to the end of the file):
 
 ```python
+def test_dense_post_init_rejects_wrong_shape():
+    """`_DenseRanges` must validate its own shape invariant, in the same spirit
+    as `_SparseRanges.__post_init__` -- a wrong-shaped array is a construction
+    error, not something `lookup` should discover later via a numpy fancy-index
+    error (or, worse, silently succeed on a shape that broadcasts wrong).
+    """
+    R, S, P = 3, 4, 2
+    wrong = np.zeros((R, S, P + 1, 2), np.int64)  # ploidy off by one
+    right = np.zeros((R, S, P, 2), np.int64)
+    with pytest.raises(ValueError, match="vk_snp_range"):
+        _DenseRanges(wrong, right, R, S, P)
+    with pytest.raises(ValueError, match="vk_indel_range"):
+        _DenseRanges(right, wrong, R, S, P)
+
+
+def _empty_ranges(impl: type, R: int, S: int, P: int):
+    """An empty (every cell absent) range table of the given layout.
+
+    Shared by the per-layout bounds/error tests below, so both `_SparseRanges`
+    and `_DenseRanges` are exercised by one test body instead of duplicating
+    each check per class.
+    """
+    if impl is _SparseRanges:
+        return _SparseRanges(
+            np.zeros(R + 1, np.int64),
+            np.empty(0, np.int32),
+            np.empty(0, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+    assert impl is _DenseRanges
+    return _DenseRanges(
+        np.zeros((R, S, P, 2), np.int64), np.zeros((R, S, P, 2), np.int64), R, S, P
+    )
+
+
+@pytest.mark.parametrize("impl", [_SparseRanges, _DenseRanges])
+def test_lookup_rejects_ploidy_mismatch(impl: type):
+    R, S, P = 3, 4, 2
+    ranges = _empty_ranges(impl, R, S, P)
+    with pytest.raises(ValueError, match="ploidy"):
+        ranges.lookup(np.array([0]), np.array([0]), P + 1)
+
+
+@pytest.mark.parametrize("impl", [_SparseRanges, _DenseRanges])
+@pytest.mark.parametrize("r0,r1", [(2, 0), (-1, 2), (0, 10)])
+def test_entries_for_regions_rejects_invalid_range(impl: type, r0: int, r1: int):
+    """Inverted, negative, or past-n_regions bounds must raise -- not silently
+    return empty, which is indistinguishable from "the range held no cells".
+
+    Before the sparse fix, `entries_for_regions(2, 0)` and
+    `entries_for_regions(-1, 2)` both returned empty with no error (the
+    inverted range's `b <= a` guard absorbed the first; negative indices simply
+    wrapped into `region_ptr` for the second), while `r1 > n_regions` already
+    raised a numpy IndexError -- an asymmetric guard on the one primitive
+    `concat`'s merge is built on. `_DenseRanges` has no `region_ptr` to wrap
+    into, so it needs its own explicit `0 <= r0 <= r1 <= n_regions` check to
+    match -- this test parametrizes over both layouts to pin that.
+    """
+    R, S, P = 3, 4, 2
+    ranges = _empty_ranges(impl, R, S, P)
+    with pytest.raises(IndexError):
+        ranges.entries_for_regions(r0, r1)
+
+
+def test_lookup_needs_both_lo_and_hi_bound_checks():
+    """The two-sided `lo <= pos < hi` hit test has two independently necessary
+    halves, each guarding a distinct miss shape that the `cid[clamped] ==
+    target` check alone does NOT catch.
+
+    `_lower_bound`'s docstring says the `np.minimum` clamp exists only for a
+    trailing empty region block; none of the other nine deterministic tests
+    constructs one, and `test_lookup_parity_partial_fill` (R=7, S=5, fill=0.3)
+    has roughly a 0.1% chance of doing so by chance. This table is built so the
+    *coincidentally adjacent* `cid` value equals each query's target -- which
+    is what makes each half of the hit test load-bearing rather than redundant
+    with the `cid` equality check:
+
+    - r=0, slot 2 is absent from region 0's block (only slots 0, 1 are
+      present), but region 1's single entry has `cid == 2` right after region
+      0's block ends. The search lands at `pos == hi`; only `pos < hi` rejects
+      the bleed into region 1's entry.
+    - r=2 (the LAST region) is empty, so `pos` clamps below `lo` to region 1's
+      last entry, whose `cid` also happens to equal 2. Only `lo <= pos` rejects
+      matching that unrelated, out-of-block entry.
+    """
+    R, S, P = 3, 3, 1
+    cell_id = np.array([0, 1, 2], np.int32)  # region 0: slots 0, 1; region 1: slot 2
+    ent = np.zeros(3, ENTRY_DTYPE)
+    ent["snp_start"] = [10, 20, 30]
+    ent["snp_len"] = [1, 1, 1]
+    region_ptr = np.array([0, 2, 3, 3], np.int64)  # region 2 (LAST) is empty
+    sparse = _SparseRanges(region_ptr, cell_id, ent, R, S, P)
+
+    snp, indel = sparse.lookup(np.array([0, 2]), np.array([2, 2]), P)
+    np.testing.assert_array_equal(snp, 0)
+    np.testing.assert_array_equal(indel, 0)
+
+
 def _write_dense_layout(d, dense: np.ndarray, R: int, S: int, P: int):
     """Emit the legacy dense layout at `d`, exactly as gvl <= 0.42.1 did."""
-    import json
-
     d.mkdir(parents=True, exist_ok=True)
     for name, arr in (("vk_snp_range", dense[0]), ("vk_indel_range", dense[1])):
         np.asarray(arr, np.int64).tofile(d / f"{name}.npy")
@@ -1428,8 +1526,6 @@ def _write_dense_layout(d, dense: np.ndarray, R: int, S: int, P: int):
 
 
 def test_dense_ranges_matches_fancy_indexing(tmp_path):
-    from genvarloader._dataset._svar2_ranges import _ranges_reader
-
     rng = np.random.default_rng(5)
     R, S, P = 5, 4, 2
     dense = _random_dense(rng, R, S, P, fill=0.5)
@@ -1448,15 +1544,14 @@ def test_dense_ranges_matches_fancy_indexing(tmp_path):
 
 def test_dense_and_sparse_iter_entries_agree(tmp_path):
     """Dense -> sparse concat feeds off _DenseRanges.iter_entries; it must match."""
-    from genvarloader._dataset._svar2_ranges import _ranges_reader
-
     rng = np.random.default_rng(6)
     R, S, P = 6, 5, 2
     dense = _random_dense(rng, R, S, P, fill=0.4)
     _write_dense_layout(tmp_path, dense, R, S, P)
 
     d_keys = np.concatenate(
-        [k for k, _ in _ranges_reader(tmp_path).iter_entries()] or [np.empty(0, np.int64)]
+        [k for k, _ in _ranges_reader(tmp_path).iter_entries()]
+        or [np.empty(0, np.int64)]
     )
     sparse = _sparse_from_dense(dense, R, S, P)
     s_keys = np.concatenate(
@@ -1473,8 +1568,6 @@ def test_entries_for_regions_agree_on_subranges(tmp_path):
     region range -- an off-by-one in the region offset, say -- would slip past the
     test above and corrupt only merged datasets.
     """
-    from genvarloader._dataset._svar2_ranges import _ranges_reader
-
     rng = np.random.default_rng(8)
     R, S, P = 7, 3, 2
     dense = _random_dense(rng, R, S, P, fill=0.4)
@@ -1495,13 +1588,128 @@ def test_entries_for_regions_agree_on_subranges(tmp_path):
 
 def test_dense_reader_bounds_check(tmp_path):
     """Both layouts must raise on a bad index, so callers behave identically."""
-    from genvarloader._dataset._svar2_ranges import _ranges_reader
-
     rng = np.random.default_rng(7)
     R, S, P = 3, 3, 2
     _write_dense_layout(tmp_path, _random_dense(rng, R, S, P, 0.5), R, S, P)
     with pytest.raises(IndexError, match="region"):
         _ranges_reader(tmp_path).lookup(np.array([R]), np.array([0]), P)
+
+
+def test_ranges_reader_rejects_mismatched_vk_shape(tmp_path):
+    """A stale/wrong recorded vk_*_range shape must raise, not silently truncate.
+
+    `vk_snp_range.npy`/`vk_indel_range.npy` are raw headerless `tofile` dumps,
+    so `meta["vk_snp_range"]["shape"]` is the ONLY record of how to interpret
+    the bytes. `np.memmap` only raises when the file is too SHORT for the
+    requested shape, so before this fix a recorded shape claiming FEWER
+    regions than the file actually holds was absorbed silently: the reader
+    read a truncated prefix of the real grid with no error at all.
+
+    Reproduces the reviewer's fixture: the on-disk vk arrays hold R=4 regions
+    (and `meta["vk_snp_range"]["shape"]` correctly says so), but
+    `dense_snp_range`'s recorded shape claims only R=2 regions.
+    """
+    R_real, R_claimed, S, P = 4, 2, 3, 2
+    d = tmp_path
+    d.mkdir(parents=True, exist_ok=True)
+    dense = _random_dense(np.random.default_rng(9), R_real, S, P, fill=0.5)
+    for name, arr in (("vk_snp_range", dense[0]), ("vk_indel_range", dense[1])):
+        np.asarray(arr, np.int64).tofile(d / f"{name}.npy")
+    # dense_*_range claims only R_claimed regions -- inconsistent with the
+    # R_real-region vk_*_range files AND with vk_*_range's own recorded shape.
+    for name in ("dense_snp_range", "dense_indel_range"):
+        np.zeros((R_claimed, 2), np.int64).tofile(d / f"{name}.npy")
+    np.save(d / "sample_cols.npy", np.arange(S, dtype=np.int64))
+    (d / "svar2_meta.json").write_text(
+        json.dumps(
+            {
+                "vk_snp_range": {"shape": [R_real, S, P, 2], "dtype": "<i8"},
+                "vk_indel_range": {"shape": [R_real, S, P, 2], "dtype": "<i8"},
+                "dense_snp_range": {"shape": [R_claimed, 2], "dtype": "<i8"},
+                "dense_indel_range": {"shape": [R_claimed, 2], "dtype": "<i8"},
+                "sample_cols": {"shape": [S], "dtype": "<i8"},
+                "ploidy": P,
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="vk_snp_range"):
+        _ranges_reader(d)
+
+
+def test_ranges_reader_rejects_unknown_layout(tmp_path):
+    """An unrecognized `layout` value must raise, not fall through to dense.
+
+    This is the forward-compat guard that matters most: a dataset written by a
+    NEWER GenVarLoader with a layout this version doesn't know must fail
+    loudly rather than being silently (mis)read as the legacy dense grid.
+    """
+    R, S, P = 3, 4, 2
+    _write_dense_layout(
+        tmp_path, _random_dense(np.random.default_rng(10), R, S, P, 0.3), R, S, P
+    )
+    meta = json.loads((tmp_path / "svar2_meta.json").read_text())
+    meta["layout"] = "quadtree"
+    (tmp_path / "svar2_meta.json").write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="quadtree"):
+        _ranges_reader(tmp_path)
+
+
+def test_ranges_reader_rejects_sample_cols_mismatch(tmp_path):
+    """`sample_cols.npy`'s length must agree with the meta's sample count."""
+    R, S, P = 3, 4, 2
+    _write_dense_layout(
+        tmp_path, _random_dense(np.random.default_rng(11), R, S, P, 0.3), R, S, P
+    )
+    np.save(tmp_path / "sample_cols.npy", np.arange(S - 1, dtype=np.int64))
+    with pytest.raises(ValueError, match="sample_cols"):
+        _ranges_reader(tmp_path)
+
+
+def test_ranges_reader_accepts_explicit_dense_layout_key(tmp_path):
+    """An explicit `"layout": "dense"` must dispatch identically to no key at all."""
+    R, S, P = 3, 4, 2
+    dense = _random_dense(np.random.default_rng(13), R, S, P, fill=0.4)
+    _write_dense_layout(tmp_path, dense, R, S, P)
+    meta = json.loads((tmp_path / "svar2_meta.json").read_text())
+    meta["layout"] = "dense"
+    (tmp_path / "svar2_meta.json").write_text(json.dumps(meta))
+
+    reader = _ranges_reader(tmp_path)
+    assert isinstance(reader, _DenseRanges)
+    assert (reader.n_regions, reader.n_samples, reader.ploidy) == (R, S, P)
+
+
+@pytest.mark.parametrize("impl", [_SparseRanges, _DenseRanges])
+def test_impl_signature_matches_protocol(impl: type) -> None:
+    """A pytest failure gates CI; a pyrefly ``bad-assignment`` warning does not.
+
+    ``pyproject.toml`` sets ``bad-assignment = "warn"``, so a Protocol/impl
+    signature mismatch there surfaces as one warning among hundreds already
+    suppressed in a normal ``typecheck`` run. This test is the real gate: it
+    fails the build the moment an implementation's parameter names, order,
+    per-parameter annotation, or return annotation drift from ``_RangeLookup``.
+    """
+    for name in ("lookup", "entries_for_regions", "iter_entries"):
+        proto_sig = inspect.signature(getattr(_RangeLookup, name), eval_str=True)
+        impl_sig = inspect.signature(getattr(impl, name), eval_str=True)
+
+        proto_params = list(proto_sig.parameters)
+        impl_params = list(impl_sig.parameters)
+        assert proto_params == impl_params, (
+            f"{impl.__name__}.{name} parameter names/order {impl_params} diverge"
+            f" from _RangeLookup.{name} {proto_params}"
+        )
+        proto_annots = [p.annotation for p in proto_sig.parameters.values()]
+        impl_annots = [p.annotation for p in impl_sig.parameters.values()]
+        assert proto_annots == impl_annots, (
+            f"{impl.__name__}.{name} parameter annotations {impl_annots} diverge"
+            f" from _RangeLookup.{name} {proto_annots}"
+        )
+        assert proto_sig.return_annotation == impl_sig.return_annotation, (
+            f"{impl.__name__}.{name} return annotation"
+            f" {impl_sig.return_annotation!r} diverges from _RangeLookup.{name}'s"
+            f" {proto_sig.return_annotation!r}"
+        )
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1530,13 +1738,29 @@ class _DenseRanges:
     n_samples: int
     ploidy: int
 
-    def lookup(self, r_q, si_q, P):
+    def __post_init__(self):
+        expected = (self.n_regions, self.n_samples, self.ploidy, 2)
+        for name, arr in (
+            ("vk_snp_range", self.vk_snp_range),
+            ("vk_indel_range", self.vk_indel_range),
+        ):
+            if arr.shape != expected:
+                raise ValueError(
+                    f"{name} must have shape {expected} = (n_regions, n_samples,"
+                    f" ploidy, 2), got {arr.shape}"
+                )
+
+    def lookup(
+        self, r_q: NDArray[np.integer], si_q: NDArray[np.integer], P: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         if P != self.ploidy:
             raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
-        r_q = np.asarray(r_q)
-        si_q = np.asarray(si_q)
+        r_q = np.atleast_1d(np.asarray(r_q))
+        si_q = np.atleast_1d(np.asarray(si_q))
         # Fancy-indexing would raise on its own, but only for the region axis in
-        # some shapes; check both so the two layouts fail identically.
+        # some shapes; check both so the two layouts fail identically. atleast_1d
+        # matches _SparseRanges.lookup so a scalar query behaves the same on
+        # either layout instead of raising only on dense.
         _check_bounds(r_q, si_q, self.n_regions, self.n_samples)
         snp = np.ascontiguousarray(
             np.asarray(self.vk_snp_range[r_q, si_q]).reshape(-1, 2), np.int64
@@ -1546,7 +1770,9 @@ class _DenseRanges:
         )
         return snp, indel
 
-    def entries_for_regions(self, r0: int, r1: int):
+    def entries_for_regions(
+        self, r0: int, r1: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.void]]:
         """Scan the dense arrays over ``[r0, r1)``, emitting non-empty cells.
 
         This has no analogue in the old code and is not free: a full pass reads
@@ -1554,7 +1780,15 @@ class _DenseRanges:
         exists solely so ``concat`` can merge a legacy dense shard into a sparse
         output, and it is region-bounded so ``concat`` can ask for exactly the
         merged batch it is assembling rather than driving a stream.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
         """
+        if not 0 <= r0 <= r1 <= self.n_regions:
+            raise IndexError(
+                f"region range out of bounds: got r0={r0}, r1={r1}, expected"
+                f" 0 <= r0 <= r1 <= n_regions={self.n_regions}"
+            )
         span = self.n_samples * self.ploidy
         if r1 <= r0:
             return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
@@ -1565,11 +1799,7 @@ class _DenseRanges:
         ri, sj, pj = np.nonzero(ne)
         if len(ri) == 0:
             return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
-        key = (
-            (r0 + ri).astype(np.int64) * span
-            + sj.astype(np.int64) * self.ploidy
-            + pj
-        )
+        key = (r0 + ri).astype(np.int64) * span + sj.astype(np.int64) * self.ploidy + pj
         ent = np.empty(len(ri), ENTRY_DTYPE)
         ent["snp_start"] = snp[ri, sj, pj, 0]
         ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
@@ -1577,7 +1807,7 @@ class _DenseRanges:
         ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
         return key, ent
 
-    def iter_entries(self):
+    def iter_entries(self) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
         span = self.n_samples * self.ploidy
         rows = max(1, ITER_BLOCK_ENTRIES // max(span, 1))
         for r0 in range(0, self.n_regions, rows):
@@ -1586,12 +1816,23 @@ class _DenseRanges:
                 yield key, ent
 
 
-def _raw(path: Path, dtype, shape) -> NDArray:
+def _raw(
+    path: Path, dtype: "np.dtype[Any] | type[np.generic]", shape: tuple[int, ...]
+) -> NDArray[Any]:
     """Memmap a raw headerless cache file, or an empty array if it holds nothing.
 
     ``np.memmap`` raises ``ValueError: cannot mmap an empty file`` on a 0-byte
     file, which a variant-free dataset or a per-contig shard can legitimately
     produce.
+
+    Args:
+        path: The raw ``tofile``-dumped file to open.
+        dtype: The file's element dtype.
+        shape: The file's shape, as recorded in ``svar2_meta.json``.
+
+    Returns:
+        A read-only memmap of ``path``, or an in-memory empty array of
+        ``shape``/``dtype`` if ``shape`` has zero elements (no file needed).
     """
     n = int(np.prod(shape)) if len(shape) else 0
     if n == 0:
@@ -1648,9 +1889,23 @@ def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
         )
 
     if layout == "dense":
+        # vk_snp_range.npy / vk_indel_range.npy are raw headerless tofile dumps,
+        # so meta["vk_snp_range"]["shape"] is the ONLY record of how to interpret
+        # the bytes. np.memmap only raises if the file is too SHORT for the shape
+        # we ask for, so a stale/wrong recorded shape that is too LONG would
+        # otherwise be absorbed silently -- reading a truncated prefix of the
+        # real grid with no error.
+        for k in ("vk_snp_range", "vk_indel_range"):
+            if tuple(meta[k]["shape"]) != (R, S, P, 2):
+                raise ValueError(
+                    f"svar2 cache meta: {k} shape {meta[k]['shape']} != grid"
+                    f" {(R, S, P, 2)}"
+                )
         return _DenseRanges(
             vk_snp_range=_raw(ranges_dir / "vk_snp_range.npy", np.int64, (R, S, P, 2)),
-            vk_indel_range=_raw(ranges_dir / "vk_indel_range.npy", np.int64, (R, S, P, 2)),
+            vk_indel_range=_raw(
+                ranges_dir / "vk_indel_range.npy", np.int64, (R, S, P, 2)
+            ),
             n_regions=R,
             n_samples=S,
             ploidy=P,
