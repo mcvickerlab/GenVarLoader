@@ -483,6 +483,12 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
     pass any free-space check and, without the latch, suppress the projection for
     the whole build. The helper is honest about having nothing to say; the caller
     is responsible for asking again.
+
+    Both guard clauses (`regions_done <= 0` and `n_entries <= 0`) short-circuit
+    before the `logger.info` fill-percentage line, so this pins BOTH by asserting
+    no log record at all -- not just no warning. A return value of 0 alone does
+    not distinguish the early return from `28 * (0 / regions_done) * n_regions`,
+    which is also 0 by construction; only "did it log" tells the two apart.
     """
     from collections import namedtuple
 
@@ -492,17 +498,17 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
 
     Usage = namedtuple("Usage", "total used free")
     msgs: list[str] = []
-    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    sink = logger.add(lambda m: msgs.append(str(m)), level="INFO")
     try:
         monkeypatch.setattr(
             _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
         )
         assert _write._svar2_fill_projection(tmp_path, 0, 0, 100, 500, 2) == 0
+        assert not msgs, f"regions_done <= 0 must short-circuit before any log: {msgs}"
         assert _write._svar2_fill_projection(tmp_path, 0, 10, 100, 500, 2) == 0
+        assert not msgs, f"n_entries <= 0 must short-circuit before any log: {msgs}"
     finally:
         logger.remove(sink)
-
-    assert not msgs, f"an empty projection must not warn about free space: {msgs}"
 
 
 @pytest.fixture(scope="module")
