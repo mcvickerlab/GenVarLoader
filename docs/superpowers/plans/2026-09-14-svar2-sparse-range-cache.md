@@ -494,7 +494,10 @@ Pure numpy, no genoray, no fixtures. This is the load-bearing algorithm; it gets
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/unit/dataset/test_svar2_ranges.py`:
+Create `tests/unit/dataset/test_svar2_ranges.py`. The block below is the file as
+finally committed, so it already contains the `iter_entries` tests Step 5 adds and
+the validation tests review round 1 asked for — write it in whatever order suits
+you, but the module is not done until all of it passes.
 
 ```python
 """Unit tests for the svar2 range-cache layouts (#357).
@@ -513,6 +516,7 @@ from hypothesis import strategies as st
 
 from genvarloader._dataset._svar2_ranges import (
     ENTRY_DTYPE,
+    _RangeLookup,
     _SparseRanges,
 )
 
@@ -557,7 +561,9 @@ def _random_dense(rng: np.random.Generator, R: int, S: int, P: int, fill: float)
     dense = np.zeros((2, R, S, P, 2), np.int64)
     for ch in (0, 1):
         starts = rng.integers(0, 1000, size=(R, S, P))
-        widths = np.where(rng.random((R, S, P)) < fill, rng.integers(1, 5, (R, S, P)), 0)
+        widths = np.where(
+            rng.random((R, S, P)) < fill, rng.integers(1, 5, (R, S, P)), 0
+        )
         dense[ch, ..., 0] = starts
         dense[ch, ..., 1] = starts + widths
     return dense
@@ -649,7 +655,12 @@ def test_lookup_empty_table():
     """N == 0 must not memmap, not raise, and not probe."""
     R, S, P = 3, 4, 2
     sparse = _SparseRanges(
-        np.zeros(R + 1, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), R, S, P
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
     )
     snp, indel = sparse.lookup(np.array([0, 2]), np.array([1, 3]), P)
     assert snp.shape == (2 * P, 2)
@@ -660,7 +671,12 @@ def test_lookup_empty_table():
 def test_lookup_zero_queries():
     R, S, P = 3, 4, 2
     sparse = _SparseRanges(
-        np.zeros(R + 1, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), R, S, P
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
     )
     snp, indel = sparse.lookup(np.array([], np.int64), np.array([], np.int64), P)
     assert snp.shape == (0, 2) and indel.shape == (0, 2)
@@ -686,7 +702,12 @@ def test_lookup_out_of_bounds_raises(bad: str):
     """
     R, S, P = 3, 4, 2
     sparse = _SparseRanges(
-        np.zeros(R + 1, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), R, S, P
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
     )
     r_q = np.array([R if bad == "region" else 0])
     si_q = np.array([0 if bad == "region" else S])
@@ -694,8 +715,16 @@ def test_lookup_out_of_bounds_raises(bad: str):
         sparse.lookup(r_q, si_q, P)
 
 
-def test_lookup_int32_indices_do_not_wrap():
-    """int32 r_q * S wraps silently and the later promotion hides it."""
+def test_lookup_int32_indices_are_accepted():
+    """int32 r_q/si_q are accepted and agree with int64 on the same query.
+
+    This does NOT exercise wrapping: under the spec's own ``S * P < 2**31``
+    invariant, ``si_q * P`` cannot overflow int32 at these (or any legal)
+    sizes, and the subsequent ``+ arange(P)`` promotes to int64 regardless of
+    whether ``si_q * P`` wrapped. The ``dtype=np.int64`` on that multiply is
+    defence in depth against a hypothetical caller that violates the
+    invariant, not something this test can force to matter.
+    """
     R, S, P = 3, 4, 2
     rng = np.random.default_rng(3)
     dense = _random_dense(rng, R, S, P, fill=0.5)
@@ -725,7 +754,9 @@ def test_entry_dtype_is_28_bytes_per_entry():
     seed=st.integers(0, 2**32 - 1),
     n_q=st.integers(0, 20),
 )
-def test_lookup_parity_property(R: int, S: int, P: int, fill: float, seed: int, n_q: int):
+def test_lookup_parity_property(
+    R: int, S: int, P: int, fill: float, seed: int, n_q: int
+):
     """Sparse and dense must agree for every grid, fill and query set."""
     rng = np.random.default_rng(seed)
     dense = _random_dense(rng, R, S, P, fill)
@@ -733,6 +764,191 @@ def test_lookup_parity_property(R: int, S: int, P: int, fill: float, seed: int, 
     r_q = rng.integers(0, R, n_q)
     si_q = rng.integers(0, S, n_q)
     _assert_parity(dense, sparse, r_q, si_q, P)
+
+
+def test_iter_entries_is_sorted_and_complete():
+    """Concat's merge requires ascending, gap-free, complete key streams."""
+    rng = np.random.default_rng(4)
+    R, S, P = 9, 7, 2
+    dense = _random_dense(rng, R, S, P, fill=0.35)
+    sparse = _sparse_from_dense(dense, R, S, P)
+
+    keys = np.concatenate(
+        [k for k, _ in sparse.iter_entries()] or [np.empty(0, np.int64)]
+    )
+    ents = np.concatenate(
+        [e for _, e in sparse.iter_entries()] or [np.empty(0, ENTRY_DTYPE)]
+    )
+    assert len(keys) == len(sparse.cell_id)
+    assert np.all(np.diff(keys) > 0), "keys must be strictly ascending"
+
+    snp, indel = dense[0], dense[1]
+    ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+    ri, sj, pj = np.nonzero(ne)
+    np.testing.assert_array_equal(keys, ri * (S * P) + sj * P + pj)
+    np.testing.assert_array_equal(ents["snp_start"], snp[ri, sj, pj, 0])
+
+
+def test_iter_entries_empty_table():
+    R, S, P = 4, 3, 2
+    sparse = _SparseRanges(
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
+    )
+    assert list(sparse.iter_entries()) == []
+
+
+def test_sparse_ranges_satisfies_range_lookup_protocol() -> None:
+    """Static, not runtime: pyrefly checks this assignment against `_RangeLookup`.
+
+    The assignment itself has no runtime effect -- annotating a local doesn't
+    check anything at import time or under pytest. It exists so a `pyrefly
+    check` run fails the moment `_SparseRanges`'s public methods drift from the
+    Protocol Tasks 4 and 5 must also match; nothing else in this module binds
+    the two together.
+    """
+    lookup_iface: _RangeLookup = _SparseRanges(
+        np.zeros(4, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), 3, 4, 2
+    )
+    assert lookup_iface.n_regions == 3
+
+
+def test_post_init_rejects_region_ptr_length_mismatch():
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="n_regions"):
+        _SparseRanges(
+            np.zeros(R, np.int64),  # one short of n_regions + 1
+            np.empty(0, np.int32),
+            np.empty(0, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_cell_id_cell_vk_length_mismatch():
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="parallel"):
+        _SparseRanges(
+            np.array([0, 0, 0, 1], np.int64),
+            np.zeros(1, np.int32),
+            np.empty(0, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_non_monotonic_region_ptr():
+    """A writer bug that emits a decreasing region_ptr must raise construction,
+    not silently mis-route `lookup` to the wrong region's block.
+
+    Before this fix, `region_ptr=[0, 2, 1, 3]` constructed without error and
+    `lookup` silently returned `(0, 0)` for affected queries -- a
+    reference-only haplotype with no signal anything was wrong.
+    """
+    R, S, P = 3, 4, 2
+    with pytest.raises(ValueError, match="non-decreasing"):
+        _SparseRanges(
+            np.array([0, 2, 1, 3], np.int64),
+            np.zeros(3, np.int32),
+            np.zeros(3, ENTRY_DTYPE),
+            R,
+            S,
+            P,
+        )
+
+
+def test_post_init_rejects_truncated_region_ptr():
+    """`region_ptr[-1]` must equal `len(cell_id)`.
+
+    Before this fix, `region_ptr=[0, 1, 2]` against a 3-entry `cell_id`
+    constructed without error, permanently stranding the third entry: no
+    region's block could ever reach it, and `lookup` would return
+    wrong-but-plausible ranges for the regions that do validate.
+    """
+    S, P = 4, 2
+    cell_id = np.zeros(3, np.int32)
+    ent = np.zeros(3, ENTRY_DTYPE)
+    region_ptr = np.array([0, 1, 2], np.int64)  # claims 2 entries, cell_id has 3
+    with pytest.raises(ValueError, match=r"region_ptr\[-1\]"):
+        _SparseRanges(region_ptr, cell_id, ent, 2, S, P)
+
+
+def test_lookup_rejects_ploidy_mismatch():
+    R, S, P = 3, 4, 2
+    sparse = _SparseRanges(
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
+    )
+    with pytest.raises(ValueError, match="ploidy"):
+        sparse.lookup(np.array([0]), np.array([0]), P + 1)
+
+
+@pytest.mark.parametrize("r0,r1", [(2, 0), (-1, 2), (0, 10)])
+def test_entries_for_regions_rejects_invalid_range(r0: int, r1: int):
+    """Inverted, negative, or past-n_regions bounds must raise -- not silently
+    return empty, which is indistinguishable from "the range held no cells".
+
+    Before this fix, `entries_for_regions(2, 0)` and `entries_for_regions(-1, 2)`
+    both returned empty with no error (the inverted range's `b <= a` guard
+    absorbed the first; negative indices simply wrapped into `region_ptr` for
+    the second), while `r1 > n_regions` already raised a numpy IndexError --
+    an asymmetric guard on the one primitive `concat`'s merge is built on.
+    """
+    R, S, P = 3, 4, 2
+    sparse = _SparseRanges(
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
+    )
+    with pytest.raises(IndexError):
+        sparse.entries_for_regions(r0, r1)
+
+
+def test_lookup_needs_both_lo_and_hi_bound_checks():
+    """The two-sided `lo <= pos < hi` hit test has two independently necessary
+    halves, each guarding a distinct miss shape that the `cid[clamped] ==
+    target` check alone does NOT catch.
+
+    `_lower_bound`'s docstring says the `np.minimum` clamp exists only for a
+    trailing empty region block; none of the other nine deterministic tests
+    constructs one, and `test_lookup_parity_partial_fill` (R=7, S=5, fill=0.3)
+    has roughly a 0.1% chance of doing so by chance. This table is built so the
+    *coincidentally adjacent* `cid` value equals each query's target -- which
+    is what makes each half of the hit test load-bearing rather than redundant
+    with the `cid` equality check:
+
+    - r=0, slot 2 is absent from region 0's block (only slots 0, 1 are
+      present), but region 1's single entry has `cid == 2` right after region
+      0's block ends. The search lands at `pos == hi`; only `pos < hi` rejects
+      the bleed into region 1's entry.
+    - r=2 (the LAST region) is empty, so `pos` clamps below `lo` to region 1's
+      last entry, whose `cid` also happens to equal 2. Only `lo <= pos` rejects
+      matching that unrelated, out-of-block entry.
+    """
+    R, S, P = 3, 3, 1
+    cell_id = np.array([0, 1, 2], np.int32)  # region 0: slots 0, 1; region 1: slot 2
+    ent = np.zeros(3, ENTRY_DTYPE)
+    ent["snp_start"] = [10, 20, 30]
+    ent["snp_len"] = [1, 1, 1]
+    region_ptr = np.array([0, 2, 3, 3], np.int64)  # region 2 (LAST) is empty
+    sparse = _SparseRanges(region_ptr, cell_id, ent, R, S, P)
+
+    snp, indel = sparse.lookup(np.array([0, 2]), np.array([2, 2]), P)
+    np.testing.assert_array_equal(snp, 0)
+    np.testing.assert_array_equal(indel, 0)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -794,7 +1010,12 @@ record is naturally aligned and numpy adds no padding.
 """
 
 ITER_BLOCK_ENTRIES = 1 << 20
-"""Entries per :meth:`_RangeLookup.iter_entries` block (~28 MB sparse)."""
+"""Target entries per :meth:`_RangeLookup.iter_entries` block (~28 MB sparse).
+
+A target, not a hard cap: a block never splits one region's cells across two
+yields, so one region is the floor and a single region wider than this (only
+possible if ``S * P > 2**20``) yields as one block larger than the target.
+"""
 
 
 class _RangeLookup(Protocol):
@@ -828,6 +1049,8 @@ class _RangeLookup(Protocol):
             IndexError: If any region or sample index is out of bounds. A sparse
                 miss is indistinguishable from an empty cell, so this cannot be
                 left to fancy-indexing.
+            ValueError: If ``r_q`` and ``si_q`` have different lengths, or ``P``
+                does not equal :attr:`ploidy`.
         """
         ...
 
@@ -850,6 +1073,11 @@ class _RangeLookup(Protocol):
             ``r * (n_samples * ploidy) + slot * ploidy + ploid`` and ``entries``
             is a parallel :data:`ENTRY_DTYPE` array. Both are empty if the
             region range holds no non-empty cell.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
+                An inverted or negative range must not be indistinguishable
+                from a valid range that simply holds no cells.
         """
         ...
 
@@ -874,7 +1102,9 @@ def _check_bounds(r_q: NDArray[np.integer], si_q: NDArray[np.integer], R: int, S
     would silently yield a reference-only haplotype instead of an IndexError.
     """
     if len(r_q) != len(si_q):
-        raise ValueError(f"r_q and si_q must be parallel, got {len(r_q)} and {len(si_q)}")
+        raise ValueError(
+            f"r_q and si_q must be parallel, got {len(r_q)} and {len(si_q)}"
+        )
     if len(r_q) == 0:
         return
     if r_q.min() < 0 or r_q.max() >= R:
@@ -893,9 +1123,11 @@ class _SparseRanges:
 
     ``region_ptr[r]:region_ptr[r + 1]`` is region ``r``'s block; within a block,
     ``cell_id == slot * ploidy + ploid`` ascends, so a cell is found by bounded
-    binary search. Depth is ``log2(N / R)`` rather than ``log2(N)`` -- 12.2 vs
-    24.1 bits at All of Us chr22 -- on the term measured at 91% of lookup cost,
-    and ``region_ptr`` costs 1.6 MB genome-wide against a 27 GB table.
+    binary search. Search depth is fixed once from the table's WIDEST region
+    block, not its average: one densely-filled region forces that many
+    iterations for every query this table ever serves, including ones landing
+    on sparse regions. ``region_ptr`` itself costs 1.6 MB genome-wide against a
+    27 GB table.
     """
 
     region_ptr: NDArray[np.int64]
@@ -922,13 +1154,30 @@ class _SparseRanges:
         # Hoisted out of the probe. Computing this per lookup() is an O(R) pass
         # over a memmap-backed array: measured 1.5 us at R = 3,734 but 98 us at a
         # genome-scale R = 202,053, i.e. 2.9% of the whole 3.42 ms lookup budget
-        # spent recomputing a constant.
+        # spent recomputing a constant. The same pass doubles as validation: a
+        # truncated or mis-cumsum'd region_ptr is otherwise silent -- `lookup`
+        # would return a wrong-but-plausible range instead of raising, because a
+        # bad probe result looks exactly like a miss.
         w = self.region_ptr[1:] - self.region_ptr[:-1]
+        if len(w) and w.min() < 0:
+            bad = int(w.argmin())
+            raise ValueError(
+                "region_ptr must be non-decreasing, got region_ptr"
+                f"[{bad}]={int(self.region_ptr[bad])} > region_ptr[{bad + 1}]="
+                f"{int(self.region_ptr[bad + 1])}"
+            )
+        if len(self.region_ptr) and int(self.region_ptr[-1]) != len(self.cell_id):
+            raise ValueError(
+                f"region_ptr[-1] ({int(self.region_ptr[-1])}) must equal"
+                f" len(cell_id) ({len(self.cell_id)}); the table is truncated"
+            )
         widest = int(w.max()) if len(w) else 0
         # partition_point halves `size` to 1 in exactly ceil(log2(widest)) steps.
         self._depth = max(1, (widest - 1).bit_length())
 
-    def lookup(self, r_q, si_q, P):
+    def lookup(
+        self, r_q: NDArray[np.integer], si_q: NDArray[np.integer], P: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         if P != self.ploidy:
             raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
         r_q = np.atleast_1d(np.asarray(r_q))
@@ -948,8 +1197,7 @@ class _SparseRanges:
         # hides it, because the *wrapped* value is what gets promoted.
         # One broadcast rather than repeat + tile + add.
         target = (
-            np.multiply(si_q, P, dtype=np.int64)[:, None]
-            + np.arange(P, dtype=np.int64)
+            np.multiply(si_q, P, dtype=np.int64)[:, None] + np.arange(P, dtype=np.int64)
         ).reshape(-1)
         # region_ptr is gathered n times, not n * P times, then broadcast.
         r64 = np.asarray(r_q, np.int64)
@@ -962,8 +1210,7 @@ class _SparseRanges:
             # arange(S * P) there and position = lo + target with no search and no
             # hit test. This is the whole high-fill regime -- sequence-model
             # windows run at ~100% fill -- measured at 0.35 ms against 0.89 ms.
-            pos = lo
-            pos += target
+            pos = lo + target
             e = self.cell_vk[pos]
             vk_snp[:, 0] = e["snp_start"]
             np.add(e["snp_start"], e["snp_len"], out=vk_snp[:, 1])
@@ -1031,13 +1278,23 @@ class _SparseRanges:
         base += go
         return base
 
-    def entries_for_regions(self, r0: int, r1: int):
+    def entries_for_regions(
+        self, r0: int, r1: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.void]]:
         """Non-empty cells of regions ``[r0, r1)``, key-ascending.
 
         The primitive both :meth:`iter_entries` and ``concat``'s region-batched
         merge are built on. Keys are dataset-global
         ``r * (n_samples * ploidy) + slot * ploidy + ploid``.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
         """
+        if not 0 <= r0 <= r1 <= self.n_regions:
+            raise IndexError(
+                f"region range out of bounds: got r0={r0}, r1={r1}, expected"
+                f" 0 <= r0 <= r1 <= n_regions={self.n_regions}"
+            )
         a, b = int(self.region_ptr[r0]), int(self.region_ptr[r1])
         if b <= a:
             return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
@@ -1049,7 +1306,7 @@ class _SparseRanges:
             np.asarray(self.cell_vk[a:b]),
         )
 
-    def iter_entries(self):
+    def iter_entries(self) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
         rows = max(1, ITER_BLOCK_ENTRIES // max(self._cell_span, 1))
         for r0 in range(0, self.n_regions, rows):
             key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
