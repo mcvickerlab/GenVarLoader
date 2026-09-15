@@ -7,6 +7,8 @@ a dense reference is asserted exhaustively and as a Hypothesis property.
 
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
 from hypothesis import given, settings
@@ -14,6 +16,7 @@ from hypothesis import strategies as st
 
 from genvarloader._dataset._svar2_ranges import (
     ENTRY_DTYPE,
+    _DenseRanges,
     _RangeLookup,
     _SparseRanges,
 )
@@ -447,3 +450,132 @@ def test_lookup_needs_both_lo_and_hi_bound_checks():
     snp, indel = sparse.lookup(np.array([0, 2]), np.array([2, 2]), P)
     np.testing.assert_array_equal(snp, 0)
     np.testing.assert_array_equal(indel, 0)
+
+
+def _write_dense_layout(d, dense: np.ndarray, R: int, S: int, P: int):
+    """Emit the legacy dense layout at `d`, exactly as gvl <= 0.42.1 did."""
+    import json
+
+    d.mkdir(parents=True, exist_ok=True)
+    for name, arr in (("vk_snp_range", dense[0]), ("vk_indel_range", dense[1])):
+        np.asarray(arr, np.int64).tofile(d / f"{name}.npy")
+    for name in ("dense_snp_range", "dense_indel_range"):
+        np.zeros((R, 2), np.int64).tofile(d / f"{name}.npy")
+    np.save(d / "sample_cols.npy", np.arange(S, dtype=np.int64))
+    (d / "svar2_meta.json").write_text(
+        json.dumps(
+            {
+                "vk_snp_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
+                "vk_indel_range": {"shape": [R, S, P, 2], "dtype": "<i8"},
+                "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
+                "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
+                "sample_cols": {"shape": [S], "dtype": "<i8"},
+                "ploidy": P,
+            }
+        )
+    )
+
+
+def test_dense_ranges_matches_fancy_indexing(tmp_path):
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    rng = np.random.default_rng(5)
+    R, S, P = 5, 4, 2
+    dense = _random_dense(rng, R, S, P, fill=0.5)
+    _write_dense_layout(tmp_path, dense, R, S, P)
+
+    reader = _ranges_reader(tmp_path)
+    assert (reader.n_regions, reader.n_samples, reader.ploidy) == (R, S, P)
+
+    r_q, si_q = np.unravel_index(np.arange(R * S), (R, S))
+    got_snp, got_indel = reader.lookup(r_q, si_q, P)
+    exp_snp, exp_indel = _dense_reference(dense, r_q, si_q, P)
+    # The dense reader is the status quo: bit-equal, insertion points included.
+    np.testing.assert_array_equal(got_snp, exp_snp)
+    np.testing.assert_array_equal(got_indel, exp_indel)
+
+
+def test_dense_and_sparse_iter_entries_agree(tmp_path):
+    """Dense -> sparse concat feeds off _DenseRanges.iter_entries; it must match."""
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    rng = np.random.default_rng(6)
+    R, S, P = 6, 5, 2
+    dense = _random_dense(rng, R, S, P, fill=0.4)
+    _write_dense_layout(tmp_path, dense, R, S, P)
+
+    d_keys = np.concatenate(
+        [k for k, _ in _ranges_reader(tmp_path).iter_entries()]
+        or [np.empty(0, np.int64)]
+    )
+    sparse = _sparse_from_dense(dense, R, S, P)
+    s_keys = np.concatenate(
+        [k for k, _ in sparse.iter_entries()] or [np.empty(0, np.int64)]
+    )
+    np.testing.assert_array_equal(d_keys, s_keys)
+
+
+def test_entries_for_regions_agree_on_subranges(tmp_path):
+    """concat asks for arbitrary [r0, r1); both layouts must answer identically.
+
+    iter_entries only ever exercises the block boundaries the reader picks for
+    itself. concat picks its own, so a dense/sparse disagreement on a partial
+    region range -- an off-by-one in the region offset, say -- would slip past the
+    test above and corrupt only merged datasets.
+    """
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    rng = np.random.default_rng(8)
+    R, S, P = 7, 3, 2
+    dense = _random_dense(rng, R, S, P, fill=0.4)
+    _write_dense_layout(tmp_path, dense, R, S, P)
+    d_reader = _ranges_reader(tmp_path)
+    sparse = _sparse_from_dense(dense, R, S, P)
+
+    for r0, r1 in ((0, 0), (0, 1), (2, 5), (3, 3), (0, R), (R, R)):
+        d_key, d_ent = d_reader.entries_for_regions(r0, r1)
+        s_key, s_ent = sparse.entries_for_regions(r0, r1)
+        assert d_key.dtype == np.int64 and s_key.dtype == np.int64
+        assert d_ent.dtype == ENTRY_DTYPE and s_ent.dtype == ENTRY_DTYPE
+        np.testing.assert_array_equal(d_key, s_key)
+        np.testing.assert_array_equal(d_ent, s_ent)
+        # Keys must ascend; concat's merge and _SparseWriter both assume it.
+        assert np.all(np.diff(d_key) > 0)
+
+
+def test_dense_reader_bounds_check(tmp_path):
+    """Both layouts must raise on a bad index, so callers behave identically."""
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    rng = np.random.default_rng(7)
+    R, S, P = 3, 3, 2
+    _write_dense_layout(tmp_path, _random_dense(rng, R, S, P, 0.5), R, S, P)
+    with pytest.raises(IndexError, match="region"):
+        _ranges_reader(tmp_path).lookup(np.array([R]), np.array([0]), P)
+
+
+@pytest.mark.parametrize("impl", [_SparseRanges, _DenseRanges])
+def test_impl_signature_matches_protocol(impl: type) -> None:
+    """A pytest failure gates CI; a pyrefly ``bad-assignment`` warning does not.
+
+    ``pyproject.toml`` sets ``bad-assignment = "warn"``, so a Protocol/impl
+    signature mismatch there surfaces as one warning among hundreds already
+    suppressed in a normal ``typecheck`` run. This test is the real gate: it
+    fails the build the moment an implementation's parameter names, order, or
+    return annotation drift from ``_RangeLookup``.
+    """
+    for name in ("lookup", "entries_for_regions", "iter_entries"):
+        proto_sig = inspect.signature(getattr(_RangeLookup, name), eval_str=True)
+        impl_sig = inspect.signature(getattr(impl, name), eval_str=True)
+
+        proto_params = list(proto_sig.parameters)
+        impl_params = list(impl_sig.parameters)
+        assert proto_params == impl_params, (
+            f"{impl.__name__}.{name} parameter names/order {impl_params} diverge"
+            f" from _RangeLookup.{name} {proto_params}"
+        )
+        assert proto_sig.return_annotation == impl_sig.return_annotation, (
+            f"{impl.__name__}.{name} return annotation"
+            f" {impl_sig.return_annotation!r} diverges from _RangeLookup.{name}'s"
+            f" {proto_sig.return_annotation!r}"
+        )

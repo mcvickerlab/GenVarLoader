@@ -21,13 +21,21 @@ definition of what these files mean.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterator, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["ENTRY_DTYPE", "_RangeLookup", "_SparseRanges"]
+__all__ = [
+    "ENTRY_DTYPE",
+    "_RangeLookup",
+    "_SparseRanges",
+    "_DenseRanges",
+    "_ranges_reader",
+]
 
 ENTRY_DTYPE = np.dtype(
     [
@@ -349,3 +357,185 @@ class _SparseRanges:
             key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
             if len(key):
                 yield key, ent
+
+
+@dataclass(slots=True)
+class _DenseRanges:
+    """The legacy ``(R, S, P, 2)`` layout, kept so old datasets still open.
+
+    Written by GVL <= 0.42.1 and by nothing since; ``gvl.write`` emits only the
+    sparse layout. Re-running ``gvl.write`` is how an existing dataset is shrunk
+    -- there is no migration tool (``gvl.migrate`` handles only the 1.x -> 2.0
+    AoS-to-SoA track, ``_migrate.py:65``).
+    """
+
+    vk_snp_range: NDArray[np.int64]
+    vk_indel_range: NDArray[np.int64]
+    n_regions: int
+    n_samples: int
+    ploidy: int
+
+    def __post_init__(self):
+        expected = (self.n_regions, self.n_samples, self.ploidy, 2)
+        for name, arr in (
+            ("vk_snp_range", self.vk_snp_range),
+            ("vk_indel_range", self.vk_indel_range),
+        ):
+            if arr.shape != expected:
+                raise ValueError(
+                    f"{name} must have shape {expected} = (n_regions, n_samples,"
+                    f" ploidy, 2), got {arr.shape}"
+                )
+
+    def lookup(
+        self, r_q: NDArray[np.integer], si_q: NDArray[np.integer], P: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+        if P != self.ploidy:
+            raise ValueError(f"query ploidy {P} != cache ploidy {self.ploidy}")
+        r_q = np.asarray(r_q)
+        si_q = np.asarray(si_q)
+        # Fancy-indexing would raise on its own, but only for the region axis in
+        # some shapes; check both so the two layouts fail identically.
+        _check_bounds(r_q, si_q, self.n_regions, self.n_samples)
+        snp = np.ascontiguousarray(
+            np.asarray(self.vk_snp_range[r_q, si_q]).reshape(-1, 2), np.int64
+        )
+        indel = np.ascontiguousarray(
+            np.asarray(self.vk_indel_range[r_q, si_q]).reshape(-1, 2), np.int64
+        )
+        return snp, indel
+
+    def entries_for_regions(
+        self, r0: int, r1: int
+    ) -> tuple[NDArray[np.int64], NDArray[np.void]]:
+        """Scan the dense arrays over ``[r0, r1)``, emitting non-empty cells.
+
+        This has no analogue in the old code and is not free: a full pass reads
+        the entire dense array once, which at All of Us chr22 is 128 GB. It
+        exists solely so ``concat`` can merge a legacy dense shard into a sparse
+        output, and it is region-bounded so ``concat`` can ask for exactly the
+        merged batch it is assembling rather than driving a stream.
+
+        Raises:
+            IndexError: If ``r0``/``r1`` violate ``0 <= r0 <= r1 <= n_regions``.
+        """
+        if not 0 <= r0 <= r1 <= self.n_regions:
+            raise IndexError(
+                f"region range out of bounds: got r0={r0}, r1={r1}, expected"
+                f" 0 <= r0 <= r1 <= n_regions={self.n_regions}"
+            )
+        span = self.n_samples * self.ploidy
+        if r1 <= r0:
+            return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
+        snp = np.asarray(self.vk_snp_range[r0:r1])
+        indel = np.asarray(self.vk_indel_range[r0:r1])
+        ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
+        # C-order nonzero => already ascending in (r, slot, ploid) = key order.
+        ri, sj, pj = np.nonzero(ne)
+        if len(ri) == 0:
+            return np.empty(0, np.int64), np.empty(0, ENTRY_DTYPE)
+        key = (r0 + ri).astype(np.int64) * span + sj.astype(np.int64) * self.ploidy + pj
+        ent = np.empty(len(ri), ENTRY_DTYPE)
+        ent["snp_start"] = snp[ri, sj, pj, 0]
+        ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
+        ent["indel_start"] = indel[ri, sj, pj, 0]
+        ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
+        return key, ent
+
+    def iter_entries(self) -> Iterator[tuple[NDArray[np.int64], NDArray[np.void]]]:
+        span = self.n_samples * self.ploidy
+        rows = max(1, ITER_BLOCK_ENTRIES // max(span, 1))
+        for r0 in range(0, self.n_regions, rows):
+            key, ent = self.entries_for_regions(r0, min(r0 + rows, self.n_regions))
+            if len(key):
+                yield key, ent
+
+
+def _raw(path: Path, dtype, shape) -> NDArray:
+    """Memmap a raw headerless cache file, or an empty array if it holds nothing.
+
+    ``np.memmap`` raises ``ValueError: cannot mmap an empty file`` on a 0-byte
+    file, which a variant-free dataset or a per-contig shard can legitimately
+    produce.
+    """
+    n = int(np.prod(shape)) if len(shape) else 0
+    if n == 0:
+        return np.empty(shape, dtype)
+    return np.memmap(path, dtype=dtype, mode="r", shape=tuple(shape))
+
+
+def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
+    """Open whichever range-cache layout is at ``ranges_dir``.
+
+    A path-level factory rather than a method on ``Svar2Haps``: ``concat`` needs
+    the same reader, and ``Svar2Haps.from_path`` additionally resolves and
+    fingerprints the external ``.svar2`` store, which ``concat`` must not do.
+
+    Args:
+        ranges_dir: The dataset's ``genotypes/svar2_ranges/`` directory.
+
+    Returns:
+        A :class:`_SparseRanges` or :class:`_DenseRanges`.
+
+    Raises:
+        ValueError: If the meta's grid disagrees with the files beside it. A
+            wrong ``n_samples`` makes every sparse probe miss, which reads as a
+            silently variant-free dataset rather than an error.
+    """
+    ranges_dir = Path(ranges_dir)
+    with open(ranges_dir / "svar2_meta.json") as f:
+        meta = json.load(f)
+
+    P = int(meta["ploidy"])
+    R = int(meta["dense_snp_range"]["shape"][0])
+    layout = meta.get("layout", "dense")
+
+    if layout == "dense":
+        # Pre-0.43.0 datasets carry S only in the vk array's shape.
+        S = int(meta["vk_snp_range"]["shape"][1])
+    elif layout == "sparse":
+        S = int(meta["n_samples"])
+        if int(meta["n_regions"]) != R:
+            raise ValueError(
+                f"svar2 cache meta is inconsistent: n_regions={meta['n_regions']} but"
+                f" dense_snp_range has {R} rows."
+            )
+    else:
+        raise ValueError(
+            f"Unknown svar2 range cache layout {layout!r} at {ranges_dir}. This"
+            " dataset was written by a newer GenVarLoader."
+        )
+
+    n_cols = len(np.load(ranges_dir / "sample_cols.npy"))
+    if n_cols != S:
+        raise ValueError(
+            f"svar2 cache meta claims {S} samples but sample_cols.npy holds {n_cols}."
+        )
+
+    if layout == "dense":
+        return _DenseRanges(
+            vk_snp_range=_raw(ranges_dir / "vk_snp_range.npy", np.int64, (R, S, P, 2)),
+            vk_indel_range=_raw(
+                ranges_dir / "vk_indel_range.npy", np.int64, (R, S, P, 2)
+            ),
+            n_regions=R,
+            n_samples=S,
+            ploidy=P,
+        )
+
+    n = int(meta["n_entries"])
+    return _SparseRanges(
+        # np.array, not np.asarray: np.asarray(memmap, np.int64) returns a VIEW
+        # still backed by the mmap (np.shares_memory is True), so every lookup
+        # would fancy-index through page faults and __post_init__ would scan the
+        # file. region_ptr is 1.6 MB genome-wide against a 27 GB table -- read it
+        # into RAM once.
+        region_ptr=np.array(
+            _raw(ranges_dir / "region_ptr.npy", np.int64, (R + 1,)), np.int64
+        ),
+        cell_id=_raw(ranges_dir / "cell_id.npy", np.int32, (n,)),
+        cell_vk=_raw(ranges_dir / "cell_vk.npy", ENTRY_DTYPE, (n,)),
+        n_regions=R,
+        n_samples=S,
+        ploidy=P,
+    )
