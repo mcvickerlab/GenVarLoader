@@ -117,10 +117,13 @@ source and destination. That carry subsumes the region-boundary case entirely �
 `copy_runs` builds its `lengths` array with one numpy slice-assignment *per run*.
 On an interleaved merge that is one tiny numpy call per slot — 2.0e9 of them at
 chr22, far slower than the streaming it feeds. `slot_batches` instead yields
-destination-contiguous batches — one per region on the samples axis, one per run
-on the regions axis — as `(dst_start, ds_vec, slot_vec)`, so `copy_runs` fills
-lengths with `R` vectorized gathers (3,734 at chr22) instead of `R*S` scalar
-ones. Peak batch memory is `S*P` int64 = 8.6 MB at chr22.
+destination-contiguous batches as `(dst_start, ds_vec, slot_vec)`, so `copy_runs`
+fills lengths with `R` vectorized gathers (3,734 at chr22) instead of `R*S`
+scalar ones. On the samples axis a batch is one region — `S*P` int64 = 8.6 MB at
+chr22. On the regions axis a batch is a **fixed-size chunk of a run**, capped at
+`_SLOT_BATCH_SLOTS = 1 << 20` (8 MiB of int64): one batch per run would not do,
+because a regions-axis run can span the entire merged grid, and materializing its
+slot indices would rebuild the 32 GB array this whole change exists to remove.
 
 ### Consumer changes
 
