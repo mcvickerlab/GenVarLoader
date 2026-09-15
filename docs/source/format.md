@@ -114,6 +114,12 @@ is fully occupied, i.e. every sample/ploid combination in the region holds a var
 the flat per-query inputs for the read-bound Rust kernels — no interval-search tree and no
 dense-union rebuild happen per read, unlike the `.svar` path.
 
+A producer must emit `cell_id` in strictly ascending order within each region's block, since the
+binary search assumes it. This is not verified on read — doing so would be an O(N) scan over the
+whole table, 27 GB genome-wide — so a producer that violates it degrades to silent misses (the
+search lands on a wrong-but-plausible position, and the confirmation step then reports "not
+found") rather than an error.
+
 ## SVAR resolution at open time
 
 When opening a dataset whose `metadata.svar_link` is non-null,

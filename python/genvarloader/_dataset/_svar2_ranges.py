@@ -554,6 +554,23 @@ def _ranges_reader(ranges_dir: Path) -> _RangeLookup:
         )
 
     n = int(meta["n_entries"])
+    # cell_vk.npy is a raw headerless tofile dump like the dense arrays, so
+    # meta["cell_vk"]["dtype"] (written from ENTRY_DTYPE.descr, ._write.py and
+    # ._concat.py) is the only record of how to interpret its bytes. Truncation
+    # and shape drift are already covered -- __post_init__ checks
+    # region_ptr[-1] == len(cell_id), and cell_id is memmapped at an explicit
+    # (n,) -- but not dtype: if ENTRY_DTYPE ever gains or widens a field, an
+    # old file would be reinterpreted at the new itemsize, and whether that
+    # raises depends on which way the itemsize moved. DATASET_FORMAT_VERSION
+    # deliberately stays 2.0.0 on this branch (it matches on MAJOR only), so
+    # this per-field check is the only version signal these files carry.
+    recorded_cell_vk_dtype = np.dtype([tuple(f) for f in meta["cell_vk"]["dtype"]])
+    if recorded_cell_vk_dtype != ENTRY_DTYPE:
+        raise ValueError(
+            f"svar2 cache meta records cell_vk dtype {recorded_cell_vk_dtype} but"
+            f" this GenVarLoader's ENTRY_DTYPE is {ENTRY_DTYPE}; open this dataset"
+            " with the GenVarLoader version that wrote it."
+        )
     return _SparseRanges(
         # np.array, not np.asarray: np.asarray(memmap, np.int64) returns a VIEW
         # still backed by the mmap (np.shares_memory is True), so every lookup
@@ -739,11 +756,24 @@ class _SparseWriter:
         # region with every downstream CSR invariant still holding -- caught here
         # instead, one O(N) bool pass against the counting sort's 532 ms.
         total = np.zeros(rc, np.int64)
-        for r in regions:
+        for r, c in zip(regions, cells):
             if len(r) and np.any(np.diff(r) < 0):
                 raise ValueError(
                     "svar2 range cache requires each chunk's region indices to"
                     " be non-decreasing"
+                )
+            # append() derives cell ids as key % self._span, so they are
+            # structurally in [0, span); append_contig takes cells verbatim from
+            # the caller, so nothing else enforces that. This matters because
+            # lookup()'s zero-search fast path (the `(hi1 - lo1) == self._cell_span`
+            # branch) trusts that a full-count region's cell_id is exactly
+            # arange(span) with no per-entry hit test -- an out-of-range cell id
+            # in such a region would return silently wrong entries rather than a
+            # miss. One O(N) bool pass, cheap against the 532 ms counting sort.
+            if len(c) and (c.max() >= self._span or c.min() < 0):
+                raise ValueError(
+                    f"svar2 range cache got cell id {int(c.max())} for a grid of"
+                    f" {self._span} cells; cells must be slot * ploidy + ploid."
                 )
             total += self._counts(r, rc)
 

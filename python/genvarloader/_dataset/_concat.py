@@ -328,16 +328,29 @@ def _concat_svar2_ranges(
                     "(gvl.write sorts unconditionally)."
                 )
 
+    # Hoisted above the branch below: both the sparse-input fast path and the
+    # dense_snp_range/dense_indel_range gather need "which input contributed
+    # each merged region, in merged order", and it is the same value either
+    # way -- computing it twice would let a future edit that changes one
+    # `provenance` call and not the other silently order the dense_* gather
+    # differently from the cell_* copy. Only meaningful on `axis == "regions"`:
+    # on `axis == "samples"`, `order` maps merged *sample* slots, not regions,
+    # so this must stay unevaluated there (dense_snp_range/dense_indel_range
+    # are instead linked from input #0 below, unchanged across inputs).
+    region_runs = (
+        coalesce(provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order))
+        if axis == "regions"
+        else None
+    )
+
     out_span = n_samples * ploidy
     if axis == "regions" and all(isinstance(rd, _SparseRanges) for rd in readers):
+        assert region_runs is not None  # guaranteed by axis == "regions" above
         # Every merged region draws its whole CSR block from exactly one input,
         # with cell ids unchanged (s_map is the identity and S is equal across
         # inputs), so this is a pure reorder of ragged blocks -- the same shape of
         # problem copy_runs already solves for tracks, with region_ptr as the
         # offsets array. No decode, no remap, no sort: byte ranges only.
-        region_runs = coalesce(
-            provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order)
-        )
         src_ptr = [np.asarray(rd.region_ptr, np.int64) for rd in readers]
         merged_ptr = None
         for fname, itemsize in (
@@ -376,8 +389,7 @@ def _concat_svar2_ranges(
                 out_dir / f"{name}.npy",
             )
     else:
-        region_shapes = [(r, 1) for r, _ in shapes]
-        region_runs = coalesce(provenance("regions", region_shapes, 1, order=order))
+        assert region_runs is not None  # guaranteed by the axis != "samples" here
         for name in ("dense_snp_range", "dense_indel_range"):
             gather_fixed(
                 [p / "genotypes" / "svar2_ranges" / f"{name}.npy" for p in paths],

@@ -615,6 +615,55 @@ def test_ranges_reader_rejects_mismatched_vk_shape(tmp_path):
         _ranges_reader(d)
 
 
+def test_ranges_reader_rejects_wrong_cell_vk_dtype(tmp_path):
+    """A recorded ``cell_vk`` dtype that disagrees with ``ENTRY_DTYPE`` must raise.
+
+    ``cell_vk.npy`` is a raw headerless ``tofile`` dump, so
+    ``meta["cell_vk"]["dtype"]`` is the only record of how to interpret its
+    bytes. ``DATASET_FORMAT_VERSION`` deliberately stays ``2.0.0`` across a
+    field change to ``ENTRY_DTYPE`` (it matches on MAJOR only), so this
+    per-field check is the only version signal these sparse files carry --
+    without it, a file written under a different ``ENTRY_DTYPE`` would be
+    silently reinterpreted at the current itemsize instead of raising.
+    """
+    R, S, P, n = 2, 3, 2, 1
+    d = tmp_path
+    d.mkdir(parents=True, exist_ok=True)
+
+    np.array([0, 1, 1], np.int64).tofile(d / "region_ptr.npy")
+    np.zeros(n, np.int32).tofile(d / "cell_id.npy")
+    np.zeros(n, ENTRY_DTYPE).tofile(d / "cell_vk.npy")
+    for name in ("dense_snp_range", "dense_indel_range"):
+        np.zeros((R, 2), np.int64).tofile(d / f"{name}.npy")
+    np.save(d / "sample_cols.npy", np.arange(S, dtype=np.int64))
+
+    # Drops indel_len relative to ENTRY_DTYPE -- same field names otherwise,
+    # different itemsize.
+    wrong_dtype = np.dtype(
+        [("snp_start", "<i8"), ("indel_start", "<i8"), ("snp_len", "<i4")]
+    )
+    (d / "svar2_meta.json").write_text(
+        json.dumps(
+            {
+                "layout": "sparse",
+                "n_regions": R,
+                "n_samples": S,
+                "n_entries": n,
+                "fill": n / (R * S * P),
+                "region_ptr": {"shape": [R + 1], "dtype": "<i8"},
+                "cell_id": {"shape": [n], "dtype": "<i4"},
+                "cell_vk": {"shape": [n], "dtype": wrong_dtype.descr},
+                "dense_snp_range": {"shape": [R, 2], "dtype": "<i8"},
+                "dense_indel_range": {"shape": [R, 2], "dtype": "<i8"},
+                "sample_cols": {"shape": [S], "dtype": "<i8"},
+                "ploidy": P,
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="cell_vk dtype"):
+        _ranges_reader(d)
+
+
 def test_ranges_reader_rejects_unknown_layout(tmp_path):
     """An unrecognized `layout` value must raise, not fall through to dense.
 
@@ -833,6 +882,33 @@ def test_append_contig_rejects_unsorted_regions_within_a_chunk(tmp_path):
             [ent],
             lo=0,
             rc=2,
+        )
+    w.close()
+
+
+def test_append_contig_rejects_out_of_range_cell_id(tmp_path):
+    """Cell ids must lie in ``[0, n_samples * ploidy)``.
+
+    ``append`` derives cell ids as ``key % self._span``, so they are
+    structurally in range there; ``append_contig`` takes ``cells`` from the
+    caller verbatim, so nothing else checks it. Reproduced without this guard:
+    a region that happens to hold exactly ``span`` entries fools
+    ``_SparseRanges.lookup``'s zero-search fast path (which trusts a
+    full-count region's ``cell_id`` to be exactly ``arange(span)`` with no
+    per-entry hit test) into returning whatever entry sits at the bad
+    position -- silently wrong data, not a miss.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=1)
+    ent = np.zeros(1, ENTRY_DTYPE)
+    with pytest.raises(ValueError, match="cell id"):
+        w.append_contig(
+            [np.array([0], np.int32)],
+            [np.array([2], np.int32)],  # span is 2, so valid cells are {0, 1}
+            [ent],
+            lo=0,
+            rc=1,
         )
     w.close()
 
