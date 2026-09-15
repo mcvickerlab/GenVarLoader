@@ -2070,6 +2070,22 @@ The format flip. After this task, `gvl.write` emits sparse and nothing produces 
 Replace `test_write_svar2_emits_cache`'s meta-key block and layout oracle (`tests/dataset/test_write_svar2.py:98-168`) with:
 
 ```python
+def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store)
+    bed = pl.DataFrame(
+        {
+            # [25, 40) holds no variants at all: an entirely empty region row,
+            # which the sparse layout must round-trip as (0, 0) everywhere.
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 5, 25],
+            "chromEnd": [20, 15, 40],
+        }
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
     rd = out / "genotypes" / "svar2_ranges"
     meta = json.loads((rd / "svar2_meta.json").read_text())
     assert meta["layout"] == "sparse"
@@ -2096,8 +2112,13 @@ Replace `test_write_svar2_emits_cache`'s meta-key block and layout oracle (`test
 
     # ---- The layout oracle. Replays _find_ranges over the same regions and the
     # sorted sample list gvl.write wrote, then compares through _ranges_reader.
-    # This LOCKS the region-major (R, S, P) ordering: a scrambled or
-    # mis-transposed cache fails loudly here.
+    # This checks the (region, sample, ploid) VALUES the cache holds against an
+    # independent oracle for this fixture's grid. It does NOT by itself prove a
+    # mis-transposed axis order fails loudly here -- `_find_ranges`'s test
+    # fixture happens not to distinguish some axis permutations, so that
+    # property is enforced structurally instead, by `nonempty_entries`'s own
+    # shape check (raises on any transpose that changes rank or the ploidy
+    # axis) and pinned end-to-end by tests/dataset/test_svar2_fields_read.py.
     #
     # It compares WIDTHS and NON-EMPTY entries, not raw bytes: the sparse layout
     # deliberately discards an empty cell's insertion point, which is exactly the
@@ -2142,13 +2163,23 @@ Replace `test_write_svar2_emits_cache`'s meta-key block and layout oracle (`test
         r_q, si_q = np.unravel_index(np.arange(rc * S), (rc, S))
         got_snp, got_indel = reader.lookup(r_q + lo, si_q, P)
 
+        # Presence is a property of the CELL, not of one channel: a stored cell
+        # whose SNP range happens to be empty still carries the real snp_start
+        # with snp_len == 0, so lookup returns the true insertion point there,
+        # NOT (0, 0) -- only a genuinely absent cell (both channels empty)
+        # returns (0, 0). Masking per channel (`widths_snp > 0` alone) is wrong
+        # and would incorrectly demand (0, 0) at a present cell's empty channel;
+        # see _assert_parity in tests/unit/dataset/test_svar2_ranges.py, which
+        # this mirrors.
+        widths_snp = exp_snp[:, 1] - exp_snp[:, 0]
+        widths_indel = exp_indel[:, 1] - exp_indel[:, 0]
+        np.testing.assert_array_equal(got_snp[:, 1] - got_snp[:, 0], widths_snp)
+        np.testing.assert_array_equal(got_indel[:, 1] - got_indel[:, 0], widths_indel)
+        present = (widths_snp > 0) | (widths_indel > 0)
         for got, exp in ((got_snp, exp_snp), (got_indel, exp_indel)):
-            widths = exp[:, 1] - exp[:, 0]
-            np.testing.assert_array_equal(got[:, 1] - got[:, 0], widths)
-            ne = widths > 0
-            np.testing.assert_array_equal(got[ne], exp[ne])
-            np.testing.assert_array_equal(got[~ne], 0)
-            n_empty_seen += int((~ne).sum())
+            np.testing.assert_array_equal(got[present], exp[present])
+            np.testing.assert_array_equal(got[~present], 0)
+        n_empty_seen += int((~present).sum())
 
         np.testing.assert_array_equal(
             dense_snp[lo:hi], np.asarray(d["dense_snp_range"], np.int64)
@@ -2158,7 +2189,7 @@ Replace `test_write_svar2_emits_cache`'s meta-key block and layout oracle (`test
         )
         contig_offset += rc
 
-    assert n_empty_seen > 0, "fixture lost its empty cells (see Task 1)"
+    assert n_empty_seen > 0, "fixture regressed to 100% fill (see Task 1)"
 
     # Sparse must be smaller than the dense layout would have been, at this fill.
     n = meta["n_entries"]
@@ -2203,7 +2234,9 @@ class _SparseWriter:
     # Every attribute must be declared: `slots=True` gives the class no __dict__,
     # so an undeclared `self._span = ...` in __post_init__ raises AttributeError.
     _span: int = field(init=False, repr=False, default=0)
-    _ptr: "list[NDArray[np.int64]]" = field(init=False, repr=False, default_factory=list)
+    _ptr: "list[NDArray[np.int64]]" = field(
+        init=False, repr=False, default_factory=list
+    )
     _regions_done: int = field(init=False, repr=False, default=0)
     _f_cell: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
     _f_vk: "IO[bytes]" = field(init=False, repr=False, default=None)  # type: ignore[assignment]
@@ -2265,14 +2298,20 @@ class _SparseWriter:
 
         Raises:
             ValueError: If the caller's regions are not contiguous and in order,
-                if the keys are not strictly ascending, or if a key is out of
-                range for this block. Contiguity is the one load-bearing
-                invariant of the write path: blocks from ``bed.partition_by``
-                must partition ``[0, R)`` in the same order as the running
-                ``contig_offset``. Asserting it directly covers every way a
-                future bed could break it.
+                if the keys are not strictly ascending, if ``ent`` and ``key``
+                have different lengths, or if a key is out of range for this
+                block. Contiguity is the one load-bearing invariant of the
+                write path: blocks from ``bed.partition_by`` must partition
+                ``[0, R)`` in the same order as the running ``contig_offset``.
+                Asserting it directly covers every way a future bed could
+                break it.
         """
         self._check_lo(lo)
+        if len(ent) != len(key):
+            raise ValueError(
+                f"svar2 range cache: key and ent must be parallel, got"
+                f" {len(key)} keys and {len(ent)} entries"
+            )
         if len(key) and not np.all(np.diff(key) > 0):
             raise ValueError("svar2 range cache entries are not strictly ascending")
 
@@ -2320,15 +2359,28 @@ class _SparseWriter:
 
         Raises:
             ValueError: If the caller's regions are not contiguous and in order,
-                or if a region index is out of range for this contig.
+                if a region index is out of range for this contig, if a
+                chunk's region indices are not non-decreasing, or if the
+                chunks were not given in ascending sample order (detected as a
+                non-ascending cell id within a region's merged output).
         """
         self._check_lo(lo)
 
         # Pass 1: per-region totals. O(rc) of state -- never (n_chunks x rc),
         # which is what makes this safe at samples_per_chunk == 1 (535k chunks at
-        # cohort scale).
+        # cohort scale). Also validates that each chunk is region-grouped: the
+        # scatter below computes `dst = cursor[r] + arange(len(r)) - start[r]` as
+        # a within-region rank, which is only correct when `r` is non-decreasing.
+        # An unsorted `r` (e.g. [1, 0, 1]) silently scatters entries to the wrong
+        # region with every downstream CSR invariant still holding -- caught here
+        # instead, one O(N) bool pass against the counting sort's 532 ms.
         total = np.zeros(rc, np.int64)
         for r in regions:
+            if len(r) and np.any(np.diff(r) < 0):
+                raise ValueError(
+                    "svar2 range cache requires each chunk's region indices to"
+                    " be non-decreasing"
+                )
             total += self._counts(r, rc)
 
         n = int(total.sum())
@@ -2352,9 +2404,48 @@ class _SparseWriter:
             out_ent[dst] = e
             cursor += cnt
 
+        # `cell` ascending within each region requires chunks to be processed in
+        # ascending sample order (docstring's "chunk i's sample slots lie
+        # entirely below chunk i + 1's" assumption) -- the per-chunk
+        # non-decreasing-`r` check above cannot catch a violation of THIS
+        # assumption: chunks fed in descending sample order each individually
+        # pass that check (each chunk's own `r` is still non-decreasing) while
+        # still scattering a later, smaller cell id after an earlier, larger
+        # one within the same region -- every CSR invariant (region_ptr shape,
+        # non-decreasing, counts) still holds, so nothing downstream would
+        # catch it either. One O(N) pass, cheap against the 532 ms sort.
+        region_end = total.cumsum()
+        if n:
+            # Compare int32 directly: cell ids are non-negative and < 2**31, so
+            # this is exact -- an int64 cast would be pure allocation in the one
+            # write path whose whole point is memory (measured ~25 bytes/entry
+            # in an earlier version of this check, against out_cell's 4).
+            nonasc = out_cell[1:] <= out_cell[:-1]
+            # A drop is legitimate only at a region boundary: `region_end[:-1]`
+            # holds the `rc - 1` positions where the next region's data starts,
+            # so the pair straddling boundary `c` is nonasc[c - 1] (it compares
+            # out_cell[c] against out_cell[c - 1]). Masking by these rc - 1
+            # indices costs O(rc), not the O(n) a materialized per-entry region
+            # id would. `c == 0` (a leading empty region) would otherwise wrap
+            # to nonasc[-1], so drop negative indices; a repeated boundary from
+            # consecutive empty regions masks the same index twice, harmlessly.
+            # Trailing empty regions (or n == 1) produce a boundary at or past
+            # `c == n`, i.e. `bounds >= len(nonasc)` -- there's no pair after
+            # the last real entry to mask, so that's out of range too, not
+            # just the negative end.
+            bounds = region_end[:-1] - 1
+            bounds = bounds[(bounds >= 0) & (bounds < len(nonasc))]
+            nonasc[bounds] = False
+            if nonasc.any():
+                raise ValueError(
+                    "svar2 range cache requires chunks in ascending sample order:"
+                    " cell ids within a region must be strictly ascending, got a"
+                    f" non-ascending pair at output position {int(np.flatnonzero(nonasc)[0])}"
+                )
+
         out_cell.tofile(self._f_cell)
         out_ent.tofile(self._f_vk)
-        self._ptr.append(self.n_entries + total.cumsum())
+        self._ptr.append(self.n_entries + region_end)
         self.n_entries += n
         self._regions_done += rc
 
@@ -2400,7 +2491,26 @@ def nonempty_entries(
         :meth:`_SparseWriter.append_contig` needs the region axis on its own to
         count, and ``cell`` is what lands on disk -- combining them would only be
         undone again.
+
+    Raises:
+        ValueError: If ``snp`` and ``indel`` don't share a shape, or their
+            ploidy axis doesn't match ``ploidy``. A caller that transposes the
+            wrong axes (e.g. swapping the region and sample axes) still
+            produces a same-rank ``(a, b, c, 2)`` array, so this is checked
+            explicitly rather than left to fail downstream -- without it, a
+            mis-transposed cache still writes a self-consistent CSR table
+            with no invariant violated, just region/sample-scrambled entries.
     """
+    if snp.shape != indel.shape:
+        raise ValueError(
+            "svar2 range cache: snp and indel blocks must share a shape, got"
+            f" {snp.shape} and {indel.shape}"
+        )
+    if snp.ndim != 4 or snp.shape[2] != ploidy:
+        raise ValueError(
+            f"svar2 range cache: expected (regions, samples, ploidy={ploidy}, 2)"
+            f" blocks, got shape {snp.shape}"
+        )
     ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
     # np.nonzero walks the LOGICAL shape in C order, so (r, slot, ploid) comes
     # out ascending even though `ne` is NOT C-contiguous: the `>` above inherits
@@ -2414,7 +2524,18 @@ def nonempty_entries(
     ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
     ent["indel_start"] = indel[ri, sj, pj, 0]
     ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
-    return ri.astype(np.int32), ((slot0 + sj) * ploidy + pj).astype(np.int32), ent
+    # Overflow guard local to this function: the sole production call site
+    # (`_write_from_svar2`) already guards `n_samples * ploidy < 2**31` by
+    # constructing `_SparseWriter` first, but `nonempty_entries` is a public
+    # module-level function callable independently of that guard.
+    max_cell = (int(slot0) + int(snp.shape[1]) - 1) * int(ploidy) + int(ploidy) - 1
+    if max_cell > np.iinfo(np.int32).max:
+        raise ValueError(
+            "svar2 range cache: slot0 * ploidy overflows int32"
+            f" (max cell id {max_cell})"
+        )
+    cell = (slot0 + sj).astype(np.int64) * ploidy + pj
+    return ri.astype(np.int32), cell.astype(np.int32), ent
 ```
 
 - [ ] **Step 4: Rewrite `_write_from_svar2`'s cache emission**
@@ -2436,7 +2557,29 @@ In `python/genvarloader/_dataset/_write.py`, add `from ._svar2_ranges import ENT
             acc_r: list[NDArray[np.int32]] = []
             acc_c: list[NDArray[np.int32]] = []
             acc_e: list[NDArray[np.void]] = []
+            prev_sample_start = -1
             for ch in stream.chunks:
+                # append_contig's counting-sort merge assumes chunk i's sample
+                # slots lie entirely below chunk i + 1's (see its docstring): the
+                # merged order is fixed by region alone only because of that.
+                # genoray's `_find_ranges_chunked` happens to yield ascending
+                # `sample_start` today, but that is a generator's behaviour in a
+                # separate package, asserted nowhere on either side -- an
+                # out-of-order chunk stream would corrupt the merge silently
+                # (every CSR invariant still holds; only cell_id order within a
+                # region is wrong), so pin it here where it's cheap to check.
+                # Strict `<=`, not `<`: an equal `sample_start` means two chunks
+                # claim the same sample slots, which duplicates cell ids within
+                # a region -- genoray's chunker can never produce this (its
+                # step is always >= 1, so sample_start strictly increases), so
+                # this costs nothing and closes the last loose edge.
+                if ch.sample_start <= prev_sample_start:
+                    raise ValueError(
+                        "svar2 range cache requires chunks in strictly ascending"
+                        f" sample_start order: got {ch.sample_start} after"
+                        f" {prev_sample_start}."
+                    )
+                prev_sample_start = ch.sample_start
                 # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
                 # region-major (regions, samples, ploidy, 2). transpose() is a
                 # view, and nonempty_entries relies on that -- see its comment on
@@ -2447,6 +2590,14 @@ In `python/genvarloader/_dataset/_write.py`, add `from ._svar2_ranges import ENT
                     slot0=ch.sample_start,
                     ploidy=P,
                 )
+                # `nonempty_entries` filters on width, not on genoray's raw start ==
+                # end insertion point (which is what a *dense* cell would carry at
+                # the same coordinate). An all-empty (region, sample, ploid) cell
+                # is therefore never written here, so a real dataset's
+                # `_SparseRanges.lookup` always returns (0, 0) for it, never
+                # genoray's insertion point -- unlike `_DenseRanges.lookup`, which
+                # would surface (x, x). That is the one place the two layouts are
+                # not byte-identical (see `_SparseRanges`'s docstring).
                 acc_r.append(r)
                 acc_c.append(cell)
                 acc_e.append(ent)
@@ -2501,9 +2652,65 @@ Expected: PASS.
 
 - [ ] **Step 6: Retarget the remaining three affected write tests**
 
-(a) `test_write_svar2_chunked_matches_unchunked` (`:361-368`) — the file list becomes the sparse files. This is the test that catches a chunk-merge ordering bug, so keep it byte-comparing:
+(a) `test_write_svar2_chunked_matches_unchunked` — the file list becomes the sparse files. The whole function follows, including the corrected comment: this is a black-box byte-identical round-trip over the on-disk table, NOT a targeted probe for one accumulator bug. (Deleting `cursor += cnt` does fail it, but it also breaks the S=1 single-chunk path the same way, so the name overpromises.) The targeted probes live in Step 6(d).
 
 ```python
+def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
+    """A tiny max_mem must force multiple chunks and produce identical output."""
+    from genoray import SparseVar2
+
+    bed = pl.DataFrame(
+        {"chrom": ["chr1", "chr1"], "chromStart": [0, 5], "chromEnd": [20, 30]}
+    )
+
+    calls: list[int] = []
+    real = SparseVar2._find_ranges_chunked
+
+    def spy(self, *args, **kwargs):
+        stream = real(self, *args, **kwargs)
+        calls.append(stream.samples_per_chunk)
+        return stream
+
+    big = tmp_path / "big.gvl"
+    gvl.write(
+        big,
+        bed,
+        variants=SparseVar2(svar2_store),
+        samples=None,
+        max_mem="4g",
+        overwrite=True,
+    )
+
+    SparseVar2._find_ranges_chunked = spy
+    try:
+        small = tmp_path / "small.gvl"
+        # 2 regions x ploidy 2 x 2 channels x 2 endpoints x 8 bytes = 128 bytes
+        # per sample; the chunker's own 2x safety margin needs 256 bytes for
+        # even one sample, so 256 is the smallest budget that both succeeds
+        # and forces one-sample-per-chunk (this store has S=2, so that's 2
+        # chunks).
+        gvl.write(
+            small,
+            bed,
+            variants=SparseVar2(svar2_store),
+            samples=None,
+            max_mem=256,
+            overwrite=True,
+        )
+    finally:
+        SparseVar2._find_ranges_chunked = real
+
+    assert calls and all(c == 1 for c in calls), (
+        f"expected one sample per chunk under a 256-byte budget, got {calls}"
+    )
+
+    # Byte-identical output between a single-chunk write and a one-sample-per-
+    # chunk write. This pins that `append_contig`'s running `cursor` ends up
+    # correct across chunk boundaries -- it is NOT a targeted probe for any one
+    # accumulator bug (e.g. deleting `cursor += cnt` also breaks the S=1
+    # no-second-chunk "big" path the same way, so it fails here too, just not
+    # for the reason the name might suggest); it is a black-box round-trip
+    # check over the whole on-disk table.
     for name in (
         "region_ptr.npy",
         "cell_id.npy",
@@ -2516,11 +2723,48 @@ Expected: PASS.
         a = (big / "genotypes" / "svar2_ranges" / name).read_bytes()
         b = (small / "genotypes" / "svar2_ranges" / name).read_bytes()
         assert a == b, name
+
+    # regions.npy (not input_regions.arrow, which holds the pre-extension bed
+    # verbatim) carries the write-time-extended chromEnd; columns are
+    # chrom_idx, chromStart, chromEnd, strand.
+    ra = np.load(big / "regions.npy")
+    rb = np.load(small / "regions.npy")
+    assert ra[:, 2].tolist() == rb[:, 2].tolist()
 ```
 
 (b) `test_write_svar2_sample_cols_permutes_unsorted_store` (`:519-531`) — replace the `meta["vk_snp_range"]["shape"]` memmap and its comparison with a reader lookup:
 
 ```python
+def test_write_svar2_sample_cols_permutes_unsorted_store(
+    svar2_store_unsorted: Path, tmp_path: Path
+):
+    """sample_cols must map sorted slot -> store column, not slot -> slot.
+
+    Guards the `list.index` -> hirola swap (#351): `HashTable.add` returns the rank
+    in its deduped key array, which equals the store position only because sample
+    names are unique. A store that is already sorted cannot tell the two apart, so
+    use a reversed one.
+    """
+    from genoray import SparseVar2
+
+    svar2 = SparseVar2(svar2_store_unsorted)
+    assert svar2.available_samples == ["S1", "S0"], "fixture lost its store order"
+
+    bed = pl.DataFrame(
+        {"chrom": ["chr1", "chr1"], "chromStart": [0, 5], "chromEnd": [20, 15]}
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
+    rd = out / "genotypes" / "svar2_ranges"
+    sorted_samples = sorted(svar2.available_samples)  # ["S0", "S1"]
+    sample_cols = np.load(rd / "sample_cols.npy")
+    assert (
+        sample_cols.tolist()
+        == [svar2.available_samples.index(s) for s in sorted_samples]
+        == [1, 0]
+    )
+
     # The cache must be laid out in the SORTED slot order, i.e. match a direct
     # _find_ranges over the sorted names -- the `samples=None` fast path must not
     # have fired and silently written the store's own order.
@@ -2529,7 +2773,7 @@ Expected: PASS.
     reader = _ranges_reader(rd)
     S, P = len(sorted_samples), svar2.ploidy
     r_q, si_q = np.unravel_index(np.arange(bed.height * S), (bed.height, S))
-    got_snp, _ = reader.lookup(r_q, si_q, P)
+    got_snp, got_indel = reader.lookup(r_q, si_q, P)
 
     d = svar2._find_ranges(
         "chr1",
@@ -2537,10 +2781,13 @@ Expected: PASS.
         bed["chromEnd"].to_numpy(),
         samples=sorted_samples,
     )
-    exp = np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
-    ne = exp[:, 1] > exp[:, 0]
-    np.testing.assert_array_equal(got_snp[ne], exp[ne])
-    np.testing.assert_array_equal(got_snp[~ne], 0)
+    exp_snp = np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
+    exp_indel = np.asarray(d["vk_indel_range"], np.int64).reshape(-1, 2)
+    # Presence is a property of the CELL (either channel non-empty), not of the
+    # SNP channel alone -- see the matching comment in test_write_svar2_emits_cache.
+    present = (exp_snp[:, 1] > exp_snp[:, 0]) | (exp_indel[:, 1] > exp_indel[:, 0])
+    np.testing.assert_array_equal(got_snp[present], exp_snp[present])
+    np.testing.assert_array_equal(got_snp[~present], 0)
 ```
 
 (c) Add a guard for the int32 `cell_id` bound. Append to `tests/dataset/test_write_svar2.py`:
@@ -2591,7 +2838,11 @@ def test_sparse_writer_rejects_global_region_indices(tmp_path):
     w.close()
 ```
 
-(d) Add the counting-sort equivalence test. This one goes in **`tests/unit/dataset/test_svar2_ranges.py`** (Task 3's file), not in `test_write_svar2.py`, because it reuses that file's `_random_dense` helper and needs no dataset fixture:
+(d) Add the counting-sort equivalence test AND the guards' own tests. These go in **`tests/unit/dataset/test_svar2_ranges.py`** (Task 3's file), not in `test_write_svar2.py`, because they reuse that file's `_random_dense` helper and need no dataset fixture.
+
+The counting-sort test compares the FULL `region_ptr` against an independently constructed expectation, not just its endpoints: an endpoints-only check (`len`, `ptr[0]`, `ptr[-1]`) is invariant under replacing `total.cumsum()` with `np.sort(total).cumsum()`, which shuffles every interior boundary.
+
+The four guard tests that follow it are not optional. Each of `append_contig`'s preconditions, when violated, writes a table that satisfies EVERY CSR invariant `_SparseRanges.__post_init__` checks and still reads back wrong -- descending chunks put `cell_id` on disk as `[1, 0]`; an unsorted `r = [1, 0, 1]` writes region 0's slot holding region 1's data with `region_ptr = [0, 1, 3]` looking valid; a mis-declared ploidy axis aliases cell id `2` across both `(sj=0, pj=2)` and `(sj=1, pj=0)`. A guard against silent corruption that no test exercises is one a later refactor deletes with nothing going red:
 
 ```python
 def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
@@ -2637,7 +2888,141 @@ def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
     np.testing.assert_array_equal(got_cell, (key[perm] % (S * P)).astype(np.int32))
     np.testing.assert_array_equal(got_ent, ent[perm])
     ptr = np.fromfile(tmp_path / "region_ptr.npy", np.int64)
-    assert len(ptr) == rc + 1 and ptr[0] == 0 and ptr[-1] == n
+    # Full-array compare, not just endpoints: an endpoints-only check (len,
+    # ptr[0], ptr[-1]) is invariant under, e.g., replacing `total.cumsum()`
+    # with `np.sort(total).cumsum()`, which silently shuffles every interior
+    # boundary while leaving n and ptr[0]/ptr[-1] unchanged.
+    exp_ptr = np.zeros(rc + 1, np.int64)
+    np.add.at(exp_ptr[1:], (key[perm] // (S * P)).astype(np.int64), 1)
+    exp_ptr = exp_ptr.cumsum()
+    np.testing.assert_array_equal(ptr, exp_ptr)
+
+
+def test_append_contig_ascending_check_survives_leading_and_middle_empty_regions(
+    tmp_path,
+):
+    """A leading empty region must not let the boundary mask hide a real violation.
+
+    The ascending-cell-id check masks by boundary *index* (`region_end[:-1] -
+    1`), not by a materialized per-entry region id, to stay O(rc) instead of
+    O(n). A leading empty region (region 0 here) makes that boundary's
+    cumulative count 0, so its mask index is ``0 - 1 == -1``. Without the
+    ``bounds >= 0`` filter, ``-1`` doesn't get dropped -- it indexes the
+    *last* element of `nonasc` instead of nowhere, silently clearing whatever
+    is there.
+
+    Constructed so that collision is diagnostic, not just theoretical: region
+    2 is also empty (a legitimate boundary, correctly masked once from each
+    of region 1's and region 2's cumulative counts landing on the same
+    value), and region 3 is fed cells ``5`` then ``3`` -- a genuine
+    within-region descending pair -- positioned as the array's *last*
+    comparison. A version without the ``bounds >= 0`` filter clears exactly
+    that index via the ``-1`` wraparound and would silently accept this
+    corruption instead of raising.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=8, ploidy=1)
+    ent = np.zeros(2, ENTRY_DTYPE)
+    # region 1 gets one entry (cell 0); region 3 gets cell 5, then -- from a
+    # second, later-processed chunk -- cell 3, a genuine descending pair.
+    with pytest.raises(ValueError, match="ascending sample order"):
+        w.append_contig(
+            [np.array([1, 3], np.int32), np.array([3], np.int32)],
+            [np.array([0, 5], np.int32), np.array([3], np.int32)],
+            [ent.copy(), ent[:1].copy()],
+            lo=0,
+            rc=4,
+        )
+    w.close()
+
+
+def test_append_contig_rejects_descending_chunk_order(tmp_path):
+    """Chunks fed in descending sample order must raise, not silently reorder.
+
+    append_contig's merge is only correct if chunk i's sample slots lie
+    entirely below chunk i + 1's (its docstring's load-bearing assumption).
+    Reproduced without that guard: two single-sample chunks for the same
+    region, fed slot 1 before slot 0 (cell ids 1 then 0), write
+    `cell_id.npy` as ``[1, 0]`` instead of ``[0, 1]`` -- descending within
+    the region, with region_ptr and every count still structurally valid,
+    so nothing downstream would catch it. `_SparseRanges.lookup` binary
+    searches assuming ascending cell_id within a region, so this would
+    silently return wrong-but-plausible lookups, not an error.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=1)
+    ent = np.zeros(1, ENTRY_DTYPE)
+    with pytest.raises(ValueError, match="ascending sample order"):
+        w.append_contig(
+            [np.array([0], np.int32), np.array([0], np.int32)],  # both -> region 0
+            [np.array([1], np.int32), np.array([0], np.int32)],  # cell 1, then cell 0
+            [ent, ent.copy()],
+            lo=0,
+            rc=1,
+        )
+    w.close()
+
+
+def test_append_contig_rejects_unsorted_regions_within_a_chunk(tmp_path):
+    """Non-decreasing `r` within one chunk is required, not just checked at read time.
+
+    `dst = cursor[r] + arange(len(r)) - start[r]` is a within-region rank only
+    when `r` is non-decreasing. Reproduced without this guard: `r = [1, 0, 1]`
+    with cells `[0, 1, 2]` and entries `10/20/30` (as `snp_start`) writes a
+    table claiming region 0 holds cell 0 -> 10 and region 1 holds cells
+    1, 2 -> 20, 30 -- the opposite of the input -- while region_ptr still
+    looks structurally valid (`[0, 1, 3]`).
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=3, ploidy=1)
+    ent = np.zeros(3, ENTRY_DTYPE)
+    ent["snp_start"] = [10, 20, 30]
+    with pytest.raises(ValueError, match="non-decreasing"):
+        w.append_contig(
+            [np.array([1, 0, 1], np.int32)],
+            [np.array([0, 1, 2], np.int32)],
+            [ent],
+            lo=0,
+            rc=2,
+        )
+    w.close()
+
+
+def test_nonempty_entries_rejects_snp_indel_shape_mismatch():
+    """snp and indel blocks must share a shape.
+
+    A caller that slices or transposes the two channels inconsistently (e.g.
+    a stale sample count on one channel) would otherwise index past one
+    array's bounds or silently pair up unrelated cells -- checked explicitly
+    since both are same-rank, same-dtype arrays that would not otherwise fail
+    fast in `snp[..., 1] > snp[..., 0]`-style broadcasting.
+    """
+    from genvarloader._dataset._svar2_ranges import nonempty_entries
+
+    snp = np.zeros((2, 3, 2, 2), np.int64)
+    indel = np.zeros((2, 4, 2, 2), np.int64)  # samples axis mismatch: 3 vs 4
+    with pytest.raises(ValueError, match="share a shape"):
+        nonempty_entries(snp, indel, slot0=0, ploidy=2)
+
+
+def test_nonempty_entries_rejects_ploidy_axis_mismatch():
+    """The ploidy axis must match the declared `ploidy`.
+
+    Reproduced without this guard: declaring `ploidy=2` against a block whose
+    axis-2 size is actually 3 makes `cell = (slot0 + sj) * ploidy + pj` alias
+    distinct `(sample, ploid)` pairs onto the same cell id -- e.g. cell id 2
+    is emitted by both `(sj=0, pj=2)` and `(sj=1, pj=0)` -- with no error at
+    all, silently merging two samples' variants into one cell.
+    """
+    from genvarloader._dataset._svar2_ranges import nonempty_entries
+
+    snp = np.zeros((2, 3, 3, 2), np.int64)  # real ploidy axis is 3
+    indel = np.zeros((2, 3, 3, 2), np.int64)
+    with pytest.raises(ValueError, match="ploidy"):
+        nonempty_entries(snp, indel, slot0=0, ploidy=2)
 ```
 
 - [ ] **Step 7: Add the test-only dense-layout writer**
@@ -2691,8 +3076,16 @@ def rewrite_as_dense(dataset: Path, out: Path) -> Path:
         (rd / name).unlink()
 
     meta = json.loads((rd / "svar2_meta.json").read_text())
-    for k in ("layout", "n_regions", "n_samples", "n_entries", "fill",
-              "region_ptr", "cell_id", "cell_vk"):
+    for k in (
+        "layout",
+        "n_regions",
+        "n_samples",
+        "n_entries",
+        "fill",
+        "region_ptr",
+        "cell_id",
+        "cell_vk",
+    ):
         meta.pop(k, None)
     meta["vk_snp_range"] = {"shape": [R, S, P, 2], "dtype": "<i8"}
     meta["vk_indel_range"] = {"shape": [R, S, P, 2], "dtype": "<i8"}
@@ -2702,36 +3095,118 @@ def rewrite_as_dense(dataset: Path, out: Path) -> Path:
 
 Note: the dense array this produces holds `(0, 0)` where the sparse cache had no entry, rather than genoray's insertion point. That is fine and is the point — the spec's core claim is that the two are interchangeable. Do not assert byte-equality against a genoray-written dense array anywhere.
 
-- [ ] **Step 8: Add the backward-compat read test**
+- [ ] **Step 8: Add the backward-compat read test and the zero-length pin**
 
-Append to `tests/dataset/test_write_svar2.py`:
+Append to `tests/dataset/test_write_svar2.py`. Note `Dataset.open` -- not `gvl.write` -- is what takes `reference=`: `with_seqs("haplotypes")` raises `ValueError: Cannot return RaggedSeqs: no reference genome was provided.` without one, so the `vcf_and_ref` fixture is required, not optional. The second test pins the sparse/dense zero-length divergence, and first confirms via `_find_ranges` that genoray's own dense insertion point at that cell is nonzero -- so it pins a real divergence rather than a coincidence:
 
 ```python
-def test_dense_layout_dataset_still_opens_and_reads(svar2_store: Path, tmp_path: Path):
-    """A pre-0.43.0 dataset must read identically under the new reader.
+def test_dense_layout_dataset_still_opens_and_reads(
+    svar2_store: Path, vcf_and_ref: tuple[Path, Path], tmp_path: Path
+):
+    """A pre-0.43.0 (dense-layout) dataset must still open and read end-to-end.
 
     #357 bumps the on-disk layout but NOT DATASET_FORMAT_VERSION (which matches
     on MAJOR only, so a bump would make new GVL refuse every old dataset). The
     dense reader is what keeps old datasets openable.
+
+    This is a round-trip smoke test, not a parity pin: this fixture's grid has
+    only one non-empty cell (see `svar2_store`), so it can't distinguish a
+    correct dense reader from one that always returns the same wrong answer.
+    `test_dense_ranges_matches_fancy_indexing` in
+    `tests/unit/dataset/test_svar2_ranges.py` is what actually pins
+    `_DenseRanges.lookup` against dense fancy-indexing over a randomized grid;
+    this test's job is only to confirm the dense layout still opens and reads
+    through the full `Dataset.open` -> `with_seqs` stack.
+
+    Deviation from the brief: `Dataset.open` (not `gvl.write`) is what takes
+    `reference=` -- `with_seqs("haplotypes")` raises `ValueError` without one,
+    which the brief's snippet omitted. Added `vcf_and_ref` for the FASTA path.
     """
     from genoray import SparseVar2
 
     from tests._oracles.svar2_dense_layout import rewrite_as_dense
 
+    _bcf, ref = vcf_and_ref
     bed = pl.DataFrame(
         {"chrom": ["chr1"] * 3, "chromStart": [0, 5, 25], "chromEnd": [20, 15, 40]}
     )
     sparse_ds = tmp_path / "sparse.gvl"
-    gvl.write(sparse_ds, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True)
+    gvl.write(
+        sparse_ds, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True
+    )
     dense_ds = rewrite_as_dense(sparse_ds, tmp_path / "dense.gvl")
 
-    a = gvl.Dataset.open(sparse_ds).with_seqs("haplotypes")
-    b = gvl.Dataset.open(dense_ds).with_seqs("haplotypes")
+    a = gvl.Dataset.open(sparse_ds, reference=ref).with_seqs("haplotypes")
+    b = gvl.Dataset.open(dense_ds, reference=ref).with_seqs("haplotypes")
     for r in range(a.n_regions):
         for s in range(a.n_samples):
             np.testing.assert_array_equal(
-                np.asarray(a[r, s].to_padded(b"N")), np.asarray(b[r, s].to_padded(b"N"))
+                np.asarray(a[r, s].to_padded(b"N")),
+                np.asarray(b[r, s].to_padded(b"N")),
             )
+
+
+def test_write_svar2_empty_cell_is_zero_not_insertion_point(
+    svar2_store: Path, tmp_path: Path
+):
+    """A genuinely empty cell reads back as (0, 0), not genoray's insertion point.
+
+    `nonempty_entries` filters on width, so an all-empty (region, sample, ploid)
+    cell is never written. `_SparseRanges.lookup` then returns (0, 0) for it --
+    the one place `_SparseRanges` and `_DenseRanges` diverge (see
+    `_SparseRanges`'s docstring and the comment in `_write_from_svar2`), since a
+    dense cell at the same coordinate would instead carry genoray's real
+    insertion point (x, x) for x > 0.
+
+    This fixture's grid (bed [0,20)/[5,15)/[25,40) over samples S0/S1/S2) has
+    exactly one non-empty cell: (region 0, S0, ploid 0). Region 0 / S1 / ploid 0
+    is empty in both channels, and genoray's own dense insertion point there is
+    (1, 1) -- confirmed directly via `_find_ranges` below -- so this test would
+    fail loudly (assert (1, 1) == (0, 0)) if the sparse writer ever stored
+    empty cells verbatim instead of collapsing them to (0, 0).
+    """
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    svar2 = SparseVar2(svar2_store)
+    sorted_samples = sorted(svar2.available_samples)
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 5, 25],
+            "chromEnd": [20, 15, 40],
+        }
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
+    # Confirm genoray's own dense insertion point for the empty cell is
+    # nonzero -- i.e. this is actually testing a divergence, not a coincidence.
+    d = svar2._find_ranges(
+        "chr1",
+        bed["chromStart"].to_numpy(),
+        bed["chromEnd"].to_numpy(),
+        samples=sorted_samples,
+    )
+    P = svar2.ploidy
+    s1 = sorted_samples.index("S1")
+    exp_snp = np.asarray(d["vk_snp_range"], np.int64).reshape(bed.height, -1, P, 2)
+    exp_indel = np.asarray(d["vk_indel_range"], np.int64).reshape(bed.height, -1, P, 2)
+    assert tuple(exp_snp[0, s1, 0]) != (0, 0), (
+        "fixture assumption broken: genoray's dense insertion point for the"
+        " empty (region 0, S1, ploid 0) cell is expected to be nonzero"
+    )
+    assert exp_indel[0, s1, 0, 1] == exp_indel[0, s1, 0, 0], (
+        "fixture assumption broken: expected the indel channel empty too"
+    )
+
+    reader = _ranges_reader(out / "genotypes" / "svar2_ranges")
+    got_snp, got_indel = reader.lookup(
+        np.array([0], np.int64), np.array([s1], np.int64), P
+    )
+    np.testing.assert_array_equal(got_snp[0], (0, 0))
+    np.testing.assert_array_equal(got_indel[0], (0, 0))
 ```
 
 - [ ] **Step 9: Run the whole svar2 write suite**
@@ -2748,7 +3223,7 @@ Expected: PASS except possibly `tests/dataset/test_concat_svar2.py`, which Task 
 
 ```bash
 pixi run -e dev ruff check python/ tests/ && pixi run -e dev ruff format python/ tests/ && pixi run -e dev typecheck
-git add python/genvarloader/_dataset/_svar2_ranges.py python/genvarloader/_dataset/_write.py tests/dataset/test_write_svar2.py tests/_oracles/svar2_dense_layout.py
+git add python/genvarloader/_dataset/_svar2_ranges.py python/genvarloader/_dataset/_write.py tests/dataset/test_write_svar2.py tests/unit/dataset/test_svar2_ranges.py tests/_oracles/svar2_dense_layout.py
 git commit -m "feat(svar2)!: write the range cache sparsely
 
 gvl.write now emits region_ptr/cell_id/cell_vk instead of two dense
