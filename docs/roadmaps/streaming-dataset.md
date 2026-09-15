@@ -621,11 +621,11 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
 - ✅ **Variants-output surface, Wave B PR-B3a (`var_fields`) — issue
   [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** `StreamingDataset
   .with_settings(var_fields=[...])` selects which extra per-variant fields ride along on
-  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)` but valid
-  **only** for `with_seqs("variants")` (raises `NotImplementedError` on any other output kind —
-  stricter than the written path, which also allows `var_fields` on `"variant-windows"`;
-  streaming's `"variant-windows"` output, wired as of PR-B4 Task 9, has no `var_fields`-
-  equivalent knob of its own yet). New `available_var_fields`,
+  `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`. Scoped
+  **only** to `with_seqs("variants")` at the time (raising `NotImplementedError` on any other
+  output kind — stricter than the written path, which also allows `var_fields` on
+  `"variant-windows"`); that Phase-1 restriction was lifted for `"variant-windows"` by
+  [#328](https://github.com/mcvickerlab/GenVarLoader/issues/328), see below. New `available_var_fields`,
   `servable_var_fields`, and `active_var_fields` properties. The requestable set is
   **backend-derived**: SVAR1 offers its numeric index columns (e.g. `AF`) + `ref`; VCF/BCF
   offers every numeric INFO field the live header declares + `ref`; PGEN offers only `ref`.
@@ -744,8 +744,33 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `docs/superpowers/plans/2026-07-22-streaming-variants-wave-b-b3-b4.md` (Tasks 8-10). Branch:
   `spec/streaming-waveb-b3b4`.
 
+- ✅ **`var_fields` ride-alongs for `with_seqs("variant-windows")` — issue
+  [#328](https://github.com/mcvickerlab/GenVarLoader/issues/328).** Split out of PR-B4's final review. PR-B3a's Phase-1 guard rejected
+  `var_fields` for every output kind but `"variants"`, which made streaming **stricter than the
+  written path** — `_flat_variants.py` builds `_FlatVariantWindows.fields` and
+  `_FlatVariants.fields` from ONE shared block, so the two kinds agree on the scalar field set
+  by construction. It also left PR-B4's Rust plumbing permanently dead: `gather_info_out` and
+  both engines' `next_batch_variant_windows` marshaling loops ran on every batch and always
+  iterated zero items — untested code on a parity-critical path. The guard now admits
+  `"variant-windows"`, and the Python packing actually consumes the `info_out` it was silently
+  dropping. Three details worth recording: (1) `ilen` is emitted **only when requested**, as on
+  the `"variants"` path — the engine always ships it, so an unconditional emit passes every
+  value comparison and diverges only in the field SET; (2) `alt`/`ref` are not added as scalar
+  columns in window mode, because there those names denote `VarWindowOpt`-selected token
+  buffers, matching the written path's own exclusion; (3) `ref_window`/`alt_window` and their
+  `_offsets` variants join `_RESERVED_VAR_FIELD_NAMES`, since the windows dict is marshaled by
+  the same silently-overwriting `PyDict::set_item` the set already guards — kept uniform across
+  output kinds rather than conditional on `with_seqs` state, which `available_var_fields` (a
+  construction-time property) does not have. **No Rust change was needed**: the engines already
+  gathered the columns. Parity gated against the written `FlatVariantWindows.fields` oracle —
+  `AF` (Float INFO, VCF) across all four `(ref, alt)` mode combinations, `dosage` (SVAR1's
+  CSR-position-indexed ride-along, a different gather from an INFO column), the `ilen`-omitted
+  field-set case on all three backends, and a reserved-name exclusion test. All four verified
+  non-vacuous against the pre-fix module. Docs updated: `docs/source/dataset.md`,
+  `docs/source/faq.md`, `skills/genvarloader/SKILL.md`.
+
 **Wave B (`with_seqs("variants")` + `"variant-windows"`, issue #304) is now fully complete**
-(PR-B0 through PR-B4, per the ✅ entries above).
+(PR-B0 through PR-B4, per the ✅ entries above, plus the #328 follow-up).
 
 ## Sequencing
 

@@ -1044,20 +1044,28 @@ def test_available_var_fields_includes_custom_format_field(streaming_case, tmp_p
 # token buffers (`ref_window`/`alt_window` or `ref`/`alt`, depending on `opt`).
 
 
-def _sentinel_for(dtype) -> int:
+def _sentinel_for(dtype) -> "int | float":
     """An out-of-band `.to_padded()` fill value for `dtype`, guaranteed not to
     collide with any real value this test's tiny fixtures can produce (token
-    ids, `start`/`ilen`). Padding only ever fills POSITIONS BEYOND each row's
-    real length, so as long as the exact same sentinel is used on both the
-    streaming and written side, padded positions compare sentinel-to-sentinel
-    regardless of what the value would mean as real data -- the dtype's own
-    extreme bound is always a safe, simple choice.
+    ids, `start`/`ilen`, AF/dosage ride-alongs). Padding only ever fills
+    POSITIONS BEYOND each row's real length, so as long as the exact same
+    sentinel is used on both the streaming and written side, padded positions
+    compare sentinel-to-sentinel regardless of what the value would mean as real
+    data -- the dtype's own extreme bound is always a safe, simple choice.
+
+    The float branch exists for issue #328's window-mode ride-alongs (`AF` is
+    Float, `dosage` is float32). `finfo(dt).max` rather than `inf` or `nan`:
+    `assert_array_equal` treats two `nan`s as equal, which would let a genuine
+    padded-vs-real divergence slip through, and an `inf` fill would still
+    compare equal to a real `inf` if a fixture ever produced one.
     """
     dt = np.dtype(dtype)
     if dt.kind == "u":
         return int(np.iinfo(dt).max)
     if dt.kind == "i":
         return int(np.iinfo(dt).min)
+    if dt.kind == "f":
+        return float(np.finfo(dt).max)
     raise TypeError(f"_sentinel_for: no sentinel defined for dtype {dt}")
 
 
@@ -1170,3 +1178,230 @@ def test_variant_windows_empty_group_matches_written(empty_region_case, backend)
         if np.any(np.asarray(data["start"].lengths) == 0):
             saw_empty = True
     assert saw_empty, "vacuous pass: fixture had no empty groups"
+
+
+# --- Issue #328: var_fields ride-alongs for with_seqs("variant-windows") -----
+#
+# The written path builds `_FlatVariantWindows.fields` and `_FlatVariants.fields`
+# from ONE shared block in `_flat_variants.py`, so the two output kinds agree on
+# the scalar field set by construction. Streaming did not: PR-B3a's Phase-1 guard
+# rejected `var_fields` for every kind but `"variants"`, which made streaming
+# STRICTER than written and left PR-B4's Rust `info_out` plumbing
+# (`gather_info_out`, both engines' marshaling loops) permanently iterating zero
+# items -- untested code on a parity-critical path.
+#
+# These tests are the gate on that plumbing actually carrying data. They reuse
+# `_assert_field_matches` (whole-batch pad-and-compare) for the same reason the
+# default-var_fields window parity test above does: `Ragged.__getitem__` cannot
+# resolve a single (batch, ploid) cell once two ragged axes are involved.
+
+
+@pytest.mark.parametrize("ref_mode", ["window", "allele"])
+@pytest.mark.parametrize("alt_mode", ["window", "allele"])
+def test_streaming_variant_windows_var_fields_matches_written(
+    af_vcf_case, ref_mode, alt_mode
+):
+    """A Float INFO column (`AF`) rides along byte-identically in WINDOW mode.
+
+    This is the test the dead `info_out` plumbing never had: with `var_fields`
+    guarded off in window mode, `gather_info_out` always produced an empty vec
+    and both engines' marshaling loops always iterated zero items. Here `AF` must
+    appear in the streamed dict, with the written oracle's dtype and values, for
+    every (ref, alt) mode combination -- the token buffers change shape across
+    those four, and the ride-along column must survive all of them unchanged.
+
+    VCF is the only backend with a written-path oracle for an INFO ride-along:
+    `gvl.write` persists exactly one numeric INFO column (`AF`) for a VCF source,
+    SVAR1's numeric INDEX columns are available-but-not-servable on streaming,
+    and PGEN has no INFO path at all. SVAR1's servable ride-along (`dosage`) gets
+    its own window-mode test below.
+    """
+    from genvarloader import VarWindowOpt
+
+    regions, reference, variants, written = af_vcf_case
+    fields = ["alt", "ilen", "start", "AF"]
+    opt = VarWindowOpt(
+        flank_length=4,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref=ref_mode,
+        alt=alt_mode,
+    )
+    ds = (
+        written.with_settings(var_fields=fields)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+    )
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=fields)
+        .with_seqs("variant-windows", opt)
+    )
+
+    total = 0
+    saw_af = False
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        expected = ds[np.asarray(r_idx), np.asarray(s_idx)].to_ragged()
+        assert set(data) == set(expected), (
+            f"field-set mismatch: streaming {sorted(data)} vs written "
+            f"{sorted(expected)}"
+        )
+        assert "AF" in data, (
+            "AF ride-along missing from the streamed variant-windows dict -- the "
+            "engine's info_out is still being dropped"
+        )
+        for name in data:
+            n = _assert_field_matches(
+                name, data[name], expected[name], check_dtype=True
+            )
+            if name == "start":
+                total += n
+        # Not a vacuous field: at least one real AF value must have crossed.
+        if np.asarray(data["AF"].data).size:
+            saw_af = True
+    assert total > 0, "vacuous pass: no variants compared"
+    assert saw_af, "vacuous pass: AF column carried no values"
+
+
+def test_streaming_variant_windows_dosage_matches_written(streaming_case, tmp_path):
+    """SVAR1 `dosage` -- a CSR-POSITION-indexed ride-along, not a variant-id one --
+    rides along byte-identically in window mode.
+
+    `dosage` and an INFO column reach the output through DIFFERENT gathers (see
+    `test_streaming_svar1_dosage_matches_written`), so covering only the VCF/`AF`
+    case above would leave the SVAR1 engine's own `gather_call_bufs` window-mode
+    call (`src/ffi/stream_engine.rs`) untested -- the other half of the dead code
+    issue #328 names.
+    """
+    from genvarloader import VarWindowOpt
+
+    regions, reference, svar, written = _build_svar1_dosage_case(
+        streaming_case, tmp_path
+    )
+    fields = ["alt", "ilen", "start", "dosage"]
+    opt = VarWindowOpt(
+        flank_length=4, token_alphabet=b"ACGT", unknown_token=4, ref="window"
+    )
+    ds = (
+        written.with_settings(var_fields=fields)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+    )
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=svar)
+        .with_settings(var_fields=fields)
+        .with_seqs("variant-windows", opt)
+    )
+
+    total = 0
+    saw_dosage = False
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        expected = ds[np.asarray(r_idx), np.asarray(s_idx)].to_ragged()
+        assert set(data) == set(expected), (
+            f"field-set mismatch: streaming {sorted(data)} vs written "
+            f"{sorted(expected)}"
+        )
+        assert "dosage" in data
+        for name in data:
+            n = _assert_field_matches(
+                name, data[name], expected[name], check_dtype=True
+            )
+            if name == "start":
+                total += n
+        if np.asarray(data["dosage"].data).size:
+            saw_dosage = True
+    assert total > 0, "vacuous pass: no variants compared"
+    assert saw_dosage, "vacuous pass: dosage column carried no values"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_variant_windows_omits_ilen_when_not_requested(streaming_case, backend):
+    """Dropping `ilen` from `var_fields` drops it from the windows dict too.
+
+    The engine ALWAYS ships `ilen` in its FFI dict regardless of what was asked
+    for, so the emitted field set has to be `var_fields`-driven rather than
+    presence-driven -- exactly as the `"variants"` branch already does it. This
+    is the direction that would silently diverge: an unconditional `ilen` still
+    passes every value comparison and only shows up as a field-SET mismatch.
+
+    Runs on all three backends because it needs no ride-along column, so it also
+    pins PGEN (which has no INFO path and therefore no other window-mode
+    `var_fields` coverage).
+    """
+    from genvarloader import VarWindowOpt
+
+    regions, reference, variants, written = streaming_case(backend)
+    fields = ["alt", "start"]
+    opt = VarWindowOpt(
+        flank_length=4, token_alphabet=b"ACGT", unknown_token=4, ref="window"
+    )
+    ds = (
+        written.with_settings(var_fields=fields)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+    )
+    sds = (
+        gvl.StreamingDataset(regions, reference=reference, variants=variants)
+        .with_settings(var_fields=fields)
+        .with_seqs("variant-windows", opt)
+    )
+
+    total = 0
+    for data, r_idx, s_idx in sds.to_iter(batch_size=4):
+        expected = ds[np.asarray(r_idx), np.asarray(s_idx)].to_ragged()
+        assert "ilen" not in data, (
+            "ilen was emitted although var_fields did not request it"
+        )
+        assert set(data) == set(expected), (
+            f"field-set mismatch: streaming {sorted(data)} vs written "
+            f"{sorted(expected)}"
+        )
+        for name in data:
+            check_dtype = not (backend == "pgen" and name == "start")
+            n = _assert_field_matches(
+                name, data[name], expected[name], check_dtype=check_dtype
+            )
+            if name == "start":
+                total += n
+    assert total > 0, "vacuous pass: no variants compared"
+
+
+def test_window_token_buffer_names_are_not_requestable(tmp_path):
+    """An INFO column named after a windows-dict token buffer is unavailable.
+
+    The windows dict is marshaled by `PyDict::set_item`, which silently
+    overwrites -- so a user column named `ref_window` would clobber a token
+    buffer with no error. `_RESERVED_VAR_FIELD_NAMES` excludes such names from
+    `available_var_fields` at the source (issue #328), so the request fails with
+    the ordinary "not available" `ValueError` rather than producing wrong data.
+
+    `DP` is declared alongside it as a control: the exclusion must be
+    name-specific, not a blanket refusal of the whole header.
+    """
+    ref = tmp_path / "ref.fa"
+    ref.write_text(">chr1\n" + "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT" + "\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = tmp_path / "in.vcf"
+    vcf.write_text(
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=chr1,length=40>\n"
+        '##INFO=<ID=ref_window,Number=1,Type=Float,Description="collides">\n'
+        '##INFO=<ID=DP,Number=1,Type=Integer,Description="control">\n'
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\n"
+        "chr1\t3\t.\tG\tA\t.\t.\tref_window=0.5;DP=7\tGT\t1|0\n"
+    )
+    vcf_gz = tmp_path / "in.vcf.gz"
+    subprocess.run(["bcftools", "view", "-Oz", "-o", str(vcf_gz), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", "-t", str(vcf_gz)], check=True)
+
+    regions = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
+    sds = gvl.StreamingDataset(regions, reference=str(ref), variants=str(vcf_gz))
+
+    assert "ref_window" not in sds.available_var_fields
+    assert "DP" in sds.available_var_fields, (
+        "the exclusion must be name-specific, not a blanket header refusal"
+    )
+    with pytest.raises(ValueError, match="ref_window"):
+        sds.with_settings(var_fields=["alt", "start", "ref_window"])

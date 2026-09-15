@@ -316,12 +316,15 @@ the `.svar2` backend does not yet support them (see the `.svar2` note below):
   exactly. Byte-identical to `Dataset.open(...).with_output_format("flat")
   .with_seqs("variant-windows", opt)[r, s].to_ragged()` at `jitter=0`, on the SVAR1, VCF, and
   PGEN backends (`.svar2` raises `NotImplementedError` immediately, at `with_seqs` config time).
-  **Not combinable with `var_fields`, `min_af`/`max_af`, `unphased_union`, or
-  `dummy_variant`** — `VarWindowOpt` has no `var_fields`-equivalent knob of its own for
-  streaming yet, and `StreamingDataset.with_settings` has no `unphased_union`/`dummy_variant`
-  parameter at all (unlike `Dataset.with_settings`, which supports both for
-  `"variant-windows"` output) — passing either raises a plain `TypeError` (unexpected keyword
-  argument), not a documented `NotImplementedError` guard.
+`var_fields` ride-alongs **are** supported here as of issue
+  [#328](https://github.com/mcvickerlab/GenVarLoader/issues/328) — `with_settings(var_fields=[...])` adds the same scalar columns it adds to
+  `"variants"` output (and drops `ilen` when it isn't requested), matching the written
+  `FlatVariantWindows.fields` exactly. **Still not combinable with `min_af`/`max_af`,
+  `unphased_union`, or `dummy_variant`**: AF filtering raises `NotImplementedError` for any
+  output kind but `"variants"`, and `StreamingDataset.with_settings` has no
+  `unphased_union`/`dummy_variant` parameter at all (unlike `Dataset.with_settings`, which
+  supports both for `"variant-windows"` output) — passing either raises a plain `TypeError`
+  (unexpected keyword argument), not a documented `NotImplementedError` guard.
 
 `"reference"` output remains **not yet implemented** for `StreamingDataset` — a later Wave B
 follow-up (issue [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)); `with_seqs`
@@ -331,13 +334,16 @@ raises `NotImplementedError` for `"reference"`.
 
 `StreamingDataset.with_settings(var_fields=[...])` (issue
 [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304)) selects which per-variant fields
-ride along on `with_seqs("variants")` output, mirroring `Dataset.with_settings(var_fields=...)`
-(see "Variant fields (`var_fields`)" above) but valid **only** for `with_seqs("variants")` —
-combining `var_fields` with any other output kind raises `NotImplementedError` (stricter than the
-written path, which also allows `var_fields` on `"variant-windows"` — streaming's
-`"variant-windows"` output (Wave B PR-B4, above) has no `var_fields`-equivalent knob of its own
-yet). The requestable set is **backend-derived**, not read from an on-disk
-schema, since there is no written artifact:
+ride along on the two **variant** output kinds — `with_seqs("variants")` and, as of issue
+[#328](https://github.com/mcvickerlab/GenVarLoader/issues/328), `with_seqs("variant-windows", opt)` — mirroring
+`Dataset.with_settings(var_fields=...)` (see "Variant fields (`var_fields`)" above). Combining
+`var_fields` with a haplotype or annotated output kind raises `NotImplementedError` (the written
+path silently ignores it there; streaming fails fast). In window mode the ride-alongs join the
+dict alongside `start`/`ilen` and the token buffers, exactly as they join
+`FlatVariantWindows.fields` on the written path; `alt`/`ref` are **not** added as scalar columns
+there, because in window mode those names denote token buffers selected by `VarWindowOpt`. The
+requestable set is **backend-derived**, not read from an on-disk schema, since there is no
+written artifact:
 
 | Backend | `available_var_fields` |
 |---|---|
@@ -351,8 +357,12 @@ built from one can't serve `dosage` either — streaming declines it with the sa
 (`"not available"`) a VCF/PGEN-backed `Dataset.with_settings(var_fields=[..., "dosage"])` raises.
 
 Field names that collide with the underlying FFI dict's fixed keys (`alt`, `alt_offsets`, `start`,
-`ilen`, `offsets`, `ref`, `ref_offsets`) are never advertised — a same-named source column simply
-cannot be requested via `var_fields`.
+`ilen`, `offsets`, `ref`, `ref_offsets`, and the window-mode token buffers `ref_window`,
+`ref_window_offsets`, `alt_window`, `alt_window_offsets`) are never advertised — a same-named
+source column simply cannot be requested via `var_fields`. The exclusion is uniform across output
+kinds rather than conditional on `with_seqs`/`VarWindowOpt`: `available_var_fields` is a
+construction-time property, and a field requestable only under some later configuration would be
+a worse API than one that is uniformly unavailable.
 
 `available_var_fields` is not always fully **servable**: `StreamingDataset.servable_var_fields`
 narrows it to fields the streaming engine can actually gather today. On SVAR1, a numeric INDEX
