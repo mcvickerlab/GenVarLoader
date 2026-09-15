@@ -734,4 +734,11 @@ def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
     np.testing.assert_array_equal(got_cell, (key[perm] % (S * P)).astype(np.int32))
     np.testing.assert_array_equal(got_ent, ent[perm])
     ptr = np.fromfile(tmp_path / "region_ptr.npy", np.int64)
-    assert len(ptr) == rc + 1 and ptr[0] == 0 and ptr[-1] == n
+    # Full-array compare, not just endpoints: an endpoints-only check (len,
+    # ptr[0], ptr[-1]) is invariant under, e.g., replacing `total.cumsum()`
+    # with `np.sort(total).cumsum()`, which silently shuffles every interior
+    # boundary while leaving n and ptr[0]/ptr[-1] unchanged.
+    exp_ptr = np.zeros(rc + 1, np.int64)
+    np.add.at(exp_ptr[1:], (key[perm] // (S * P)).astype(np.int64), 1)
+    exp_ptr = exp_ptr.cumsum()
+    np.testing.assert_array_equal(ptr, exp_ptr)

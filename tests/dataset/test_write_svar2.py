@@ -65,8 +65,13 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
 
     # ---- The layout oracle. Replays _find_ranges over the same regions and the
     # sorted sample list gvl.write wrote, then compares through _ranges_reader.
-    # This LOCKS the region-major (R, S, P) ordering: a scrambled or
-    # mis-transposed cache fails loudly here.
+    # This checks the (region, sample, ploid) VALUES the cache holds against an
+    # independent oracle for this fixture's grid. It does NOT by itself prove a
+    # mis-transposed axis order fails loudly here -- `_find_ranges`'s test
+    # fixture happens not to distinguish some axis permutations, so that
+    # property is enforced structurally instead, by `nonempty_entries`'s own
+    # shape check (raises on any transpose that changes rank or the ploidy
+    # axis) and pinned end-to-end by tests/dataset/test_svar2_fields_read.py.
     #
     # It compares WIDTHS and NON-EMPTY entries, not raw bytes: the sparse layout
     # deliberately discards an empty cell's insertion point, which is exactly the
@@ -111,13 +116,23 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
         r_q, si_q = np.unravel_index(np.arange(rc * S), (rc, S))
         got_snp, got_indel = reader.lookup(r_q + lo, si_q, P)
 
+        # Presence is a property of the CELL, not of one channel: a stored cell
+        # whose SNP range happens to be empty still carries the real snp_start
+        # with snp_len == 0, so lookup returns the true insertion point there,
+        # NOT (0, 0) -- only a genuinely absent cell (both channels empty)
+        # returns (0, 0). Masking per channel (`widths_snp > 0` alone) is wrong
+        # and would incorrectly demand (0, 0) at a present cell's empty channel;
+        # see _assert_parity in tests/unit/dataset/test_svar2_ranges.py, which
+        # this mirrors.
+        widths_snp = exp_snp[:, 1] - exp_snp[:, 0]
+        widths_indel = exp_indel[:, 1] - exp_indel[:, 0]
+        np.testing.assert_array_equal(got_snp[:, 1] - got_snp[:, 0], widths_snp)
+        np.testing.assert_array_equal(got_indel[:, 1] - got_indel[:, 0], widths_indel)
+        present = (widths_snp > 0) | (widths_indel > 0)
         for got, exp in ((got_snp, exp_snp), (got_indel, exp_indel)):
-            widths = exp[:, 1] - exp[:, 0]
-            np.testing.assert_array_equal(got[:, 1] - got[:, 0], widths)
-            ne = widths > 0
-            np.testing.assert_array_equal(got[ne], exp[ne])
-            np.testing.assert_array_equal(got[~ne], 0)
-            n_empty_seen += int((~ne).sum())
+            np.testing.assert_array_equal(got[present], exp[present])
+            np.testing.assert_array_equal(got[~present], 0)
+        n_empty_seen += int((~present).sum())
 
         np.testing.assert_array_equal(
             dense_snp[lo:hi], np.asarray(d["dense_snp_range"], np.int64)
@@ -342,6 +357,13 @@ def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
         f"expected one sample per chunk under a 256-byte budget, got {calls}"
     )
 
+    # Byte-identical output between a single-chunk write and a one-sample-per-
+    # chunk write. This pins that `append_contig`'s running `cursor` ends up
+    # correct across chunk boundaries -- it is NOT a targeted probe for any one
+    # accumulator bug (e.g. deleting `cursor += cnt` also breaks the S=1
+    # no-second-chunk "big" path the same way, so it fails here too, just not
+    # for the reason the name might suggest); it is a black-box round-trip
+    # check over the whole on-disk table.
     for name in (
         "region_ptr.npy",
         "cell_id.npy",
@@ -485,7 +507,7 @@ def test_write_svar2_sample_cols_permutes_unsorted_store(
     reader = _ranges_reader(rd)
     S, P = len(sorted_samples), svar2.ploidy
     r_q, si_q = np.unravel_index(np.arange(bed.height * S), (bed.height, S))
-    got_snp, _ = reader.lookup(r_q, si_q, P)
+    got_snp, got_indel = reader.lookup(r_q, si_q, P)
 
     d = svar2._find_ranges(
         "chr1",
@@ -493,10 +515,13 @@ def test_write_svar2_sample_cols_permutes_unsorted_store(
         bed["chromEnd"].to_numpy(),
         samples=sorted_samples,
     )
-    exp = np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
-    ne = exp[:, 1] > exp[:, 0]
-    np.testing.assert_array_equal(got_snp[ne], exp[ne])
-    np.testing.assert_array_equal(got_snp[~ne], 0)
+    exp_snp = np.asarray(d["vk_snp_range"], np.int64).reshape(-1, 2)
+    exp_indel = np.asarray(d["vk_indel_range"], np.int64).reshape(-1, 2)
+    # Presence is a property of the CELL (either channel non-empty), not of the
+    # SNP channel alone -- see the matching comment in test_write_svar2_emits_cache.
+    present = (exp_snp[:, 1] > exp_snp[:, 0]) | (exp_indel[:, 1] > exp_indel[:, 0])
+    np.testing.assert_array_equal(got_snp[present], exp_snp[present])
+    np.testing.assert_array_equal(got_snp[~present], 0)
 
 
 def test_write_svar2_duplicate_store_samples_raises(
@@ -633,11 +658,20 @@ def test_sparse_writer_rejects_global_region_indices(tmp_path):
 def test_dense_layout_dataset_still_opens_and_reads(
     svar2_store: Path, vcf_and_ref: tuple[Path, Path], tmp_path: Path
 ):
-    """A pre-0.43.0 dataset must read identically under the new reader.
+    """A pre-0.43.0 (dense-layout) dataset must still open and read end-to-end.
 
     #357 bumps the on-disk layout but NOT DATASET_FORMAT_VERSION (which matches
     on MAJOR only, so a bump would make new GVL refuse every old dataset). The
     dense reader is what keeps old datasets openable.
+
+    This is a round-trip smoke test, not a parity pin: this fixture's grid has
+    only one non-empty cell (see `svar2_store`), so it can't distinguish a
+    correct dense reader from one that always returns the same wrong answer.
+    `test_dense_ranges_matches_fancy_indexing` in
+    `tests/unit/dataset/test_svar2_ranges.py` is what actually pins
+    `_DenseRanges.lookup` against dense fancy-indexing over a randomized grid;
+    this test's job is only to confirm the dense layout still opens and reads
+    through the full `Dataset.open` -> `with_seqs` stack.
 
     Deviation from the brief: `Dataset.open` (not `gvl.write`) is what takes
     `reference=` -- `with_seqs("haplotypes")` raises `ValueError` without one,
@@ -665,3 +699,66 @@ def test_dense_layout_dataset_still_opens_and_reads(
                 np.asarray(a[r, s].to_padded(b"N")),
                 np.asarray(b[r, s].to_padded(b"N")),
             )
+
+
+def test_write_svar2_empty_cell_is_zero_not_insertion_point(
+    svar2_store: Path, tmp_path: Path
+):
+    """A genuinely empty cell reads back as (0, 0), not genoray's insertion point.
+
+    `nonempty_entries` filters on width, so an all-empty (region, sample, ploid)
+    cell is never written. `_SparseRanges.lookup` then returns (0, 0) for it --
+    the one place `_SparseRanges` and `_DenseRanges` diverge (see
+    `_SparseRanges`'s docstring and the comment in `_write_from_svar2`), since a
+    dense cell at the same coordinate would instead carry genoray's real
+    insertion point (x, x) for x > 0.
+
+    This fixture's grid (bed [0,20)/[5,15)/[25,40) over samples S0/S1/S2) has
+    exactly one non-empty cell: (region 0, S0, ploid 0). Region 0 / S1 / ploid 0
+    is empty in both channels, and genoray's own dense insertion point there is
+    (1, 1) -- confirmed directly via `_find_ranges` below -- so this test would
+    fail loudly (assert (1, 1) == (0, 0)) if the sparse writer ever stored
+    empty cells verbatim instead of collapsing them to (0, 0).
+    """
+    from genoray import SparseVar2
+
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
+
+    svar2 = SparseVar2(svar2_store)
+    sorted_samples = sorted(svar2.available_samples)
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1", "chr1"],
+            "chromStart": [0, 5, 25],
+            "chromEnd": [20, 15, 40],
+        }
+    )
+    out = tmp_path / "ds.gvl"
+    gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
+
+    # Confirm genoray's own dense insertion point for the empty cell is
+    # nonzero -- i.e. this is actually testing a divergence, not a coincidence.
+    d = svar2._find_ranges(
+        "chr1",
+        bed["chromStart"].to_numpy(),
+        bed["chromEnd"].to_numpy(),
+        samples=sorted_samples,
+    )
+    P = svar2.ploidy
+    s1 = sorted_samples.index("S1")
+    exp_snp = np.asarray(d["vk_snp_range"], np.int64).reshape(bed.height, -1, P, 2)
+    exp_indel = np.asarray(d["vk_indel_range"], np.int64).reshape(bed.height, -1, P, 2)
+    assert tuple(exp_snp[0, s1, 0]) != (0, 0), (
+        "fixture assumption broken: genoray's dense insertion point for the"
+        " empty (region 0, S1, ploid 0) cell is expected to be nonzero"
+    )
+    assert exp_indel[0, s1, 0, 1] == exp_indel[0, s1, 0, 0], (
+        "fixture assumption broken: expected the indel channel empty too"
+    )
+
+    reader = _ranges_reader(out / "genotypes" / "svar2_ranges")
+    got_snp, got_indel = reader.lookup(
+        np.array([0], np.int64), np.array([s1], np.int64), P
+    )
+    np.testing.assert_array_equal(got_snp[0], (0, 0))
+    np.testing.assert_array_equal(got_indel[0], (0, 0))
