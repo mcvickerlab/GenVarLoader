@@ -3251,8 +3251,8 @@ Closes #357"
 `_svar2_ranges_cache_bytes` cannot be evaluated before the ranges are known, and a worst-case bound would be actively misleading: `28 * R * S * P` genome-wide is 6.06 TB against the 6.93 TB dense cache this change eliminates, for a real answer of 27 GB. That is a 220x overstatement firing on essentially every cohort build.
 
 **Files:**
-- Modify: `python/genvarloader/_dataset/_write.py:1089-1137` and the preflight call site at `:1162`
-- Modify: `tests/dataset/test_write_svar2.py:427-457`
+- Modify: `python/genvarloader/_dataset/_write.py:1090-1138` and the preflight call site at `:1164`
+- Modify: `tests/dataset/test_write_svar2.py:413-443`
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
@@ -3260,7 +3260,7 @@ Closes #357"
 
 - [ ] **Step 1: Write the failing test**
 
-Replace `test_svar2_ranges_cache_bytes` and `test_svar2_preflight_warns_when_disk_is_short` (`:427-457`) with:
+Replace `test_svar2_ranges_cache_bytes` and `test_svar2_preflight_warns_when_disk_is_short` (`:413-443`) with:
 
 ```python
 def test_svar2_ranges_cache_bytes():
@@ -3336,6 +3336,19 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
     pass any free-space check and, without the latch, suppress the projection for
     the whole build. The helper is honest about having nothing to say; the caller
     is responsible for asking again.
+
+    Both guard clauses (`regions_done <= 0` and `n_entries <= 0`) short-circuit
+    before the `logger.info` fill-percentage line, so this pins BOTH by asserting
+    no log record at all -- not just no warning. A return value of 0 alone does
+    not distinguish the early return from `28 * (0 / regions_done) * n_regions`,
+    which is also 0 by construction; only "did it log" tells the two apart.
+
+    Three calls, each isolating a different clause: (0, 0) exercises both at
+    once, (0, 10) exercises `n_entries <= 0` with a positive `regions_done`, and
+    (1_000_000, 0) exercises `regions_done <= 0` with a positive `n_entries` --
+    without that clause the third call divides by zero, so it alone is what
+    makes `regions_done <= 0` load-bearing for this test (the first two calls
+    never reach it, since `n_entries <= 0` short-circuits first).
     """
     from collections import namedtuple
 
@@ -3345,17 +3358,21 @@ def test_svar2_fill_projection_zero_entries_projects_nothing(tmp_path, monkeypat
 
     Usage = namedtuple("Usage", "total used free")
     msgs: list[str] = []
-    sink = logger.add(lambda m: msgs.append(str(m)), level="WARNING")
+    sink = logger.add(lambda m: msgs.append(str(m)), level="INFO")
     try:
         monkeypatch.setattr(
             _write.shutil, "disk_usage", lambda p: Usage(total=1000, used=999, free=1)
         )
         assert _write._svar2_fill_projection(tmp_path, 0, 0, 100, 500, 2) == 0
+        assert not msgs, f"regions_done <= 0 must short-circuit before any log: {msgs}"
         assert _write._svar2_fill_projection(tmp_path, 0, 10, 100, 500, 2) == 0
+        assert not msgs, f"n_entries <= 0 must short-circuit before any log: {msgs}"
+        assert _write._svar2_fill_projection(tmp_path, 1_000_000, 0, 100, 500, 2) == 0
+        assert not msgs, (
+            f"regions_done <= 0 must short-circuit even with n_entries > 0: {msgs}"
+        )
     finally:
         logger.remove(sink)
-
-    assert not msgs, f"an empty projection must not warn about free space: {msgs}"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -3367,7 +3384,7 @@ Expected: FAIL — `AttributeError: module ... has no attribute '_svar2_fill_pro
 
 In `python/genvarloader/_dataset/_write.py`:
 
-(a) Update `_svar2_ranges_cache_bytes`'s docstring (`:1090-1103`) — the formula is unchanged, its meaning is not:
+(a) Update `_svar2_ranges_cache_bytes`'s docstring (`:1090-1105`) — the formula is unchanged, its meaning is not:
 
 ```python
 def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> int:
@@ -3393,7 +3410,7 @@ def _svar2_ranges_cache_bytes(n_regions: int, n_samples: int, ploidy: int) -> in
     return 2 * n_regions * n_samples * ploidy * 2 * 8
 ```
 
-(b) Replace `_svar2_preflight`'s body (`:1121-1137`) so it logs but does not warn, and add the projection function after it:
+(b) Replace `_svar2_preflight`'s body (`:1108-1138`) so it logs but does not warn, and add the projection function after it:
 
 ```python
 def _svar2_preflight(out_dir: Path, n_regions: int, n_samples: int, ploidy: int) -> int:
@@ -3433,8 +3450,8 @@ def _svar2_fill_projection(
 ) -> int:
     """Project the sparse cache size from realized fill, and check free space.
 
-    Warns rather than raising: free-space reporting is unreliable on some network
-    filesystems, and a false refusal would block a valid large build.
+    Warns rather than raising: free-space reporting is unreliable on some
+    network filesystems, and a false refusal would block a valid large build.
 
     Args:
         out_dir: Directory the cache is being written to.
