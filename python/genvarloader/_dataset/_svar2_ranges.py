@@ -944,6 +944,10 @@ def merge_region_blocks(
         span: ``n_samples * ploidy`` in the merged keyspace.
         ploidy: ``P``, identical across inputs (``_concat_validate`` enforces it).
     """
+    # Sized so one batch's raw keys+entries fit in CONCAT_CHUNK_BYTES; actual
+    # peak is ~4x that per batch, not that bound -- `np.concatenate`, the
+    # `np.argsort`, and the fancy-index reorder each hold their own copy of the
+    # keys/entries alongside the per-reader list before it is freed.
     rows = max(1, CONCAT_CHUNK_BYTES // ((ENTRY_DTYPE.itemsize + 8) * max(span, 1)))
     for r0 in range(0, n_regions, rows):
         r1 = min(r0 + rows, n_regions)
