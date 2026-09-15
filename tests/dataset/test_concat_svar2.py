@@ -148,9 +148,10 @@ def test_concat_svar2_regions_reads_like_single_write(
     `_region_starts`), not raw row position: `svar2_shards_by_regions`'s
     `[0, 2]` + `[1]` split deliberately does not reconstruct the original
     bed's row order when concatenated, so the merged dataset's public region
-    order genuinely differs from the single-shot write's -- confirmed here by
-    hand (merged: chromStart `[0, 25, 5]`; single-shot: `[0, 5, 25]`), and not
-    a `_concat_svar2_ranges` bug: the underlying `svar2_ranges` cache arrays
+    order genuinely differs from the single-shot write's. The two assertions
+    below pin exactly what each one is -- see their failure messages -- rather
+    than leaving the permutation unverified prose. This divergence is not a
+    `_concat_svar2_ranges` bug: the underlying `svar2_ranges` cache arrays
     (`vk_snp_range`/`vk_indel_range`/`dense_snp_range`/`dense_indel_range`)
     were verified byte-identical between the two datasets when compared at
     matching on-disk (sorted) rows.
@@ -172,6 +173,17 @@ def test_concat_svar2_regions_reads_like_single_write(
     row_f_by_start = {start: i for i, start in enumerate(_region_starts(full))}
     assert set(starts_m) == set(row_f_by_start), (
         "merged and single-shot datasets disagree on which regions exist"
+    )
+    assert starts_m == [0, 25, 5], (
+        "axis='regions' concat's public row order is each shard's own input-bed "
+        f"row order concatenated in shard order, not a re-sort of the union; got "
+        f"{starts_m}, expected [0, 25, 5] (shard 0's rows [0, 25] then shard 1's "
+        "row [5])"
+    )
+    assert _region_starts(full) == [0, 5, 25], (
+        "a single-shot write's public row order is the input bed's own row "
+        f"order; got {_region_starts(full)}, expected [0, 5, 25] (this fixture's "
+        "_BED is already sorted by chromStart)"
     )
 
     for rm, start in enumerate(starts_m):
