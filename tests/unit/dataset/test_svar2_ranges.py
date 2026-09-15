@@ -744,6 +744,45 @@ def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
     np.testing.assert_array_equal(ptr, exp_ptr)
 
 
+def test_append_contig_ascending_check_survives_leading_and_middle_empty_regions(
+    tmp_path,
+):
+    """A leading empty region must not let the boundary mask hide a real violation.
+
+    The ascending-cell-id check masks by boundary *index* (`region_end[:-1] -
+    1`), not by a materialized per-entry region id, to stay O(rc) instead of
+    O(n). A leading empty region (region 0 here) makes that boundary's
+    cumulative count 0, so its mask index is ``0 - 1 == -1``. Without the
+    ``bounds >= 0`` filter, ``-1`` doesn't get dropped -- it indexes the
+    *last* element of `nonasc` instead of nowhere, silently clearing whatever
+    is there.
+
+    Constructed so that collision is diagnostic, not just theoretical: region
+    2 is also empty (a legitimate boundary, correctly masked once from each
+    of region 1's and region 2's cumulative counts landing on the same
+    value), and region 3 is fed cells ``5`` then ``3`` -- a genuine
+    within-region descending pair -- positioned as the array's *last*
+    comparison. A version without the ``bounds >= 0`` filter clears exactly
+    that index via the ``-1`` wraparound and would silently accept this
+    corruption instead of raising.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=8, ploidy=1)
+    ent = np.zeros(2, ENTRY_DTYPE)
+    # region 1 gets one entry (cell 0); region 3 gets cell 5, then -- from a
+    # second, later-processed chunk -- cell 3, a genuine descending pair.
+    with pytest.raises(ValueError, match="ascending sample order"):
+        w.append_contig(
+            [np.array([1, 3], np.int32), np.array([3], np.int32)],
+            [np.array([0, 5], np.int32), np.array([3], np.int32)],
+            [ent.copy(), ent[:1].copy()],
+            lo=0,
+            rc=4,
+        )
+    w.close()
+
+
 def test_append_contig_rejects_descending_chunk_order(tmp_path):
     """Chunks fed in descending sample order must raise, not silently reorder.
 

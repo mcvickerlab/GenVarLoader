@@ -775,21 +775,38 @@ class _SparseWriter:
         # one within the same region -- every CSR invariant (region_ptr shape,
         # non-decreasing, counts) still holds, so nothing downstream would
         # catch it either. One O(N) pass, cheap against the 532 ms sort.
+        region_end = total.cumsum()
         if n:
-            region_id = np.repeat(np.arange(rc, dtype=np.int64), total)
-            bad = (region_id[1:] == region_id[:-1]) & (
-                out_cell[1:].astype(np.int64) <= out_cell[:-1].astype(np.int64)
-            )
-            if bad.any():
+            # Compare int32 directly: cell ids are non-negative and < 2**31, so
+            # this is exact -- an int64 cast would be pure allocation in the one
+            # write path whose whole point is memory (measured ~25 bytes/entry
+            # in an earlier version of this check, against out_cell's 4).
+            nonasc = out_cell[1:] <= out_cell[:-1]
+            # A drop is legitimate only at a region boundary: `region_end[:-1]`
+            # holds the `rc - 1` positions where the next region's data starts,
+            # so the pair straddling boundary `c` is nonasc[c - 1] (it compares
+            # out_cell[c] against out_cell[c - 1]). Masking by these rc - 1
+            # indices costs O(rc), not the O(n) a materialized per-entry region
+            # id would. `c == 0` (a leading empty region) would otherwise wrap
+            # to nonasc[-1], so drop negative indices; a repeated boundary from
+            # consecutive empty regions masks the same index twice, harmlessly.
+            # Trailing empty regions (or n == 1) produce a boundary at or past
+            # `c == n`, i.e. `bounds >= len(nonasc)` -- there's no pair after
+            # the last real entry to mask, so that's out of range too, not
+            # just the negative end.
+            bounds = region_end[:-1] - 1
+            bounds = bounds[(bounds >= 0) & (bounds < len(nonasc))]
+            nonasc[bounds] = False
+            if nonasc.any():
                 raise ValueError(
                     "svar2 range cache requires chunks in ascending sample order:"
                     " cell ids within a region must be strictly ascending, got a"
-                    f" non-ascending pair at output position {int(np.flatnonzero(bad)[0])}"
+                    f" non-ascending pair at output position {int(np.flatnonzero(nonasc)[0])}"
                 )
 
         out_cell.tofile(self._f_cell)
         out_ent.tofile(self._f_vk)
-        self._ptr.append(self.n_entries + total.cumsum())
+        self._ptr.append(self.n_entries + region_end)
         self.n_entries += n
         self._regions_done += rc
 
