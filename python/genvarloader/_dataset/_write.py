@@ -1239,9 +1239,14 @@ def _write_from_svar2(
                 # out-of-order chunk stream would corrupt the merge silently
                 # (every CSR invariant still holds; only cell_id order within a
                 # region is wrong), so pin it here where it's cheap to check.
-                if ch.sample_start < prev_sample_start:
+                # Strict `<=`, not `<`: an equal `sample_start` means two chunks
+                # claim the same sample slots, which duplicates cell ids within
+                # a region -- genoray's chunker can never produce this (its
+                # step is always >= 1, so sample_start strictly increases), so
+                # this costs nothing and closes the last loose edge.
+                if ch.sample_start <= prev_sample_start:
                     raise ValueError(
-                        "svar2 range cache requires chunks in ascending"
+                        "svar2 range cache requires chunks in strictly ascending"
                         f" sample_start order: got {ch.sample_start} after"
                         f" {prev_sample_start}."
                     )

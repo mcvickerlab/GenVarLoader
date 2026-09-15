@@ -742,3 +742,91 @@ def test_sparse_writer_counting_sort_matches_argsort(tmp_path):
     np.add.at(exp_ptr[1:], (key[perm] // (S * P)).astype(np.int64), 1)
     exp_ptr = exp_ptr.cumsum()
     np.testing.assert_array_equal(ptr, exp_ptr)
+
+
+def test_append_contig_rejects_descending_chunk_order(tmp_path):
+    """Chunks fed in descending sample order must raise, not silently reorder.
+
+    append_contig's merge is only correct if chunk i's sample slots lie
+    entirely below chunk i + 1's (its docstring's load-bearing assumption).
+    Reproduced without that guard: two single-sample chunks for the same
+    region, fed slot 1 before slot 0 (cell ids 1 then 0), write
+    `cell_id.npy` as ``[1, 0]`` instead of ``[0, 1]`` -- descending within
+    the region, with region_ptr and every count still structurally valid,
+    so nothing downstream would catch it. `_SparseRanges.lookup` binary
+    searches assuming ascending cell_id within a region, so this would
+    silently return wrong-but-plausible lookups, not an error.
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=2, ploidy=1)
+    ent = np.zeros(1, ENTRY_DTYPE)
+    with pytest.raises(ValueError, match="ascending sample order"):
+        w.append_contig(
+            [np.array([0], np.int32), np.array([0], np.int32)],  # both -> region 0
+            [np.array([1], np.int32), np.array([0], np.int32)],  # cell 1, then cell 0
+            [ent, ent.copy()],
+            lo=0,
+            rc=1,
+        )
+    w.close()
+
+
+def test_append_contig_rejects_unsorted_regions_within_a_chunk(tmp_path):
+    """Non-decreasing `r` within one chunk is required, not just checked at read time.
+
+    `dst = cursor[r] + arange(len(r)) - start[r]` is a within-region rank only
+    when `r` is non-decreasing. Reproduced without this guard: `r = [1, 0, 1]`
+    with cells `[0, 1, 2]` and entries `10/20/30` (as `snp_start`) writes a
+    table claiming region 0 holds cell 0 -> 10 and region 1 holds cells
+    1, 2 -> 20, 30 -- the opposite of the input -- while region_ptr still
+    looks structurally valid (`[0, 1, 3]`).
+    """
+    from genvarloader._dataset._svar2_ranges import ENTRY_DTYPE, _SparseWriter
+
+    w = _SparseWriter(tmp_path, n_samples=3, ploidy=1)
+    ent = np.zeros(3, ENTRY_DTYPE)
+    ent["snp_start"] = [10, 20, 30]
+    with pytest.raises(ValueError, match="non-decreasing"):
+        w.append_contig(
+            [np.array([1, 0, 1], np.int32)],
+            [np.array([0, 1, 2], np.int32)],
+            [ent],
+            lo=0,
+            rc=2,
+        )
+    w.close()
+
+
+def test_nonempty_entries_rejects_snp_indel_shape_mismatch():
+    """snp and indel blocks must share a shape.
+
+    A caller that slices or transposes the two channels inconsistently (e.g.
+    a stale sample count on one channel) would otherwise index past one
+    array's bounds or silently pair up unrelated cells -- checked explicitly
+    since both are same-rank, same-dtype arrays that would not otherwise fail
+    fast in `snp[..., 1] > snp[..., 0]`-style broadcasting.
+    """
+    from genvarloader._dataset._svar2_ranges import nonempty_entries
+
+    snp = np.zeros((2, 3, 2, 2), np.int64)
+    indel = np.zeros((2, 4, 2, 2), np.int64)  # samples axis mismatch: 3 vs 4
+    with pytest.raises(ValueError, match="share a shape"):
+        nonempty_entries(snp, indel, slot0=0, ploidy=2)
+
+
+def test_nonempty_entries_rejects_ploidy_axis_mismatch():
+    """The ploidy axis must match the declared `ploidy`.
+
+    Reproduced without this guard: declaring `ploidy=2` against a block whose
+    axis-2 size is actually 3 makes `cell = (slot0 + sj) * ploidy + pj` alias
+    distinct `(sample, ploid)` pairs onto the same cell id -- e.g. cell id 2
+    is emitted by both `(sj=0, pj=2)` and `(sj=1, pj=0)` -- with no error at
+    all, silently merging two samples' variants into one cell.
+    """
+    from genvarloader._dataset._svar2_ranges import nonempty_entries
+
+    snp = np.zeros((2, 3, 3, 2), np.int64)  # real ploidy axis is 3
+    indel = np.zeros((2, 3, 3, 2), np.int64)
+    with pytest.raises(ValueError, match="ploidy"):
+        nonempty_entries(snp, indel, slot0=0, ploidy=2)

@@ -720,8 +720,10 @@ class _SparseWriter:
 
         Raises:
             ValueError: If the caller's regions are not contiguous and in order,
-                if a region index is out of range for this contig, or if a
-                chunk's region indices are not non-decreasing.
+                if a region index is out of range for this contig, if a
+                chunk's region indices are not non-decreasing, or if the
+                chunks were not given in ascending sample order (detected as a
+                non-ascending cell id within a region's merged output).
         """
         self._check_lo(lo)
 
@@ -762,6 +764,28 @@ class _SparseWriter:
             out_cell[dst] = c
             out_ent[dst] = e
             cursor += cnt
+
+        # `cell` ascending within each region requires chunks to be processed in
+        # ascending sample order (docstring's "chunk i's sample slots lie
+        # entirely below chunk i + 1's" assumption) -- the per-chunk
+        # non-decreasing-`r` check above cannot catch a violation of THIS
+        # assumption: chunks fed in descending sample order each individually
+        # pass that check (each chunk's own `r` is still non-decreasing) while
+        # still scattering a later, smaller cell id after an earlier, larger
+        # one within the same region -- every CSR invariant (region_ptr shape,
+        # non-decreasing, counts) still holds, so nothing downstream would
+        # catch it either. One O(N) pass, cheap against the 532 ms sort.
+        if n:
+            region_id = np.repeat(np.arange(rc, dtype=np.int64), total)
+            bad = (region_id[1:] == region_id[:-1]) & (
+                out_cell[1:].astype(np.int64) <= out_cell[:-1].astype(np.int64)
+            )
+            if bad.any():
+                raise ValueError(
+                    "svar2 range cache requires chunks in ascending sample order:"
+                    " cell ids within a region must be strictly ascending, got a"
+                    f" non-ascending pair at output position {int(np.flatnonzero(bad)[0])}"
+                )
 
         out_cell.tofile(self._f_cell)
         out_ent.tofile(self._f_vk)
