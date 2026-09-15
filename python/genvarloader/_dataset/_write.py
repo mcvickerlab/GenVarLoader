@@ -1228,7 +1228,24 @@ def _write_from_svar2(
             acc_r: list[NDArray[np.int32]] = []
             acc_c: list[NDArray[np.int32]] = []
             acc_e: list[NDArray[np.void]] = []
+            prev_sample_start = -1
             for ch in stream.chunks:
+                # append_contig's counting-sort merge assumes chunk i's sample
+                # slots lie entirely below chunk i + 1's (see its docstring): the
+                # merged order is fixed by region alone only because of that.
+                # genoray's `_find_ranges_chunked` happens to yield ascending
+                # `sample_start` today, but that is a generator's behaviour in a
+                # separate package, asserted nowhere on either side -- an
+                # out-of-order chunk stream would corrupt the merge silently
+                # (every CSR invariant still holds; only cell_id order within a
+                # region is wrong), so pin it here where it's cheap to check.
+                if ch.sample_start < prev_sample_start:
+                    raise ValueError(
+                        "svar2 range cache requires chunks in ascending"
+                        f" sample_start order: got {ch.sample_start} after"
+                        f" {prev_sample_start}."
+                    )
+                prev_sample_start = ch.sample_start
                 # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
                 # region-major (regions, samples, ploidy, 2). transpose() is a
                 # view, and nonempty_entries relies on that -- see its comment on

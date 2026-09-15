@@ -659,14 +659,20 @@ class _SparseWriter:
 
         Raises:
             ValueError: If the caller's regions are not contiguous and in order,
-                if the keys are not strictly ascending, or if a key is out of
-                range for this block. Contiguity is the one load-bearing
-                invariant of the write path: blocks from ``bed.partition_by``
-                must partition ``[0, R)`` in the same order as the running
-                ``contig_offset``. Asserting it directly covers every way a
-                future bed could break it.
+                if the keys are not strictly ascending, if ``ent`` and ``key``
+                have different lengths, or if a key is out of range for this
+                block. Contiguity is the one load-bearing invariant of the
+                write path: blocks from ``bed.partition_by`` must partition
+                ``[0, R)`` in the same order as the running ``contig_offset``.
+                Asserting it directly covers every way a future bed could
+                break it.
         """
         self._check_lo(lo)
+        if len(ent) != len(key):
+            raise ValueError(
+                f"svar2 range cache: key and ent must be parallel, got"
+                f" {len(key)} keys and {len(ent)} entries"
+            )
         if len(key) and not np.all(np.diff(key) > 0):
             raise ValueError("svar2 range cache entries are not strictly ascending")
 
@@ -714,15 +720,26 @@ class _SparseWriter:
 
         Raises:
             ValueError: If the caller's regions are not contiguous and in order,
-                or if a region index is out of range for this contig.
+                if a region index is out of range for this contig, or if a
+                chunk's region indices are not non-decreasing.
         """
         self._check_lo(lo)
 
         # Pass 1: per-region totals. O(rc) of state -- never (n_chunks x rc),
         # which is what makes this safe at samples_per_chunk == 1 (535k chunks at
-        # cohort scale).
+        # cohort scale). Also validates that each chunk is region-grouped: the
+        # scatter below computes `dst = cursor[r] + arange(len(r)) - start[r]` as
+        # a within-region rank, which is only correct when `r` is non-decreasing.
+        # An unsorted `r` (e.g. [1, 0, 1]) silently scatters entries to the wrong
+        # region with every downstream CSR invariant still holding -- caught here
+        # instead, one O(N) bool pass against the counting sort's 532 ms.
         total = np.zeros(rc, np.int64)
         for r in regions:
+            if len(r) and np.any(np.diff(r) < 0):
+                raise ValueError(
+                    "svar2 range cache requires each chunk's region indices to"
+                    " be non-decreasing"
+                )
             total += self._counts(r, rc)
 
         n = int(total.sum())
@@ -794,7 +811,26 @@ def nonempty_entries(
         :meth:`_SparseWriter.append_contig` needs the region axis on its own to
         count, and ``cell`` is what lands on disk -- combining them would only be
         undone again.
+
+    Raises:
+        ValueError: If ``snp`` and ``indel`` don't share a shape, or their
+            ploidy axis doesn't match ``ploidy``. A caller that transposes the
+            wrong axes (e.g. swapping the region and sample axes) still
+            produces a same-rank ``(a, b, c, 2)`` array, so this is checked
+            explicitly rather than left to fail downstream -- without it, a
+            mis-transposed cache still writes a self-consistent CSR table
+            with no invariant violated, just region/sample-scrambled entries.
     """
+    if snp.shape != indel.shape:
+        raise ValueError(
+            "svar2 range cache: snp and indel blocks must share a shape, got"
+            f" {snp.shape} and {indel.shape}"
+        )
+    if snp.ndim != 4 or snp.shape[2] != ploidy:
+        raise ValueError(
+            f"svar2 range cache: expected (regions, samples, ploidy={ploidy}, 2)"
+            f" blocks, got shape {snp.shape}"
+        )
     ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
     # np.nonzero walks the LOGICAL shape in C order, so (r, slot, ploid) comes
     # out ascending even though `ne` is NOT C-contiguous: the `>` above inherits
@@ -808,4 +844,15 @@ def nonempty_entries(
     ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
     ent["indel_start"] = indel[ri, sj, pj, 0]
     ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
-    return ri.astype(np.int32), ((slot0 + sj) * ploidy + pj).astype(np.int32), ent
+    # Overflow guard local to this function: the sole production call site
+    # (`_write_from_svar2`) already guards `n_samples * ploidy < 2**31` by
+    # constructing `_SparseWriter` first, but `nonempty_entries` is a public
+    # module-level function callable independently of that guard.
+    max_cell = (int(slot0) + int(snp.shape[1]) - 1) * int(ploidy) + int(ploidy) - 1
+    if max_cell > np.iinfo(np.int32).max:
+        raise ValueError(
+            "svar2 range cache: slot0 * ploidy overflows int32"
+            f" (max cell id {max_cell})"
+        )
+    cell = (slot0 + sj).astype(np.int64) * ploidy + pj
+    return ri.astype(np.int32), cell.astype(np.int32), ent
