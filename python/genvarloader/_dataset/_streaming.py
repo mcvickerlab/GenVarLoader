@@ -19,6 +19,7 @@ import numpy as np
 import polars as pl
 import seqpro as sp
 from genoray._contigs import ContigNormalizer
+from loguru import logger
 from numpy.typing import NDArray
 from seqpro.rag import Ragged
 
@@ -4540,10 +4541,13 @@ class _VcfBackend:
         self._ref = Reference.from_path(reference_path, self._contigs)
 
         # Whether the source VCF header declares an INFO/AF field (Wave B
-        # PR-B2, #319) -- the SAME condition `gvl.write` uses (Task 5) to cache
-        # AF into the written `.gvi`, so streaming and written agree on AF
-        # availability.
-        self._has_cached_af = bool(vcf._declared_info_fields(("AF",)))
+        # PR-B2, #319) -- the first half of the SAME condition `gvl.write` uses
+        # (Task 5) to cache AF into the written `.gvi`, so streaming and written
+        # agree on AF availability. The second half -- that no record carries
+        # more than ONE AF value -- is a question about the data, not the
+        # header, so it is resolved lazily in `has_cached_af` (issue #324).
+        self._af_declared = bool(vcf._declared_info_fields(("AF",)))
+        self._af_unambiguous: bool | None = None
 
         # Wave B PR-B3a (#304): declared numeric INFO fields are requestable
         # `var_fields` -- non-numeric types (Flag/String/Character) are excluded,
@@ -4574,12 +4578,70 @@ class _VcfBackend:
 
     @property
     def has_cached_af(self) -> bool:
-        """Whether the source VCF header declares an INFO/AF field.
+        """Whether this VCF's ``INFO/AF`` is usable for AF filtering.
 
-        Wave B PR-B2, #319 -- the SAME condition gvl.write uses to cache AF into
-        the written .gvi, so streaming <-> written agree on AF availability.
+        Wave B PR-B2, #319 -- the SAME condition ``gvl.write`` uses to cache AF
+        into the written ``.gvi``, so streaming <-> written agree on AF
+        availability. That condition has two halves, and only the first is a
+        header question:
+
+        1. the header declares an ``INFO/AF`` field, and
+        2. no record carries MORE than one AF value.
+
+        Half 2 exists because a record with several AF values has an ambiguous
+        ALT->AF mapping -- e.g. a ``Number=.`` field left un-subset by a
+        ``bcftools norm -m`` split, so a bi-allelic ``G>A`` still lists
+        ``AF=0.333,0.667``. ``_attach_af_column`` (``_write.py``) declines to
+        cache AF in that case, and the written ``Dataset`` then raises the
+        AF-missing guard. Streaming checked only half 1 (issue #324), so it
+        reported AF available and read it live, with genoray's
+        ``resolve_scalar`` silently taking the FIRST value -- filtering where
+        written raised.
+
+        The check reads the DATA, not the declared ``Number=``: the written path
+        trusts the data, so trusting the header here would diverge again for a
+        ``Number=A``-declared-but-multi-valued file, and would wrongly decline a
+        single-valued ``Number=.`` file that written accepts.
+
+        Lazy because half 2 costs a one-time full-source INFO scan. Its only
+        consumer is the ``_af_filter`` guard in
+        :meth:`StreamingDataset._iter_batches`, so a stream that never
+        AF-filters never pays it, and one that does pays it once per backend.
         """
-        return self._has_cached_af
+        if not self._af_declared:
+            return False
+        if self._af_unambiguous is None:
+            self._af_unambiguous = self._af_is_unambiguous()
+        return self._af_unambiguous
+
+    def _af_is_unambiguous(self) -> bool:
+        """True iff no record carries more than one ``INFO/AF`` value.
+
+        Mirrors ``_attach_af_column``'s data check, including its use of
+        ``_fetch_info_cols`` rather than ``get_record_info(info=[...])`` -- the
+        latter silently drops the requested INFO column under polars' projection
+        pushdown (see that function's docstring, and genoray issue 139).
+        """
+        from genoray import VCF
+
+        af = VCF(self._vcf_path)._fetch_info_cols(["AF"]).collect()
+        if not isinstance(af.schema["AF"], pl.List):
+            # Already scalar (``Number=1``): one value per record by construction.
+            return True
+        # ``max()`` is None only for an empty frame (no records) -- nothing is
+        # ambiguous there, and AF filtering over it is a well-defined no-op.
+        max_len = af["AF"].list.len().max()
+        if max_len is not None and max_len > 1:
+            logger.warning(
+                "VCF INFO/AF carries multiple values for at least one record "
+                "(ambiguous ALT->AF mapping, e.g. an un-subset Number=. field after "
+                "`bcftools norm -m`); treating AF as unavailable. AF filtering on this "
+                "StreamingDataset will raise until the VCF is normalized so each record "
+                "has a single AF. This matches `gvl.write`, which declines to cache AF "
+                "for the same file."
+            )
+            return False
+        return True
 
     def _mixed_engine(self) -> object:
         """A zero-job engine kept solely for `window_realign_inputs` calls.

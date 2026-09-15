@@ -618,6 +618,24 @@ and `docs/roadmaps/streaming-optimization-baseline.md` (baseline + profile) for 
   `FieldSpec` staging and `_write_gvi_index`-adjacent AF-attach path already existed at the
   pinned rev. No new exported symbol (two new `with_settings` kwargs only) — no `api.md`
   change. Design: `docs/superpowers/specs/2026-07-21-streaming-variants-min-max-af-b2-design.md`.
+- ✅ **AF availability must be a DATA question, not a header one — issue
+  [#324](https://github.com/mcvickerlab/GenVarLoader/issues/324).** `_VcfBackend.has_cached_af` checked only that the header declared
+  `INFO/AF`, but `gvl.write`'s `_attach_af_column` also requires that no record carries
+  more than ONE AF value: a multi-value record (e.g. a `Number=.` field left un-subset by
+  a `bcftools norm -m` split, so a bi-allelic `G>A` still lists `AF=0.333,0.667`) has an
+  ambiguous ALT→AF mapping. Written declined and raised the AF-missing guard; streaming
+  reported AF available and filtered on genoray's `resolve_scalar`, which silently takes
+  the FIRST value — breaking streaming↔written byte-identity precisely where the written
+  path refuses to answer. Streaming now mirrors the same data check. Two deliberate
+  choices: (1) the criterion is the **data**, not the declared `Number=` — keying off
+  `Number=.` would diverge again for a `Number=A`-declared-but-multi-valued file and would
+  wrongly decline a single-valued `Number=.` file that written accepts (pinned by an
+  anti-over-correction test); (2) the check is **lazy**, since it costs a one-time
+  full-source INFO scan and its only consumer is the `_af_filter` guard — a stream that
+  never AF-filters never pays it. Regression tests:
+  `tests/dataset/test_streaming_af_multivalue.py` (3 cases), the streaming twin of
+  `test_write_af.py::test_write_multivalue_af_writes_without_af_column`; verified
+  non-vacuous (the guard test fails `DID NOT RAISE` against the pre-fix backend).
 - ✅ **Variants-output surface, Wave B PR-B3a (`var_fields`) — issue
   [#304](https://github.com/mcvickerlab/GenVarLoader/issues/304).** `StreamingDataset
   .with_settings(var_fields=[...])` selects which extra per-variant fields ride along on
