@@ -148,19 +148,35 @@ cells fit within a ≤256 GB allocation. The OOM-kills observed in the new pipel
 ```python
 import genvarloader as gvl
 from time import perf_counter
+
 # tracks-only: with_seqs(None) -> batch is a single track tensor (no RaggedVariants)
-ds = gvl.Dataset.open(DS_PATH, FASTA).with_seqs(None).with_tracks("read-depth","tracks").with_len(16384)
+ds = (
+    gvl.Dataset.open(DS_PATH, FASTA)
+    .with_seqs(None)
+    .with_tracks("read-depth", "tracks")
+    .with_len(16384)
+)
 for bs in (8, 32):
     dl = ds.to_dataloader(batch_size=bs, shuffle=False)
-    ny=nnuc=0; burn=5; nb=150; t0=perf_counter(); esz=4; done=False
+    ny = nnuc = 0
+    burn = 5
+    nb = 150
+    t0 = perf_counter()
+    esz = 4
+    done = False
     while not done:
         for b in dl:
-            trk = b[1] if isinstance(b,(list,tuple)) else b   # track tensor
-            if ny==burn: t0=perf_counter()
-            if ny>=burn: nnuc+=trk.numel(); esz=trk.element_size()
-            ny+=1
-            if ny>=nb: done=True; break
-    print(bs, nnuc/(perf_counter()-t0)/2**20*esz, "MiB/s")
+            trk = b[1] if isinstance(b, (list, tuple)) else b  # track tensor
+            if ny == burn:
+                t0 = perf_counter()
+            if ny >= burn:
+                nnuc += trk.numel()
+                esz = trk.element_size()
+            ny += 1
+            if ny >= nb:
+                done = True
+                break
+    print(bs, nnuc / (perf_counter() - t0) / 2**20 * esz, "MiB/s")
 ```
 Run with `NUMBA_NUM_THREADS=1` for the single-thread numbers. The 0.6.1 side uses the
 equivalent old API (`gvl.Dataset.open(ds, fasta, return_sequences=False)`; restored in
@@ -171,12 +187,18 @@ the *same* BED + variants + BigWig table to keep regions/samples identical.
 
 ```python
 import numpy as np, numba as nb
+
+
 @nb.njit(parallel=True)
 def f(x):
-    s=0.0
-    for i in nb.prange(x.size): s+=x[i]
+    s = 0.0
+    for i in nb.prange(x.size):
+        s += x[i]
     return s
-f(np.ones(1000)); print(nb.threading_layer())   # 'tbb' if installed, else 'omp'
+
+
+f(np.ones(1000))
+print(nb.threading_layer())  # 'tbb' if installed, else 'omp'
 ```
 0.6.1 pulled `tbb` transitively; 0.24.1 made it optional, so fresh installs report `omp`.
 

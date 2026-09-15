@@ -699,8 +699,8 @@ Expected: PASS (including Task 3's multi-contig test). These are the byte-identi
 In `python/genvarloader/_dataset/_svar2_haps.py`, add to the `from ..genvarloader import (...)` block (line ~43, keep alphabetical):
 
 ```python
-    reconstruct_haplotypes_from_svar2_readbound,
-    reconstruct_haplotypes_from_svar2_readbound_into,
+(reconstruct_haplotypes_from_svar2_readbound,)
+(reconstruct_haplotypes_from_svar2_readbound_into,)
 ```
 
 - [ ] **Step 3: Add the `_reconstruct_spliced` method**
@@ -708,94 +708,90 @@ In `python/genvarloader/_dataset/_svar2_haps.py`, add to the `from ..genvarloade
 Insert after `__call__` (before `haplotype_lengths_for_plan`, line ~396):
 
 ```python
-    def _reconstruct_spliced(
-        self,
-        idx: NDArray[np.integer],
-        regions: NDArray[np.int32],
-        splice_plan: "SplicePlan",
-        to_rc: "NDArray[np.bool_] | None",
-    ) -> _Flat[np.bytes_]:
-        """Reconstruct spliced haplotypes directly into spliced layout (no re-order).
+def _reconstruct_spliced(
+    self,
+    idx: NDArray[np.integer],
+    regions: NDArray[np.int32],
+    splice_plan: "SplicePlan",
+    to_rc: "NDArray[np.bool_] | None",
+) -> _Flat[np.bytes_]:
+    """Reconstruct spliced haplotypes directly into spliced layout (no re-order).
 
-        The splice plan already knows every element's final address, so instead of
-        reconstructing in region order and permuting the OUTPUT BYTES afterwards, we
-        permute the per-row METADATA (O(rows)) and let each contig group's kernel call
-        scatter straight into the shared buffer — the same trick SVAR1's fused spliced
-        entry uses (``reconstruct_haplotypes_spliced_fused``).
+    The splice plan already knows every element's final address, so instead of
+    reconstructing in region order and permuting the OUTPUT BYTES afterwards, we
+    permute the per-row METADATA (O(rows)) and let each contig group's kernel call
+    scatter straight into the shared buffer — the same trick SVAR1's fused spliced
+    entry uses (``reconstruct_haplotypes_spliced_fused``).
 
-        The plan's k-index (``k = query * E + e`` with ``E = ploidy`` for haplotypes,
-        see ``_splice.build_splice_plan``) is exactly the kernel's row index
-        ``k = q * P + p``, so ``plan.permutation`` indexes hap rows with no translation.
+    The plan's k-index (``k = query * E + e`` with ``E = ploidy`` for haplotypes,
+    see ``_splice.build_splice_plan``) is exactly the kernel's row index
+    ``k = q * P + p``, so ``plan.permutation`` indexes hap rows with no translation.
 
-        Callers reach this only via ``_getitem_spliced``, which asserts ``jitter == 0``
-        and ``deterministic`` — hence zero shifts.
-        """
-        assert self.store is not None
-        regions = np.asarray(regions, np.int32)
-        P = int(self.genotypes.shape[-2])
-        b = len(idx)
-        R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
-        r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
+    Callers reach this only via ``_getitem_spliced``, which asserts ``jitter == 0``
+    and ``deterministic`` — hence zero shifts.
+    """
+    assert self.store is not None
+    regions = np.asarray(regions, np.int32)
+    P = int(self.genotypes.shape[-2])
+    b = len(idx)
+    R_all, S_all = int(self.genotypes.shape[0]), int(self.genotypes.shape[1])
+    r_q, si_q = np.unravel_index(np.asarray(idx), (R_all, S_all))
 
-        perm = np.asarray(splice_plan.permutation, np.intp)
-        off = np.asarray(splice_plan.permuted_out_offsets, np.int64)
-        n_work = b * P
-        if len(perm) != n_work:
-            raise AssertionError(
-                f"splice permutation length {len(perm)} != n_queries*ploidy {n_work}"
-            )
+    perm = np.asarray(splice_plan.permutation, np.intp)
+    off = np.asarray(splice_plan.permuted_out_offsets, np.int64)
+    n_work = b * P
+    if len(perm) != n_work:
+        raise AssertionError(
+            f"splice permutation length {len(perm)} != n_queries*ploidy {n_work}"
+        )
 
-        # dest_rank[k] = position of kernel row k within the permuted (spliced) layout.
-        dest_rank = np.empty(n_work, np.intp)
-        dest_rank[perm] = np.arange(n_work, dtype=np.intp)
-        bounds_all = np.empty((n_work, 2), np.int64)
-        bounds_all[:, 0] = off[dest_rank]
-        bounds_all[:, 1] = off[dest_rank + 1]
+    # dest_rank[k] = position of kernel row k within the permuted (spliced) layout.
+    dest_rank = np.empty(n_work, np.intp)
+    dest_rank[perm] = np.arange(n_work, dtype=np.intp)
+    bounds_all = np.empty((n_work, 2), np.int64)
+    bounds_all[:, 0] = off[dest_rank]
+    bounds_all[:, 1] = off[dest_rank + 1]
 
-        # to_rc arrives in permuted order (_getitem_spliced builds it as
-        # to_rc_flat[plan.permutation]); the kernel wants it per row.
-        rc_all: NDArray[np.bool_] | None = None
-        if to_rc is not None and bool(np.asarray(to_rc).any()):
-            rc_all = np.empty(n_work, np.bool_)
-            rc_all[perm] = np.asarray(to_rc, np.bool_)
+    # to_rc arrives in permuted order (_getitem_spliced builds it as
+    # to_rc_flat[plan.permutation]); the kernel wants it per row.
+    rc_all: NDArray[np.bool_] | None = None
+    if to_rc is not None and bool(np.asarray(to_rc).any()):
+        rc_all = np.empty(n_work, np.bool_)
+        rc_all[perm] = np.asarray(to_rc, np.bool_)
 
-        out = np.empty(int(off[-1]), np.uint8)
-        shifts_all = np.zeros((b, P), np.int32)
-        p_range = np.arange(P, dtype=np.intp)
+    out = np.empty(int(off[-1]), np.uint8)
+    shifts_all = np.zeros((b, P), np.int32)
+    p_range = np.arange(P, dtype=np.intp)
 
-        for ci, qsel in self._contig_groups(regions[:, 0].astype(np.int64)):
-            gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-            ref_, ref_offsets = self._ref_for_contig(ci)
-            rows = (qsel[:, None] * P + p_range).ravel()
-            g_bounds = np.ascontiguousarray(bounds_all[rows], np.int64)
-            g_rc = (
-                None
-                if rc_all is None
-                else np.ascontiguousarray(rc_all[rows], np.bool_)
-            )
-            g_total = int((g_bounds[:, 1] - g_bounds[:, 0]).sum())
-            reconstruct_haplotypes_from_svar2_readbound_into(
-                out,
-                g_bounds,
-                self.store,
-                self.ds_contigs[ci],
-                gi[0],
-                gi[1],
-                gi[2],
-                gi[3],
-                gi[4],
-                gi[5],
-                gi[6],
-                np.ascontiguousarray(shifts_all[qsel], np.int32),
-                ref_,
-                ref_offsets,
-                np.uint8(self.reference.pad_char),  # type: ignore[union-attr]  # reference guaranteed for haplotypes
-                g_rc,
-                should_parallelize(g_total),
-                self.filter == "exonic",
-            )
+    for ci, qsel in self._contig_groups(regions[:, 0].astype(np.int64)):
+        gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+        ref_, ref_offsets = self._ref_for_contig(ci)
+        rows = (qsel[:, None] * P + p_range).ravel()
+        g_bounds = np.ascontiguousarray(bounds_all[rows], np.int64)
+        g_rc = None if rc_all is None else np.ascontiguousarray(rc_all[rows], np.bool_)
+        g_total = int((g_bounds[:, 1] - g_bounds[:, 0]).sum())
+        reconstruct_haplotypes_from_svar2_readbound_into(
+            out,
+            g_bounds,
+            self.store,
+            self.ds_contigs[ci],
+            gi[0],
+            gi[1],
+            gi[2],
+            gi[3],
+            gi[4],
+            gi[5],
+            gi[6],
+            np.ascontiguousarray(shifts_all[qsel], np.int32),
+            ref_,
+            ref_offsets,
+            np.uint8(self.reference.pad_char),  # type: ignore[union-attr]  # reference guaranteed for haplotypes
+            g_rc,
+            should_parallelize(g_total),
+            self.filter == "exonic",
+        )
 
-        return _Flat.from_offsets(out, (len(perm), None), off).view("S1")
+    return _Flat.from_offsets(out, (len(perm), None), off).view("S1")
 ```
 
 - [ ] **Step 4: Route `__call__` to it**

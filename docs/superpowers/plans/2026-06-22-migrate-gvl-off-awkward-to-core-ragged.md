@@ -63,12 +63,15 @@ import numpy as np
 import seqpro.rag as r
 from seqpro.rag import Ragged
 
+
 def test_to_ak_multi_leading_axis_record():
     # (b=2, p=2, ~v) record with an opaque-string and a numeric field
     var_off = np.array([0, 2, 3, 3, 4], dtype=np.int64)  # 4 groups
     char_off = np.array([0, 2, 3, 6, 7], dtype=np.int64)
     chars = np.frombuffer(b"ACGTTTX", dtype="S1").copy()
-    alt = Ragged.from_offsets(chars, (2, 2, None, None), [var_off, char_off]).to_strings()
+    alt = Ragged.from_offsets(
+        chars, (2, 2, None, None), [var_off, char_off]
+    ).to_strings()
     start = Ragged.from_offsets(np.arange(4, dtype=np.int32), (2, 2, None), alt.offsets)
     rv = Ragged.from_fields({"alt": alt, "start": start})
     got = rv.to_ak()  # must not raise
@@ -115,27 +118,34 @@ import numpy as np
 import seqpro.rag as r
 from seqpro.rag import Ragged
 
+
 def _record(var_off, char_off, chars):
-    alt = Ragged.from_offsets(chars, (len(var_off) - 1, None, None),
-                              [var_off, char_off]).to_strings()
-    start = Ragged.from_offsets(np.arange(int(var_off[-1]), dtype=np.int32),
-                                (len(var_off) - 1, None), alt.offsets)
+    alt = Ragged.from_offsets(
+        chars, (len(var_off) - 1, None, None), [var_off, char_off]
+    ).to_strings()
+    start = Ragged.from_offsets(
+        np.arange(int(var_off[-1]), dtype=np.int32),
+        (len(var_off) - 1, None),
+        alt.offsets,
+    )
     return Ragged.from_fields({"alt": alt, "start": start}), alt
+
 
 def test_to_packed_opaque_string_under_axis():
     var_off = np.array([0, 2, 3], dtype=np.int64)
     char_off = np.array([0, 2, 3, 6], dtype=np.int64)
     rv, alt = _record(var_off, char_off, np.frombuffer(b"ACGTTT", "S1").copy())
-    sl = alt[np.array([1, 0])]            # produces (2,N) gather offsets
-    packed = sl.to_packed()              # must not raise
+    sl = alt[np.array([1, 0])]  # produces (2,N) gather offsets
+    packed = sl.to_packed()  # must not raise
     assert packed.to_ak().to_list() == [[b"TTT"], [b"AC", b"G"]]
+
 
 def test_to_packed_record_with_string_field():
     var_off = np.array([0, 2, 3], dtype=np.int64)
     char_off = np.array([0, 2, 3, 6], dtype=np.int64)
     rv, _ = _record(var_off, char_off, np.frombuffer(b"ACGTTT", "S1").copy())
     sl = rv[np.array([1, 0])]
-    packed = sl.to_packed()             # must not raise
+    packed = sl.to_packed()  # must not raise
     assert packed["alt"].to_ak().to_list() == [[b"TTT"], [b"AC", b"G"]]
     assert packed["start"].to_ak().to_list() == [[2], [0, 1]]
 ```
@@ -182,21 +192,28 @@ import numpy as np
 import seqpro.rag as r
 from seqpro.rag import Ragged
 
+
 def test_concatenate_ragged_axis_prepend_regular():
     # prepend a size-1 pad per group (the prepend_pad_itv use case)
-    base = Ragged.from_offsets(np.array([10, 11, 12], np.int32), (2, None),
-                               np.array([0, 2, 3], np.int64))   # [[10,11],[12]]
-    pad = Ragged.from_offsets(np.array([-1, -1], np.int32), (2, None),
-                              np.array([0, 1, 2], np.int64))      # [[-1],[-1]]
+    base = Ragged.from_offsets(
+        np.array([10, 11, 12], np.int32), (2, None), np.array([0, 2, 3], np.int64)
+    )  # [[10,11],[12]]
+    pad = Ragged.from_offsets(
+        np.array([-1, -1], np.int32), (2, None), np.array([0, 1, 2], np.int64)
+    )  # [[-1],[-1]]
     out = r.concatenate([pad, base], axis=-1)
     assert out.to_ak().to_list() == [[-1, 10, 11], [-1, 12]]
 
+
 def test_concatenate_matches_awkward_oracle():
     import awkward as ak
-    a = Ragged.from_offsets(np.arange(5, dtype=np.float32), (2, None),
-                            np.array([0, 3, 5], np.int64))
-    b = Ragged.from_offsets(np.arange(5, 9, dtype=np.float32), (2, None),
-                            np.array([0, 1, 4], np.int64))
+
+    a = Ragged.from_offsets(
+        np.arange(5, dtype=np.float32), (2, None), np.array([0, 3, 5], np.int64)
+    )
+    b = Ragged.from_offsets(
+        np.arange(5, 9, dtype=np.float32), (2, None), np.array([0, 1, 4], np.int64)
+    )
     got = r.concatenate([a, b], axis=-1).to_ak().to_list()
     exp = ak.concatenate([a.to_ak(), b.to_ak()], axis=-1).to_list()
     assert got == exp
@@ -218,6 +235,7 @@ In `src/ragged.rs`, add a kernel (mirroring `_ragged_pack`/`_ragged_nested_pack`
 def concatenate(rags, axis):
     """Concatenate Rageds along the ragged axis. See SKILL.md."""
     from ._core import Ragged
+
     if not rags:
         raise ValueError("concatenate requires at least one Ragged")
     rags = [r if isinstance(r, Ragged) else Ragged(r) for r in rags]
@@ -225,11 +243,15 @@ def concatenate(rags, axis):
     ref = rags[0]
     ax = axis % len(ref.shape)
     if ax != ref.rag_dim:
-        raise ValueError(f"concatenate only supports the ragged axis ({ref.rag_dim}), got {axis}")
+        raise ValueError(
+            f"concatenate only supports the ragged axis ({ref.rag_dim}), got {axis}"
+        )
     packed = [x.to_packed() for x in rags]
     from seqpro.seqpro import _ragged_concat  # rust
-    data, offsets = _ragged_concat([p.data for p in packed],
-                                   [np.ascontiguousarray(p.offsets) for p in packed])
+
+    data, offsets = _ragged_concat(
+        [p.data for p in packed], [np.ascontiguousarray(p.offsets) for p in packed]
+    )
     return Ragged.from_offsets(data, ref.shape, offsets)
 ```
 
@@ -289,11 +311,13 @@ import seqpro.rag as r
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
 
+
 def _char_alt(var_off, char_off, chars):
     return Ragged.from_offsets(chars, (2, 1, None, None), [var_off, char_off])
 
+
 def test_construct_from_char_and_numeric_fields():
-    var_off = np.array([0, 2, 3], np.int64)            # b=2,p=1 -> 2 groups
+    var_off = np.array([0, 2, 3], np.int64)  # b=2,p=1 -> 2 groups
     char_off = np.array([0, 2, 3, 6], np.int64)
     alt = _char_alt(var_off, char_off, np.frombuffer(b"ACGTTT", "S1").copy())
     start = Ragged.from_offsets(np.array([10, 20, 30], np.int32), (2, 1, None), var_off)
@@ -306,13 +330,17 @@ def test_construct_from_char_and_numeric_fields():
     # ilen derived from alt/ref char lengths
     assert rv.ilen.to_ak().to_list() == [[[0, 0]], [[0]]]
 
+
 def test_getitem_returns_raggedvariants():
     var_off = np.array([0, 2, 3], np.int64)
     char_off = np.array([0, 2, 3, 6], np.int64)
     alt = _char_alt(var_off, char_off, np.frombuffer(b"ACGTTT", "S1").copy())
     start = Ragged.from_offsets(np.array([10, 20, 30], np.int32), (2, 1, None), var_off)
-    rv = RaggedVariants(alt=alt, start=start, ilen=Ragged.from_offsets(
-        np.zeros(3, np.int32), (2, 1, None), var_off))
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off),
+    )
     sub = rv[0]
     assert isinstance(sub, RaggedVariants)
     assert sub.alt.to_ak().to_list() == [[b"AC", b"G"]]
@@ -337,10 +365,12 @@ from genoray._types import DOSAGE_TYPE, POS_TYPE
 
 _ALLELE_FIELDS = ("alt", "ref")
 
+
 def _as_opaque(rag: Ragged) -> Ragged:
     """Normalize an allele field to opaque-string (b,p,~v). Accepts an S1 char
     (b,p,~v,~l) Ragged (collapse via to_strings) or an already-opaque Ragged."""
     return rag.to_strings() if not getattr(rag, "is_string", False) else rag
+
 
 def _share_offsets(rag: Ragged, offsets) -> Ragged:
     """Rebuild `rag` onto the given (identical) variant-level offsets object so all
@@ -349,9 +379,11 @@ def _share_offsets(rag: Ragged, offsets) -> Ragged:
         return rag
     if getattr(rag, "is_string", False):
         chars = rag.to_chars()
-        return Ragged.from_offsets(chars.data, rag.shape, offsets,
-                                   str_offsets=chars.offsets).to_strings()
+        return Ragged.from_offsets(
+            chars.data, rag.shape, offsets, str_offsets=chars.offsets
+        ).to_strings()
     return Ragged.from_offsets(rag.data, rag.shape, offsets)
+
 
 class RaggedVariants:
     """Variable-length variants as a single record Ragged with shape
@@ -416,14 +448,20 @@ class RaggedVariants:
             return self._rag["ilen"]
         alt_len = self._alt_chars("alt").lengths
         ref_len = self._alt_chars("ref").lengths
-        return Ragged.from_offsets((alt_len - ref_len).astype(np.int32),
-                                   self._rag["start"].shape, self._rag["start"].offsets)
+        return Ragged.from_offsets(
+            (alt_len - ref_len).astype(np.int32),
+            self._rag["start"].shape,
+            self._rag["start"].offsets,
+        )
 
     @property
     def end(self):
         if "ref" in self.fields:
-            reflen = Ragged.from_offsets(self._alt_chars("ref").lengths.astype(POS_TYPE),
-                                         self.start.shape, self.start.offsets)
+            reflen = Ragged.from_offsets(
+                self._alt_chars("ref").lengths.astype(POS_TYPE),
+                self.start.shape,
+                self.start.offsets,
+            )
             return self.start + reflen
         ilen = self.ilen
         return self.start - np.clip(ilen, None, 0) + 1
@@ -435,8 +473,11 @@ class RaggedVariants:
         return RaggedVariants.from_record(self._rag[idx])
 
     def reshape(self, shape) -> "RaggedVariants":
-        return RaggedVariants.from_record(self._rag.reshape(*shape)
-                                          if isinstance(shape, tuple) else self._rag.reshape(shape))
+        return RaggedVariants.from_record(
+            self._rag.reshape(*shape)
+            if isinstance(shape, tuple)
+            else self._rag.reshape(shape)
+        )
 
     def squeeze(self, axis=None, **kw) -> "RaggedVariants":
         return self[0]
@@ -475,14 +516,19 @@ import numpy as np
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
 
+
 def test_to_packed_after_slice_roundtrips():
-    var_off = np.array([0, 2, 3, 4], np.int64)   # 3 groups (b=3,p=1)
+    var_off = np.array([0, 2, 3, 4], np.int64)  # 3 groups (b=3,p=1)
     char_off = np.array([0, 2, 3, 6, 7], np.int64)
-    alt = Ragged.from_offsets(np.frombuffer(b"ACGTTTX", "S1").copy(),
-                              (3, 1, None, None), [var_off, char_off])
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTTX", "S1").copy(), (3, 1, None, None), [var_off, char_off]
+    )
     start = Ragged.from_offsets(np.array([1, 2, 3, 4], np.int32), (3, 1, None), var_off)
-    rv = RaggedVariants(alt=alt, start=start,
-                        ilen=Ragged.from_offsets(np.zeros(4, np.int32), (3, 1, None), var_off))
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(4, np.int32), (3, 1, None), var_off),
+    )
     sub = rv[np.array([2, 0])].to_packed()
     assert sub.alt.to_ak().to_list() == [[b"X"], [b"AC", b"G"]]
     assert sub.start.to_ak().to_list() == [[[4]], [[1, 2]]]
@@ -535,16 +581,21 @@ import numpy as np
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
 
+
 def test_rc_all_complements_and_reverses():
-    var_off = np.array([0, 1, 2], np.int64)   # 2 groups, 1 variant each
+    var_off = np.array([0, 1, 2], np.int64)  # 2 groups, 1 variant each
     char_off = np.array([0, 2, 5], np.int64)
-    alt = Ragged.from_offsets(np.frombuffer(b"ACGTA", "S1").copy(),
-                              (2, 1, None, None), [var_off, char_off])
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTA", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
     start = Ragged.from_offsets(np.array([0, 0], np.int32), (2, 1, None), var_off)
-    rv = RaggedVariants(alt=alt, start=start,
-                        ilen=Ragged.from_offsets(np.zeros(2, np.int32), (2, 1, None), var_off))
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(2, np.int32), (2, 1, None), var_off),
+    )
     out = rv.rc_(np.array([True, True]))
-    assert out.alt.to_ak().to_list() == [[b"GT"], [b"TAC"]]   # AC->GT, GTA->TAC
+    assert out.alt.to_ak().to_list() == [[b"GT"], [b"TAC"]]  # AC->GT, GTA->TAC
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -611,14 +662,19 @@ import numpy as np
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
 
+
 def test_pad_fills_empty_groups_only():
     var_off = np.array([0, 2, 2, 3], np.int64)  # group1 empty
     char_off = np.array([0, 2, 3, 6], np.int64)
-    alt = Ragged.from_offsets(np.frombuffer(b"ACGTTT", "S1").copy(),
-                              (3, 1, None, None), [var_off, char_off])
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (3, 1, None, None), [var_off, char_off]
+    )
     start = Ragged.from_offsets(np.array([1, 2, 3], np.int32), (3, 1, None), var_off)
-    rv = RaggedVariants(alt=alt, start=start,
-                        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (3, 1, None), var_off))
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (3, 1, None), var_off),
+    )
     out = rv.pad()
     assert out.alt.to_ak().to_list() == [[b"AC", b"G"], [b"N"], [b"TTT"]]
     assert out.start.to_ak().to_list() == [[[1, 2]], [[-1]], [[3]]]
@@ -681,17 +737,22 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 import numpy as np, pytest
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
+
 torch = pytest.importorskip("torch")
+
 
 def test_to_nested_tensor_batch_shapes():
     var_off = np.array([0, 2, 3], np.int64)
     char_off = np.array([0, 2, 3, 6], np.int64)
-    alt = Ragged.from_offsets(np.frombuffer(b"ACGTTT", "S1").copy(),
-                              (2, 1, None, None), [var_off, char_off])
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
     start = Ragged.from_offsets(np.array([1, 2, 3], np.int32), (2, 1, None), var_off)
-    rv = RaggedVariants(alt=alt, start=start,
-                        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off)
-                        ).to_packed()
+    rv = RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off),
+    ).to_packed()
     out = rv.to_nested_tensor_batch()
     assert out["max_n_vars"] == 2
     assert out["max_alt_len"] == 3
@@ -766,20 +827,29 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 import numpy as np
 from seqpro.rag import Ragged
 from genvarloader import RaggedVariants
-from genvarloader._shm_layout import pack_to_shm, unpack_from_shm  # use the actual public entry points
+from genvarloader._shm_layout import (
+    pack_to_shm,
+    unpack_from_shm,
+)  # use the actual public entry points
+
 
 def _rv():
     var_off = np.array([0, 2, 3], np.int64)
     char_off = np.array([0, 2, 3, 6], np.int64)
-    alt = Ragged.from_offsets(np.frombuffer(b"ACGTTT", "S1").copy(),
-                              (2, 1, None, None), [var_off, char_off])
+    alt = Ragged.from_offsets(
+        np.frombuffer(b"ACGTTT", "S1").copy(), (2, 1, None, None), [var_off, char_off]
+    )
     start = Ragged.from_offsets(np.array([1, 2, 3], np.int32), (2, 1, None), var_off)
-    return RaggedVariants(alt=alt, start=start,
-                          ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off))
+    return RaggedVariants(
+        alt=alt,
+        start=start,
+        ilen=Ragged.from_offsets(np.zeros(3, np.int32), (2, 1, None), var_off),
+    )
+
 
 def test_rag_variants_shm_roundtrip():
     rv = _rv()
-    rt = unpack_from_shm(pack_to_shm(rv))   # adapt to real API surface
+    rt = unpack_from_shm(pack_to_shm(rv))  # adapt to real API surface
     assert rt.alt.to_ak().to_list() == rv.alt.to_ak().to_list()
     assert rt.start.to_ak().to_list() == rv.start.to_ak().to_list()
 ```
@@ -830,13 +900,20 @@ import numpy as np
 from seqpro.rag import Ragged
 from genvarloader._ragged import RaggedIntervals
 
+
 def test_prepend_pad_itv_prepends_one_per_group():
     def mk(vals, off):
-        return Ragged.from_offsets(np.array(vals, np.int32), (1, 1, None),
-                                   np.array(off, np.int64))
-    ri = RaggedIntervals(mk([0, 5], [0, 2]), mk([5, 9], [0, 2]),
-                         Ragged.from_offsets(np.array([1.0, 2.0], np.float32),
-                                             (1, 1, None), np.array([0, 2], np.int64)))
+        return Ragged.from_offsets(
+            np.array(vals, np.int32), (1, 1, None), np.array(off, np.int64)
+        )
+
+    ri = RaggedIntervals(
+        mk([0, 5], [0, 2]),
+        mk([5, 9], [0, 2]),
+        Ragged.from_offsets(
+            np.array([1.0, 2.0], np.float32), (1, 1, None), np.array([0, 2], np.int64)
+        ),
+    )
     out = ri.prepend_pad_itv(start=-1, end=-1, value=0.0)
     assert out.starts.to_ak().to_list() == [[[-1, 0, 5]]]
     assert out.values.to_ak().to_list() == [[[0.0, 1.0, 2.0]]]
@@ -854,13 +931,19 @@ Replace the three `ak.concatenate([pad, self.X.to_ak()], axis=2)` blocks. Build 
 ```python
 # python/genvarloader/_ragged.py  (prepend_pad_itv)
 import seqpro.rag as spr
+
 b, t, *_ = self.values.shape
 n = b * t
+
+
 def _pad(value, dtype):
-    return Ragged.from_offsets(np.full(n, value, dtype), (b, t, None),
-                               np.arange(n + 1, dtype=np.int64))
+    return Ragged.from_offsets(
+        np.full(n, value, dtype), (b, t, None), np.arange(n + 1, dtype=np.int64)
+    )
+
+
 new_starts = spr.concatenate([_pad(start, np.int32), self.starts], axis=-1)
-new_ends   = spr.concatenate([_pad(end,   np.int32), self.ends],   axis=-1)
+new_ends = spr.concatenate([_pad(end, np.int32), self.ends], axis=-1)
 new_values = spr.concatenate([_pad(value, np.float32), self.values], axis=-1)
 return RaggedIntervals(new_starts, new_ends, new_values)
 ```
@@ -962,6 +1045,7 @@ Confirm consumers (the genotype gather that builds `alt`/`ref`). Each will now r
 # python/genvarloader/_dataset/_haps.py
 from seqpro.rag import Ragged
 
+
 def _build_allele_layout(data, allele_offsets, group_offsets, ploidy) -> Ragged:
     """Flat allele bytes + two offset levels -> (b, p, ~v, ~l) S1 Ragged."""
     buf = np.ascontiguousarray(data)
@@ -970,7 +1054,8 @@ def _build_allele_layout(data, allele_offsets, group_offsets, ploidy) -> Ragged:
     n_groups = group_offsets.size - 1
     b = n_groups // ploidy
     return Ragged.from_offsets(
-        buf.view("S1"), (b, ploidy, None, None),
+        buf.view("S1"),
+        (b, ploidy, None, None),
         [np.asarray(group_offsets, np.int64), np.asarray(allele_offsets, np.int64)],
     )
 ```
@@ -1022,9 +1107,10 @@ Both build a `(…, ~v, ~l)` allele awkward layout from flat buffers. Replace wi
 ```python
 # python/genvarloader/_dataset/_flat_variants.py  (_FlatVariants.to_ragged)
 from ._rag_variants import RaggedVariants
+
 kw = {name: flat.to_ragged() for name, flat in self.fields.items()}  # numeric -> Ragged
 # build alt/ref allele Rageds via _build_allele_layout from the flat allele buffers
-return RaggedVariants(**kw)   # alt/ref passed as Ragged char arrays
+return RaggedVariants(**kw)  # alt/ref passed as Ragged char arrays
 ```
 
 Adapt to the file's actual field layout (allele fields vs numeric `_Flat`s). The constructor accepts char-`Ragged` alt/ref and numeric `Ragged` fields.

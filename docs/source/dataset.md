@@ -130,7 +130,11 @@ Set `realign_tracks=False` in two cases:
 ds = gvl.get_dummy_dataset()
 
 # Reference-coordinate float tracks alongside haplotypes
-ds_ref_tracks = ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_settings(realign_tracks=False)
+ds_ref_tracks = (
+    ds.with_seqs("haplotypes")
+    .with_tracks(["read-depth"])
+    .with_settings(realign_tracks=False)
+)
 
 # Interval tracks alongside haplotypes (realign_tracks=False is required)
 ds_itvs = (
@@ -164,7 +168,9 @@ ds = gvl.Dataset.open("ds.gvl", reference="ref.fa", var_fields=["AF"])
 rv = ds.with_seqs("variants")[0, 0]
 rv["AF"]  # per-variant AF values, aligned with rv.alt/.start/.ilen
 
-win = ds.with_seqs("variant-windows", gvl.VarWindowOpt(...)).with_output_format("flat")[0, 0]
+win = ds.with_seqs("variant-windows", gvl.VarWindowOpt(...)).with_output_format("flat")[
+    0, 0
+]
 win.fields["AF"]  # same field, alongside win.fields["start"]/["ilen"]
 ```
 

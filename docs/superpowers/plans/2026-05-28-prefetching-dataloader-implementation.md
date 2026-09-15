@@ -63,6 +63,7 @@ The helper returns the exact total bytes of REF or ALT allele payloads for the
 variants selected by each (region, sample, ploid) entry, computed in O(|V|) by
 differencing the RaggedAlleles offsets array (no payload read).
 """
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -85,6 +86,7 @@ def test_allele_bytes_sum_matches_materialized_alt(ds):
     ragv = haps._get_variants(idx)
     # ragv.alt has shape (b, p, ~v, ~length). Sum length across innermost two ragged dims.
     import awkward as ak
+
     expected = ak.sum(ak.num(ragv.alt, axis=-1), axis=-1).to_numpy().ravel()
     np.testing.assert_array_equal(got, expected)
 
@@ -98,6 +100,7 @@ def test_allele_bytes_sum_ref(ds):
     got = haps._allele_bytes_sum(idx, "ref")
     ragv = haps._get_variants(idx)
     import awkward as ak
+
     expected = ak.sum(ak.num(ragv.ref, axis=-1), axis=-1).to_numpy().ravel()
     np.testing.assert_array_equal(got, expected)
 ```
@@ -128,6 +131,7 @@ def _allele_bytes_sum(
     r, s = np.unravel_index(idx, self.genotypes.shape[:2])  # type: ignore[no-matching-overload]
     genos = self.genotypes[r, s]
     import awkward as ak
+
     genos = ak.to_packed(genos)
     v_idxs = genos.data
 
@@ -186,6 +190,7 @@ Create `tests/unit/dataset/test_output_bytes_per_instance.py`:
 Invariant: Dataset._output_bytes_per_instance(r, s) == nbytes of the actual
 dataset[r, s] output, summed over arrays returned for that instance.
 """
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -201,6 +206,7 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     # Each ndarray/Ragged contributes its data nbytes per instance. For Ragged,
     # we sum the per-instance data nbytes via the offsets.
     from seqpro.rag import Ragged
+
     n_inst = len(r_arr)
     totals = np.zeros(n_inst, dtype=np.int64)
     for arr in out:
@@ -279,7 +285,9 @@ def _output_bytes_per_instance(
     ds_idx, squeeze, out_reshape = self._idxer.parse_idx(idx)
     r_idx, s_idx = np.unravel_index(ds_idx, self.full_shape)
 
-    seq_kind = self.sequence_type  # "reference" | "haplotypes" | "annotated" | "variants" | None
+    seq_kind = (
+        self.sequence_type
+    )  # "reference" | "haplotypes" | "annotated" | "variants" | None
     total = np.zeros(len(r_idx), dtype=np.int64)
 
     # --- seqs payload ---
@@ -392,12 +400,12 @@ Expected: FAIL with `NotImplementedError: annotated branch added in Task 3`.
 In `_output_bytes_per_instance`, replace `raise NotImplementedError("annotated branch added in Task 3")` with:
 
 ```python
-            # annotated: add ref_coords (int32, length=hap_len_sum) and var_idxs (int32, length=n_variants_sum)
-            n_vars = self.n_variants(regions, samples)
-            n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
-            n_vars_sum = n_vars_flat.sum(-1)
-            total += hap_len_sum * 4  # ref_coords int32
-            total += n_vars_sum * 4   # var_idxs int32
+# annotated: add ref_coords (int32, length=hap_len_sum) and var_idxs (int32, length=n_variants_sum)
+n_vars = self.n_variants(regions, samples)
+n_vars_flat = n_vars.reshape(-1, n_vars.shape[-1]).astype(np.int64)
+n_vars_sum = n_vars_flat.sum(-1)
+total += hap_len_sum * 4  # ref_coords int32
+total += n_vars_sum * 4  # var_idxs int32
 ```
 
 - [ ] **Step 4: Verify pass**
@@ -454,8 +462,11 @@ def test_variants_with_ref_exact():
 
 def test_variants_with_info_column_exact():
     ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
-    info_cols = [c for c in ds._seqs.available_var_fields
-                 if c not in {"alt", "ref", "ilen", "start", "dosage"}]
+    info_cols = [
+        c
+        for c in ds._seqs.available_var_fields
+        if c not in {"alt", "ref", "ilen", "start", "dosage"}
+    ]
     if not info_cols:
         pytest.skip("dummy dataset has no INFO columns")
     ds = ds.with_settings(var_fields=["alt", "start", "ilen", info_cols[0]])
@@ -476,6 +487,7 @@ def _materialized_nbytes_per_instance(ds, r_arr, s_arr):
     from seqpro.rag import Ragged
     import awkward as ak
     from genvarloader._dataset._rag_variants import RaggedVariants
+
     n_inst = len(r_arr)
     totals = np.zeros(n_inst, dtype=np.int64)
     for arr in out:
@@ -582,7 +594,11 @@ Append:
 
 ```python
 def test_haplotypes_plus_tracks_exact():
-    ds = gvl.get_dummy_dataset().with_seqs("haplotypes").with_settings(deterministic=True)
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("haplotypes")
+        .with_settings(deterministic=True)
+    )
     # Default ds has tracks active; if not, with_tracks(True).
     if not ds.active_tracks:
         pytest.skip("dummy dataset has no tracks")
@@ -617,21 +633,23 @@ Expected: track tests FAIL with `NotImplementedError: tracks branch added in Tas
 Replace `if self.active_tracks: raise NotImplementedError(...)` with:
 
 ```python
-    if self.active_tracks:
-        # Track length per instance equals haplotype length (haplotypes/annotated)
-        # or region length (reference). Compute that base length.
-        if seq_kind in ("haplotypes", "annotated"):
-            base_len = hap_len_sum  # already includes ploidy sum
-        else:
-            # reference or no-seq: tracks span region length × ploidy if haplotypes
-            # not active. With reference, tracks have no ploidy axis → just region length.
-            regions_arr = self._full_regions[r_idx].copy()
-            regions_arr[:, 1] -= self.jitter
-            regions_arr[:, 2] += self.jitter
-            base_len = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
-        for track_name in self.active_tracks:
-            track_dtype = self._tracks.intervals[track_name].dtype  # adjust attr to actual storage
-            total += base_len * track_dtype.itemsize
+if self.active_tracks:
+    # Track length per instance equals haplotype length (haplotypes/annotated)
+    # or region length (reference). Compute that base length.
+    if seq_kind in ("haplotypes", "annotated"):
+        base_len = hap_len_sum  # already includes ploidy sum
+    else:
+        # reference or no-seq: tracks span region length × ploidy if haplotypes
+        # not active. With reference, tracks have no ploidy axis → just region length.
+        regions_arr = self._full_regions[r_idx].copy()
+        regions_arr[:, 1] -= self.jitter
+        regions_arr[:, 2] += self.jitter
+        base_len = (regions_arr[:, 2] - regions_arr[:, 1]).astype(np.int64)
+    for track_name in self.active_tracks:
+        track_dtype = self._tracks.intervals[
+            track_name
+        ].dtype  # adjust attr to actual storage
+        total += base_len * track_dtype.itemsize
 ```
 
 ⚠ Verify the attribute path to track dtypes (`self._tracks.intervals[track_name].dtype` is a placeholder). Open `_dataset/_tracks.py` and confirm how track dtypes are exposed; adjust this line accordingly. If the dtype is uniform across tracks (typically `float32`), substitute that constant rather than per-track lookup.
@@ -667,6 +685,7 @@ Create `tests/unit/test_chunk_planner.py`:
 
 ```python
 """ChunkPlanner unit tests. Pure logic, no Dataset dependency."""
+
 import numpy as np
 import pytest
 from genvarloader._chunked import ChunkPlanner
@@ -681,8 +700,11 @@ def test_plan_respects_slot_bytes():
     r = flat_idx // 10
     s = flat_idx % 10
     planner = ChunkPlanner(
-        r_idx=r, s_idx=s, batch_size=5,
-        bytes_per_instance=bytes_per_instance, slot_bytes=200,
+        r_idx=r,
+        s_idx=s,
+        batch_size=5,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=200,
     )
     chunks = list(planner)
     # Each chunk's total bytes ≤ 200; each chunk is a multiple of batch_size.
@@ -699,8 +721,11 @@ def test_plan_single_batch_chunks_when_tight():
     bytes_per_instance = np.full((4, 1), 100, dtype=np.int64)
     flat = np.arange(4)
     planner = ChunkPlanner(
-        r_idx=flat, s_idx=np.zeros_like(flat), batch_size=2,
-        bytes_per_instance=bytes_per_instance, slot_bytes=200,
+        r_idx=flat,
+        s_idx=np.zeros_like(flat),
+        batch_size=2,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=200,
     )
     chunks = list(planner)
     assert len(chunks) == 2  # 200 bytes per batch fits exactly one chunk
@@ -712,10 +737,15 @@ def test_plan_raises_when_batch_exceeds_slot():
     bytes_per_instance = np.full((2, 1), 300, dtype=np.int64)
     flat = np.arange(2)
     with pytest.raises(ValueError, match="exceeds slot"):
-        list(ChunkPlanner(
-            r_idx=flat, s_idx=np.zeros_like(flat), batch_size=2,
-            bytes_per_instance=bytes_per_instance, slot_bytes=200,
-        ))
+        list(
+            ChunkPlanner(
+                r_idx=flat,
+                s_idx=np.zeros_like(flat),
+                batch_size=2,
+                bytes_per_instance=bytes_per_instance,
+                slot_bytes=200,
+            )
+        )
 
 
 def test_peak_chunk_bytes_reported():
@@ -724,8 +754,11 @@ def test_peak_chunk_bytes_reported():
     r = flat // 2
     s = flat % 2
     planner = ChunkPlanner(
-        r_idx=r, s_idx=s, batch_size=2,
-        bytes_per_instance=bytes_per_instance, slot_bytes=1000,
+        r_idx=r,
+        s_idx=s,
+        batch_size=2,
+        bytes_per_instance=bytes_per_instance,
+        slot_bytes=1000,
     )
     chunks = list(planner)
     # Single chunk of 4 instances, total bytes = 10+20+30+40 = 100.
@@ -748,6 +781,7 @@ Create `python/genvarloader/_chunked.py`:
 ```python
 """Chunk planner: groups (r, s) pairs into per-slot chunks aligned to
 mini-batch boundaries."""
+
 from __future__ import annotations
 
 from typing import Iterator
@@ -802,13 +836,18 @@ class ChunkPlanner:
         self._batch_totals = batch_totals
         self.peak_chunk_bytes: int = 0
 
-    def __iter__(self) -> Iterator[tuple[NDArray[np.integer], NDArray[np.integer], int]]:
+    def __iter__(
+        self,
+    ) -> Iterator[tuple[NDArray[np.integer], NDArray[np.integer], int]]:
         n_batches = len(self._batch_totals)
         i = 0
         while i < n_batches:
             running = 0
             j = i
-            while j < n_batches and running + int(self._batch_totals[j]) <= self.slot_bytes:
+            while (
+                j < n_batches
+                and running + int(self._batch_totals[j]) <= self.slot_bytes
+            ):
                 running += int(self._batch_totals[j])
                 j += 1
             # j-i batches go into this chunk; at least one (guaranteed by the per-batch check).
@@ -849,8 +888,10 @@ def slice_chunk(chunk_output, batch_size: int):
 
     is_tuple = isinstance(chunk_output, tuple)
     arrs = chunk_output if is_tuple else (chunk_output,)
-    n = len(arrs[0]) if not isinstance(arrs[0], (ak.Array, Ragged)) else (
-        arrs[0].shape[0] if isinstance(arrs[0], ak.Array) else arrs[0].shape[0]
+    n = (
+        len(arrs[0])
+        if not isinstance(arrs[0], (ak.Array, Ragged))
+        else (arrs[0].shape[0] if isinstance(arrs[0], ak.Array) else arrs[0].shape[0])
     )
     if n is None:
         raise ValueError("slice_chunk: cannot determine chunk length")
@@ -898,6 +939,7 @@ def _compare(a, b):
     from seqpro.rag import Ragged
     from genvarloader._types import AnnotatedHaps
     import awkward as ak
+
     if isinstance(a, tuple):
         assert isinstance(b, tuple) and len(a) == len(b)
         for x, y in zip(a, b):
@@ -917,7 +959,9 @@ def _compare(a, b):
         raise AssertionError(f"unsupported {type(a)}")
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 def test_slice_chunk_matches_direct(seq_kind):
     ds = gvl.get_dummy_dataset().with_seqs(seq_kind)
     if seq_kind in ("haplotypes", "annotated"):
@@ -931,7 +975,7 @@ def test_slice_chunk_matches_direct(seq_kind):
     sliced = list(slice_chunk(chunk, batch_size=n_s))
     assert len(sliced) == n_r
     for i, mini in enumerate(sliced):
-        direct = ds[r[i * n_s:(i + 1) * n_s], s[i * n_s:(i + 1) * n_s]]
+        direct = ds[r[i * n_s : (i + 1) * n_s], s[i * n_s : (i + 1) * n_s]]
         _compare(mini, direct)
 ```
 
@@ -965,12 +1009,15 @@ Create `tests/unit/test_buffered_loader.py`:
 
 ```python
 """End-to-end tests for mode='buffered'."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
 
 
-@pytest.mark.parametrize("seq_kind", ["reference", "haplotypes", "annotated", "variants"])
+@pytest.mark.parametrize(
+    "seq_kind", ["reference", "haplotypes", "annotated", "variants"]
+)
 def test_buffered_iter_matches_direct(seq_kind):
     ds = gvl.get_dummy_dataset().with_seqs(seq_kind).with_tracks(False)
     if seq_kind in ("haplotypes", "annotated"):
@@ -987,8 +1034,10 @@ def test_buffered_iter_matches_direct(seq_kind):
     )
     seen = 0
     for batch in loader:
-        seen += batch_size if not isinstance(batch, tuple) else (
-            batch[0].shape[0] if hasattr(batch[0], "shape") else len(batch[0])
+        seen += (
+            batch_size
+            if not isinstance(batch, tuple)
+            else (batch[0].shape[0] if hasattr(batch[0], "shape") else len(batch[0]))
         )
     assert seen == (n_total // batch_size) * batch_size
 
@@ -1006,7 +1055,11 @@ def test_buffered_rejects_oversized_batch():
 
 
 def test_buffered_rejects_nondeterministic_for_haplotypes():
-    ds = gvl.get_dummy_dataset().with_seqs("haplotypes").with_settings(deterministic=False)
+    ds = (
+        gvl.get_dummy_dataset()
+        .with_seqs("haplotypes")
+        .with_settings(deterministic=False)
+    )
     with pytest.raises(ValueError, match="deterministic"):
         ds.to_dataloader(mode="buffered", batch_size=2)
 ```
@@ -1025,6 +1078,7 @@ Create `python/genvarloader/_buffered_loader.py`:
 
 ```python
 """mode='buffered' dataloader path: synchronous chunked fetch in main process."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -1052,8 +1106,11 @@ def make_buffered_dataset(
             self._dataset = dataset
             self._batch_size = batch_size
             self._planner = ChunkPlanner(
-                r_idx=flat_r, s_idx=flat_s, batch_size=batch_size,
-                bytes_per_instance=bytes_per_instance, slot_bytes=slot_bytes,
+                r_idx=flat_r,
+                s_idx=flat_s,
+                batch_size=batch_size,
+                bytes_per_instance=bytes_per_instance,
+                slot_bytes=slot_bytes,
             )
 
         def __iter__(self):
@@ -1086,9 +1143,12 @@ def _resolve_buffered_inputs(
 ):
     """Compute flat (r_idx, s_idx) order, bytes_per_instance, and slot_bytes."""
     import numpy as np
+
     # 1) Resolve full epoch order from the sampler.
     if sampler is None:
-        sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last, generator=generator)
+        sampler = get_sampler(
+            len(dataset), batch_size, shuffle, drop_last, generator=generator
+        )
     flat = []
     for batch in sampler:
         flat.extend(batch)
@@ -1131,7 +1191,7 @@ def get_dataloader(
     persistent_workers: bool = False,
     pin_memory_device: str = "",
     mode: str | None = None,
-    buffer_bytes: int = 2 * 1024 ** 3,
+    buffer_bytes: int = 2 * 1024**3,
     copy: bool = True,
     heartbeat_seconds: float = 60.0,
 ):
@@ -1143,7 +1203,9 @@ def get_dataloader(
                 " multithreading which has lower overhead than multiprocessing."
             )
         if sampler is None:
-            sampler = get_sampler(len(dataset), batch_size, shuffle, drop_last, generator=generator)
+            sampler = get_sampler(
+                len(dataset), batch_size, shuffle, drop_last, generator=generator
+            )
         return td.DataLoader(
             dataset,
             batch_size=None,
@@ -1162,25 +1224,49 @@ def get_dataloader(
         )
 
     if mode not in {"buffered", "double_buffered"}:
-        raise ValueError(f"unknown mode={mode!r}; expected None, 'buffered', or 'double_buffered'")
+        raise ValueError(
+            f"unknown mode={mode!r}; expected None, 'buffered', or 'double_buffered'"
+        )
     if num_workers > 0:
-        raise ValueError(f"mode={mode!r} is incompatible with num_workers>0; the loader IS the concurrency strategy")
+        raise ValueError(
+            f"mode={mode!r} is incompatible with num_workers>0; the loader IS the concurrency strategy"
+        )
 
     n_slots = 1 if mode == "buffered" else 2
     r_idx, s_idx, bpi, slot_bytes, _sampler = _resolve_buffered_inputs(
-        dataset, batch_size, shuffle, drop_last, sampler, generator, buffer_bytes, n_slots,
+        dataset,
+        batch_size,
+        shuffle,
+        drop_last,
+        sampler,
+        generator,
+        buffer_bytes,
+        n_slots,
     )
 
     if mode == "buffered":
         from ._buffered_loader import make_buffered_dataset
+
         inner_ds = make_buffered_dataset(
-            dataset, batch_size, slot_bytes, bpi, r_idx, s_idx,
+            dataset,
+            batch_size,
+            slot_bytes,
+            bpi,
+            r_idx,
+            s_idx,
         )
     else:
         from ._double_buffered_loader import make_double_buffered_dataset
+
         inner_ds = make_double_buffered_dataset(
-            dataset, batch_size, slot_bytes, bpi, r_idx, s_idx,
-            copy=copy, heartbeat_seconds=heartbeat_seconds,
+            dataset,
+            batch_size,
+            slot_bytes,
+            bpi,
+            r_idx,
+            s_idx,
+            copy=copy,
+            heartbeat_seconds=heartbeat_seconds,
         )
 
     return td.DataLoader(
@@ -1226,6 +1312,7 @@ Create `tests/unit/test_shm_layout.py`:
 
 ```python
 """Round-trip tests for the shm slot layout."""
+
 import multiprocessing as mp
 import numpy as np
 import pytest
@@ -1322,6 +1409,7 @@ Header layout (little-endian throughout):
     u64 inner_offsets_offset  (used by ragged_alleles; 0 otherwise)
     u64 inner_offsets_nbytes
 """
+
 from __future__ import annotations
 
 import struct
@@ -1362,8 +1450,9 @@ def write_chunk(
     for a in arrays:
         cursor = _align(cursor)
         payload_offsets.append(cursor)
-        np.frombuffer(buf, dtype=a.dtype, count=a.size,
-                      offset=cursor).reshape(a.shape)[...] = a
+        np.frombuffer(buf, dtype=a.dtype, count=a.size, offset=cursor).reshape(a.shape)[
+            ...
+        ] = a
         cursor += a.nbytes
     payload_bytes = cursor - HEADER_RESERVED
     # 2) Write header.
@@ -1373,15 +1462,15 @@ def write_chunk(
         hdr += _DESCRIPTOR_FIXED.pack(0, a.dtype.num, a.ndim)
         for d in a.shape:
             hdr += struct.pack("<Q", int(d))
-        hdr += struct.pack("<Q", off)         # data_offset
-        hdr += struct.pack("<Q", a.nbytes)    # data_nbytes
-        hdr += struct.pack("<Q", 0)           # lengths_offset
-        hdr += struct.pack("<Q", 0)           # lengths_nbytes
-        hdr += struct.pack("<Q", 0)           # inner_offsets_offset
-        hdr += struct.pack("<Q", 0)           # inner_offsets_nbytes
+        hdr += struct.pack("<Q", off)  # data_offset
+        hdr += struct.pack("<Q", a.nbytes)  # data_nbytes
+        hdr += struct.pack("<Q", 0)  # lengths_offset
+        hdr += struct.pack("<Q", 0)  # lengths_nbytes
+        hdr += struct.pack("<Q", 0)  # inner_offsets_offset
+        hdr += struct.pack("<Q", 0)  # inner_offsets_nbytes
     if len(hdr) > HEADER_RESERVED:
         raise ValueError(f"header too large: {len(hdr)} > {HEADER_RESERVED}")
-    buf[:len(hdr)] = bytes(hdr)
+    buf[: len(hdr)] = bytes(hdr)
     return cursor
 
 
@@ -1398,13 +1487,22 @@ def read_chunk(buf: memoryview) -> tuple[int, list[np.ndarray]]:
             (dim,) = struct.unpack_from("<Q", buf, cursor)
             shape.append(int(dim))
             cursor += 8
-        data_offset, data_nbytes, lo, ln, ioff, ilen = struct.unpack_from("<6Q", buf, cursor)
+        data_offset, data_nbytes, lo, ln, ioff, ilen = struct.unpack_from(
+            "<6Q", buf, cursor
+        )
         cursor += 48
         if kind != 0:
-            raise NotImplementedError(f"ragged read_chunk arrives in Task 10 (kind={kind})")
-        dtype = np.dtype(np.typeDict[dtype_num]) if hasattr(np, "typeDict") else np.dtype(np.sctypeDict[dtype_num])
-        view = np.frombuffer(buf, dtype=dtype, count=int(np.prod(shape)),
-                             offset=data_offset).reshape(shape)
+            raise NotImplementedError(
+                f"ragged read_chunk arrives in Task 10 (kind={kind})"
+            )
+        dtype = (
+            np.dtype(np.typeDict[dtype_num])
+            if hasattr(np, "typeDict")
+            else np.dtype(np.sctypeDict[dtype_num])
+        )
+        view = np.frombuffer(
+            buf, dtype=dtype, count=int(np.prod(shape)), offset=data_offset
+        ).reshape(shape)
         views.append(view)
     return int(n_inst), views
 ```
@@ -1443,6 +1541,7 @@ Append to `tests/unit/test_shm_layout.py`:
 ```python
 def test_ragged_roundtrip():
     from seqpro.rag import Ragged
+
     data = np.arange(20, dtype=np.int32)
     # Three rows of lengths 5, 8, 7 → offsets [0, 5, 13, 20].
     offsets = np.array([0, 5, 13, 20], dtype=np.int64)
@@ -1454,6 +1553,7 @@ def test_ragged_roundtrip():
         n_inst, views = read_chunk(shm.buf)
         assert n_inst == 3
         from seqpro.rag import Ragged as R
+
         assert isinstance(views[0], R)
         np.testing.assert_array_equal(views[0].data, data)
         np.testing.assert_array_equal(views[0].offsets, offsets)
@@ -1465,13 +1565,16 @@ def test_ragged_roundtrip():
 def test_annotated_haps_roundtrip():
     """Three Ragged arrays in sequence (haps S1, ref_coords int32, var_idxs int32)."""
     from seqpro.rag import Ragged
+
     haps_data = np.frombuffer(b"ACGTAAAA", dtype="S1")
     haps_offsets = np.array([0, 4, 8], dtype=np.int64)
     haps = Ragged.from_offsets(haps_data, (2, None), haps_offsets)
-    coords = Ragged.from_offsets(np.arange(8, dtype=np.int32),
-                                  (2, None), haps_offsets)
-    v_idxs = Ragged.from_offsets(np.array([10, 20, 30], dtype=np.int32),
-                                  (2, None), np.array([0, 1, 3], dtype=np.int64))
+    coords = Ragged.from_offsets(np.arange(8, dtype=np.int32), (2, None), haps_offsets)
+    v_idxs = Ragged.from_offsets(
+        np.array([10, 20, 30], dtype=np.int32),
+        (2, None),
+        np.array([0, 1, 3], dtype=np.int64),
+    )
     capacity = 8192
     shm = SharedMemory(create=True, size=capacity)
     try:
@@ -1479,8 +1582,9 @@ def test_annotated_haps_roundtrip():
         n_inst, views = read_chunk(shm.buf)
         assert n_inst == 2 and len(views) == 3
         np.testing.assert_array_equal(views[0].data, haps_data)
-        np.testing.assert_array_equal(views[1].data.view(np.int32),
-                                       np.arange(8, dtype=np.int32))
+        np.testing.assert_array_equal(
+            views[1].data.view(np.int32), np.arange(8, dtype=np.int32)
+        )
     finally:
         shm.close()
         shm.unlink()
@@ -1501,6 +1605,7 @@ In `_shm_layout.py`, restructure `write_chunk` to dispatch by type. Sketch:
 ```python
 def write_chunk(buf, arrays, n_instances):
     from seqpro.rag import Ragged
+
     if len(arrays) > 255:
         raise ValueError("at most 255 arrays per chunk")
     descriptors = []
@@ -1509,34 +1614,50 @@ def write_chunk(buf, arrays, n_instances):
         cursor = _align(cursor)
         if isinstance(a, np.ndarray):
             data_off = cursor
-            np.frombuffer(buf, dtype=a.dtype, count=a.size,
-                          offset=data_off).reshape(a.shape)[...] = a
+            np.frombuffer(buf, dtype=a.dtype, count=a.size, offset=data_off).reshape(
+                a.shape
+            )[...] = a
             cursor += a.nbytes
-            descriptors.append({
-                "kind": 0, "dtype_num": a.dtype.num, "shape": a.shape,
-                "data_offset": data_off, "data_nbytes": a.nbytes,
-                "lengths_offset": 0, "lengths_nbytes": 0,
-                "inner_offsets_offset": 0, "inner_offsets_nbytes": 0,
-            })
+            descriptors.append(
+                {
+                    "kind": 0,
+                    "dtype_num": a.dtype.num,
+                    "shape": a.shape,
+                    "data_offset": data_off,
+                    "data_nbytes": a.nbytes,
+                    "lengths_offset": 0,
+                    "lengths_nbytes": 0,
+                    "inner_offsets_offset": 0,
+                    "inner_offsets_nbytes": 0,
+                }
+            )
         elif isinstance(a, Ragged):
             data_off = cursor
             data_arr = np.ascontiguousarray(a.data)
-            np.frombuffer(buf, dtype=data_arr.dtype, count=data_arr.size,
-                          offset=data_off)[...] = data_arr.ravel()
+            np.frombuffer(
+                buf, dtype=data_arr.dtype, count=data_arr.size, offset=data_off
+            )[...] = data_arr.ravel()
             cursor += data_arr.nbytes
             cursor = _align(cursor)
             off_off = cursor
             off_arr = np.ascontiguousarray(a.offsets)
-            np.frombuffer(buf, dtype=off_arr.dtype, count=off_arr.size,
-                          offset=off_off)[...] = off_arr
+            np.frombuffer(buf, dtype=off_arr.dtype, count=off_arr.size, offset=off_off)[
+                ...
+            ] = off_arr
             cursor += off_arr.nbytes
-            descriptors.append({
-                "kind": 1, "dtype_num": data_arr.dtype.num,
-                "shape": [data_arr.size],  # flat
-                "data_offset": data_off, "data_nbytes": data_arr.nbytes,
-                "lengths_offset": off_off, "lengths_nbytes": off_arr.nbytes,
-                "inner_offsets_offset": 0, "inner_offsets_nbytes": 0,
-            })
+            descriptors.append(
+                {
+                    "kind": 1,
+                    "dtype_num": data_arr.dtype.num,
+                    "shape": [data_arr.size],  # flat
+                    "data_offset": data_off,
+                    "data_nbytes": data_arr.nbytes,
+                    "lengths_offset": off_off,
+                    "lengths_nbytes": off_arr.nbytes,
+                    "inner_offsets_offset": 0,
+                    "inner_offsets_nbytes": 0,
+                }
+            )
         else:
             raise TypeError(f"write_chunk: unsupported array type {type(a)}")
     payload_bytes = cursor - HEADER_RESERVED
@@ -1546,13 +1667,18 @@ def write_chunk(buf, arrays, n_instances):
         hdr += _DESCRIPTOR_FIXED.pack(d["kind"], d["dtype_num"], len(d["shape"]))
         for dim in d["shape"]:
             hdr += struct.pack("<Q", int(dim))
-        hdr += struct.pack("<6Q",
-            d["data_offset"], d["data_nbytes"],
-            d["lengths_offset"], d["lengths_nbytes"],
-            d["inner_offsets_offset"], d["inner_offsets_nbytes"])
+        hdr += struct.pack(
+            "<6Q",
+            d["data_offset"],
+            d["data_nbytes"],
+            d["lengths_offset"],
+            d["lengths_nbytes"],
+            d["inner_offsets_offset"],
+            d["inner_offsets_nbytes"],
+        )
     if len(hdr) > HEADER_RESERVED:
         raise ValueError(f"header too large: {len(hdr)} > {HEADER_RESERVED}")
-    buf[:len(hdr)] = bytes(hdr)
+    buf[: len(hdr)] = bytes(hdr)
     return cursor
 ```
 
@@ -1561,6 +1687,7 @@ Extend `read_chunk`:
 ```python
 def read_chunk(buf):
     from seqpro.rag import Ragged
+
     n_inst, payload_bytes, n_arrays = _HEADER_PREAMBLE.unpack_from(buf, 0)
     cursor = _HEADER_PREAMBLE.size
     views = []
@@ -1569,19 +1696,21 @@ def read_chunk(buf):
         cursor += _DESCRIPTOR_FIXED.size
         shape = []
         for _ in range(ndim):
-            (dim,) = struct.unpack_from("<Q", buf, cursor); shape.append(int(dim)); cursor += 8
+            (dim,) = struct.unpack_from("<Q", buf, cursor)
+            shape.append(int(dim))
+            cursor += 8
         data_off, data_nb, lo, ln, ioff, ilen = struct.unpack_from("<6Q", buf, cursor)
         cursor += 48
         dtype = np.dtype(np.sctypeDict[dtype_num])
         if kind == 0:
-            view = np.frombuffer(buf, dtype=dtype, count=int(np.prod(shape)),
-                                 offset=data_off).reshape(shape)
+            view = np.frombuffer(
+                buf, dtype=dtype, count=int(np.prod(shape)), offset=data_off
+            ).reshape(shape)
             views.append(view)
         elif kind == 1:
             data = np.frombuffer(buf, dtype=dtype, count=shape[0], offset=data_off)
             # offsets dtype: int64 (or whatever Ragged uses); read as int64.
-            offsets = np.frombuffer(buf, dtype=np.int64,
-                                    count=ln // 8, offset=lo)
+            offsets = np.frombuffer(buf, dtype=np.int64, count=ln // 8, offset=lo)
             views.append(Ragged.from_offsets(data, (len(offsets) - 1, None), offsets))
         elif kind == 2:
             raise NotImplementedError("RaggedVariants in Task 10b (extended)")
@@ -1609,6 +1738,7 @@ This step needs concrete awkward layout work; budget ~1-2 sessions. Reference pa
 ```python
 def test_rag_variants_roundtrip():
     import genvarloader as gvl
+
     ds = gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
     r = np.arange(ds.full_shape[0])
     s = np.zeros(len(r), dtype=np.int64)
@@ -1621,8 +1751,10 @@ def test_rag_variants_roundtrip():
         write_chunk(shm.buf, [rv], n_instances=len(r))
         n_inst, views = read_chunk(shm.buf)
         from genvarloader._dataset._rag_variants import RaggedVariants
+
         assert isinstance(views[0], RaggedVariants)
         import awkward as ak
+
         assert ak.to_list(views[0]) == ak.to_list(rv)
     finally:
         shm.close()
@@ -1654,6 +1786,7 @@ Create `tests/unit/test_producer.py`:
 
 ```python
 """Tests for the producer subprocess in isolation."""
+
 import multiprocessing as mp
 import numpy as np
 import pytest
@@ -1670,10 +1803,13 @@ def test_producer_writes_chunk_and_signals():
     # subset/schema in the child. For this test, use the dataset path directly.
     ds_path = ds._path if hasattr(ds, "_path") else None
     if ds_path is None:
-        pytest.skip("dummy dataset is not file-backed; cross-process test requires a real dataset path")
+        pytest.skip(
+            "dummy dataset is not file-backed; cross-process test requires a real dataset path"
+        )
     capacity = 64 * 1024
     shm = SharedMemory(create=True, size=capacity)
-    free = ctx.Event(); free.set()
+    free = ctx.Event()
+    free.set()
     ready = ctx.Event()
     index_queue = ctx.Queue()
     exc_q = ctx.Queue()
@@ -1683,15 +1819,22 @@ def test_producer_writes_chunk_and_signals():
     index_queue.put(None)
     p = ctx.Process(
         target=producer_main,
-        args=(str(ds_path), {"with_seqs": "reference", "with_tracks": False},
-              [shm.name], [(free, ready)], index_queue, exc_q),
+        args=(
+            str(ds_path),
+            {"with_seqs": "reference", "with_tracks": False},
+            [shm.name],
+            [(free, ready)],
+            index_queue,
+            exc_q,
+        ),
     )
     p.start()
     assert ready.wait(timeout=30)
     n_inst, views = read_chunk(shm.buf)
     assert n_inst == 1
     p.join(timeout=10)
-    shm.close(); shm.unlink()
+    shm.close()
+    shm.unlink()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1708,6 +1851,7 @@ Create `python/genvarloader/_producer.py`:
 
 ```python
 """Producer subprocess entrypoint for mode='double_buffered'."""
+
 from __future__ import annotations
 
 import traceback
@@ -1792,6 +1936,7 @@ Create `tests/unit/test_double_buffered_loader.py`:
 
 ```python
 """End-to-end tests for mode='double_buffered'."""
+
 import os
 import numpy as np
 import pytest
@@ -1807,8 +1952,12 @@ def test_double_buffered_iter_matches_buffered(seq_kind, tmp_path):
     if not hasattr(ds, "_path") or ds._path is None:
         pytest.skip("double_buffered requires a file-backed dataset")
     batch_size = 2
-    buf_kw = dict(batch_size=batch_size, shuffle=False, drop_last=True,
-                  buffer_bytes=4 * 1024 * 1024)
+    buf_kw = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=4 * 1024 * 1024,
+    )
     buffered = list(ds.to_dataloader(mode="buffered", **buf_kw))
     double = list(ds.to_dataloader(mode="double_buffered", copy=True, **buf_kw))
     assert len(double) == len(buffered)
@@ -1835,6 +1984,7 @@ Create `python/genvarloader/_double_buffered_loader.py`:
 
 ```python
 """mode='double_buffered' dataloader: subprocess producer + 2-slot shm ping-pong."""
+
 from __future__ import annotations
 
 import atexit
@@ -1872,8 +2022,11 @@ class _DoubleBufferedIterable:
         self._copy = copy
         self._heartbeat = heartbeat_seconds
         self._planner = ChunkPlanner(
-            r_idx=flat_r, s_idx=flat_s, batch_size=batch_size,
-            bytes_per_instance=bytes_per_instance, slot_bytes=slot_bytes,
+            r_idx=flat_r,
+            s_idx=flat_s,
+            batch_size=batch_size,
+            bytes_per_instance=bytes_per_instance,
+            slot_bytes=slot_bytes,
         )
         # Force a full pass to compute peak_chunk_bytes — replan on iter.
         _ = list(self._planner)
@@ -1881,7 +2034,9 @@ class _DoubleBufferedIterable:
         # Allocate 2 shm slots.
         suffix = uuid.uuid4().hex[:8]
         self._shm_names = [f"gvl-{os.getpid()}-{suffix}-{i}" for i in range(2)]
-        self._shms = [SharedMemory(create=True, name=n, size=capacity) for n in self._shm_names]
+        self._shms = [
+            SharedMemory(create=True, name=n, size=capacity) for n in self._shm_names
+        ]
         ctx = mp.get_context("spawn")
         self._ctx = ctx
         self._events = [(ctx.Event(), ctx.Event()) for _ in range(2)]
@@ -1901,6 +2056,7 @@ class _DoubleBufferedIterable:
 
     def _spawn_producer(self):
         from ._producer import producer_main
+
         ds = self._dataset
         schema = {
             "with_seqs": ds.sequence_type,
@@ -1912,11 +2068,19 @@ class _DoubleBufferedIterable:
             schema["var_fields"] = list(ds._seqs.var_fields)
         ds_path = ds._path if hasattr(ds, "_path") else None
         if ds_path is None:
-            raise RuntimeError("double_buffered requires a file-backed dataset (Dataset.open(path))")
+            raise RuntimeError(
+                "double_buffered requires a file-backed dataset (Dataset.open(path))"
+            )
         self._producer = self._ctx.Process(
             target=producer_main,
-            args=(str(ds_path), schema, list(self._shm_names),
-                  self._events, self._index_queue, self._exc_q),
+            args=(
+                str(ds_path),
+                schema,
+                list(self._shm_names),
+                self._events,
+                self._index_queue,
+                self._exc_q,
+            ),
             daemon=True,
         )
         self._producer.start()
@@ -1926,7 +2090,9 @@ class _DoubleBufferedIterable:
             self._spawn_producer()
         # Push chunks into the queue.
         planner = ChunkPlanner(
-            r_idx=self._flat_r, s_idx=self._flat_s, batch_size=self._batch_size,
+            r_idx=self._flat_r,
+            s_idx=self._flat_s,
+            batch_size=self._batch_size,
             bytes_per_instance=self._planner.bytes_per_instance,
             slot_bytes=self._planner.slot_bytes,
         )
@@ -1966,10 +2132,14 @@ class _DoubleBufferedIterable:
             if self._producer.is_alive():
                 self._producer.terminate()
         for shm in self._shms:
-            try: shm.close()
-            except Exception: pass
-            try: shm.unlink()
-            except Exception: pass
+            try:
+                shm.close()
+            except Exception:
+                pass
+            try:
+                shm.unlink()
+            except Exception:
+                pass
 
 
 def _cleanup(shms, producer_getter):
@@ -1977,16 +2147,21 @@ def _cleanup(shms, producer_getter):
     if proc is not None and proc.is_alive():
         proc.terminate()
     for shm in shms:
-        try: shm.close()
-        except Exception: pass
-        try: shm.unlink()
-        except Exception: pass
+        try:
+            shm.close()
+        except Exception:
+            pass
+        try:
+            shm.unlink()
+        except Exception:
+            pass
 
 
 def _deep_copy_batch(batch):
     from seqpro.rag import Ragged
     from ._types import AnnotatedHaps
     import awkward as ak
+
     if isinstance(batch, tuple):
         return tuple(_deep_copy_batch(x) for x in batch)
     if isinstance(batch, np.ndarray):
@@ -2005,16 +2180,28 @@ def _deep_copy_batch(batch):
 
 
 def make_double_buffered_dataset(
-    dataset, batch_size, slot_bytes, bytes_per_instance, flat_r, flat_s,
-    copy: bool, heartbeat_seconds: float,
+    dataset,
+    batch_size,
+    slot_bytes,
+    bytes_per_instance,
+    flat_r,
+    flat_s,
+    copy: bool,
+    heartbeat_seconds: float,
 ):
     import torch.utils.data as td
 
     class _DBTorchDataset(td.IterableDataset):
         def __init__(self):
             self._impl = _DoubleBufferedIterable(
-                dataset, batch_size, slot_bytes, bytes_per_instance,
-                flat_r, flat_s, copy, heartbeat_seconds,
+                dataset,
+                batch_size,
+                slot_bytes,
+                bytes_per_instance,
+                flat_r,
+                flat_s,
+                copy,
+                heartbeat_seconds,
             )
 
         def __iter__(self):
@@ -2041,7 +2228,10 @@ i = 0
 while i < len(self._batch_totals):
     j = i
     cur = 0
-    while j < len(self._batch_totals) and cur + int(self._batch_totals[j]) <= self.slot_bytes:
+    while (
+        j < len(self._batch_totals)
+        and cur + int(self._batch_totals[j]) <= self.slot_bytes
+    ):
         cur += int(self._batch_totals[j])
         j += 1
     peak = max(peak, cur)
@@ -2091,9 +2281,14 @@ def test_producer_exception_reraised(monkeypatch):
     # For this test we patch via env var read by the producer:
     monkeypatch.setenv("GVL_TEST_PRODUCER_RAISE", "1")
     with pytest.raises(RuntimeError, match="ProducerError|ProducerDied"):
-        for _ in ds.to_dataloader(mode="double_buffered", batch_size=2,
-                                   shuffle=False, drop_last=True,
-                                   buffer_bytes=1 << 20, heartbeat_seconds=10):
+        for _ in ds.to_dataloader(
+            mode="double_buffered",
+            batch_size=2,
+            shuffle=False,
+            drop_last=True,
+            buffer_bytes=1 << 20,
+            heartbeat_seconds=10,
+        ):
             pass
 
 
@@ -2106,15 +2301,21 @@ def test_shm_cleanup_after_close():
     if not hasattr(ds, "_path") or ds._path is None:
         pytest.skip("requires file-backed dataset")
     before = set(os.listdir("/dev/shm"))
-    loader = ds.to_dataloader(mode="double_buffered", batch_size=2,
-                               shuffle=False, drop_last=True,
-                               buffer_bytes=1 << 20)
+    loader = ds.to_dataloader(
+        mode="double_buffered",
+        batch_size=2,
+        shuffle=False,
+        drop_last=True,
+        buffer_bytes=1 << 20,
+    )
     list(loader)
     # Close via dataset wrapper.
     if hasattr(loader.dataset, "_impl"):
         loader.dataset._impl.close()
     del loader
-    import gc; gc.collect()
+    import gc
+
+    gc.collect()
     after = set(os.listdir("/dev/shm"))
     leaked = {n for n in after - before if "gvl-" in n}
     assert not leaked, f"leaked shm: {leaked}"
