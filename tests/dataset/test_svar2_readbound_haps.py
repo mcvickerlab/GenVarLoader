@@ -561,3 +561,26 @@ def test_readbound_gather_matches_the_unfused_call_and_guards_its_shape(
     stale = gather_svar2_readbound(*args[:8], args[9], n_q + 1)
     with pytest.raises(ValueError, match="gather was built for"):
         hap_diffs_from_svar2_readbound(*args, False, False, stale)
+
+
+def test_svar2_haps_n_variants_is_a_readonly_zero_stride_view(
+    tmp_path: Path, svar2_store: Path
+):
+    """#355 mutation-kill: assert on a REAL ``Svar2Haps.n_variants``, not a
+    standalone ``np.broadcast_to`` call.
+
+    ``test_svar2_n_variants_is_a_zero_stride_view`` (tests/unit/dataset/
+    test_svar2_ranges.py) characterizes numpy's ``broadcast_to`` in isolation --
+    it never touches ``Svar2Haps`` and so passes identically whether or not the
+    production code is changed. This test fails if ``Svar2Haps.__post_init__``
+    goes back to a real ``np.zeros`` allocation: shape/dtype are preserved by a
+    plain ``np.zeros`` too, but strides/writeability are not.
+    """
+    ds = _svar2_haps_dataset(tmp_path, svar2_store)
+    seqs = ds._seqs
+    n_variants = seqs.n_variants
+
+    assert n_variants.strides == (0, 0, 0)
+    assert not n_variants.flags.writeable
+    assert n_variants.dtype == np.int32
+    assert n_variants.shape == (seqs.n_regions, seqs.n_samples, seqs.ploidy)

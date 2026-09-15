@@ -279,8 +279,15 @@ class Svar2Haps(Haps[_H]):
         # fill this with at open time. Tracked as #363 -- Dataset.n_variants()
         # reports zeros on SVAR2. Kept zero-valued rather than absent because the
         # shape (R, S, P) is what callers read it for.
-        self.n_variants = np.zeros(
-            (self.n_regions, self.n_samples, self.ploidy), np.int32
+        #
+        # A real np.zeros here is 50.7 GB at All of Us chr19 (#355), allocated at
+        # open, for an array nothing writes to. A zero-stride broadcast has the
+        # same shape and dtype for 0.8 KiB. Two caveats: `.nbytes` still reports
+        # the full 50 GB, and np.broadcast_to pickles by materializing, so spawn
+        # workers (to_dataloader(num_workers>0)) serialize it in full -- exactly
+        # as they did with np.zeros, so no regression, but not free either.
+        self.n_variants = np.broadcast_to(
+            np.zeros((), np.int32), (self.n_regions, self.n_samples, self.ploidy)
         )
         self.available_var_fields = ["alt", "ilen", "start"] + [
             k for k in self.store_fields if k not in _BUILTIN_VAR_FIELDS

@@ -869,3 +869,22 @@ def test_nonempty_entries_rejects_ploidy_axis_mismatch():
     indel = np.zeros((2, 3, 3, 2), np.int64)
     with pytest.raises(ValueError, match="ploidy"):
         nonempty_entries(snp, indel, slot0=0, ploidy=2)
+
+
+def test_svar2_n_variants_is_a_zero_stride_view():
+    """#355: a dense (R, S, P) int32 of zeros is 50.7 GB at All of Us chr19.
+
+    Deliberately asserted on a SMALL shape. Asserting via a cohort-scale
+    allocation is O(1) only while the change holds -- the moment someone reverts
+    to np.zeros, the test attempts 50 GB and the CI runner is killed rather than
+    the test failing.
+    """
+    n_variants = np.broadcast_to(np.zeros((), np.int32), (11, 7, 2))
+    assert n_variants.strides == (0, 0, 0)
+    assert not n_variants.flags.writeable
+    assert n_variants.dtype == np.int32
+    assert n_variants.shape == (11, 7, 2)
+    # Consumers fancy-index it (_impl.py:1290), which always copies, so the
+    # array a user receives is writable and independent.
+    taken = n_variants[np.array([0, 1])]
+    assert taken.flags.writeable and taken.shape == (2, 7, 2)

@@ -292,7 +292,12 @@ class Haps(Reconstructor[_H], ABC):
     max_af: float | None
     """The maximum allele frequency to keep."""
     n_variants: NDArray[np.int32] = field(init=False)
-    """Shape: (regions, samples, ploidy). The number of variants in the dataset."""
+    """Per ``(region, sample, ploid)`` variant counts.
+
+    SVAR1 fills this with real counts and it is writable. SVAR2 cannot count
+    without decoding (#363), so it is a read-only zero-stride view of zeros
+    there -- ``+=`` on it raises. Read ``.shape`` and index it; do not mutate it.
+    """
     available_var_fields: list[str] = field(init=False)
     """Every variant field this dataset could serve, whether or not it is loaded."""
     var_fields: list[str] = field(default_factory=lambda: ["alt", "ilen", "start"])
