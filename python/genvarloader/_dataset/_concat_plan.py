@@ -10,15 +10,32 @@ large byte ranges instead of individual slots.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Iterator, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["CONCAT_CHUNK_BYTES", "Run", "coalesce", "provenance"]
+__all__ = ["CONCAT_CHUNK_BYTES", "Run", "RunPlan", "coalesce", "provenance"]
 
 CONCAT_CHUNK_BYTES = 16 << 20
 """Buffered-IO chunk size. 16 MiB is the measured knee on NFSv3; 64 MiB is no better."""
+
+
+def _default_order(n_ds: int, counts: list[int]) -> NDArray[np.int64]:
+    """Block-concatenation order: dataset 0's whole block, then dataset 1's, etc.
+
+    Args:
+        n_ds: Number of input datasets.
+        counts: Positions along the merged axis contributed by each dataset.
+
+    Returns:
+        An ``(sum(counts), 2)`` int64 array of ``(dataset_idx, within_idx)``.
+    """
+    if n_ds == 0:
+        return np.zeros((0, 2), np.int64)
+    ds_col = np.repeat(np.arange(n_ds, dtype=np.int64), counts)
+    w_col = np.concatenate([np.arange(c, dtype=np.int64) for c in counts])
+    return np.stack([ds_col, w_col], axis=1)
 
 
 class Run(NamedTuple):
@@ -79,11 +96,6 @@ def provenance(
 
     n_ds = len(shape_per_ds)
 
-    def _default_order(counts: list[int]) -> NDArray[np.int64]:
-        ds_col = np.repeat(np.arange(n_ds, dtype=np.int64), counts)
-        w_col = np.concatenate([np.arange(c, dtype=np.int64) for c in counts])
-        return np.stack([ds_col, w_col], axis=1)
-
     if axis == "regions":
         # Merged region i's S*P slots are contiguous in both source and
         # destination: they're `order[i, 1] * S*P .. +S*P` in dataset
@@ -91,7 +103,7 @@ def provenance(
         n_samples = shape_per_ds[0][1]
         cell = n_samples * ploidy
         if order is None:
-            order = _default_order([shape_per_ds[d][0] for d in range(n_ds)])
+            order = _default_order(n_ds, [shape_per_ds[d][0] for d in range(n_ds)])
         else:
             order = np.asarray(order, dtype=np.int64)
 
@@ -110,7 +122,7 @@ def provenance(
     n_regions = shape_per_ds[0][0]
     per_ds_samples = [s for _, s in shape_per_ds]
     if order is None:
-        order = _default_order(per_ds_samples)
+        order = _default_order(n_ds, per_ds_samples)
     else:
         order = np.asarray(order, dtype=np.int64)
 
@@ -165,3 +177,124 @@ def coalesce(prov: NDArray[np.int64]) -> list[Run]:
         )
         for a, b in zip(starts, stops)
     ]
+
+
+class RunPlan:
+    """Destination-ordered runs, derived from ``order`` without materializing slots.
+
+    Equivalent to ``coalesce(provenance(axis, shape_per_ds, ploidy, order=order))``
+    and pinned against it by
+    ``test_run_plan_matches_coalesce_provenance_exhaustively``, but it never
+    builds the ``(n_slots, 2)`` map: at the All of Us chr22 grid that map is
+    32-64 GB and the run list it compresses to is 384-768 GB, because on an
+    interleaved sample merge every run is one slot long.
+
+    The whole thing rests on one property: the run-break condition is "source
+    dataset changes, or source slot does not increment", and on both axes that
+    reduces to a predicate over ``order`` alone -- the region index ``r`` cancels
+    out. So the break pattern is computed once, in ``O(R + S)``, and the runs
+    stream in ``O(1)``.
+
+    **Re-iterable on purpose, not a generator.** ``copy_runs`` iterates runs
+    twice (once for offsets, once to stream bytes) and so does
+    ``_gather_svar_offsets``; a one-shot iterator would yield an empty second
+    pass and silently truncate the output rather than raise.
+
+    Args:
+        axis: Either ``"regions"`` or ``"samples"``.
+        shape_per_ds: ``(n_regions, n_samples)`` per input dataset, in input order.
+        ploidy: Slots per ``(region, sample)`` cell. Pass ``1`` for interval
+            stores, which have no ploidy axis.
+        order: ``(n_merged_along_axis, 2)`` int array of ``(dataset_idx,
+            within_dataset_idx)`` per merged position along ``axis``, in
+            destination order. ``None`` reproduces block-concatenation.
+
+    Raises:
+        ValueError: If ``axis`` is not ``"regions"`` or ``"samples"``.
+    """
+
+    def __init__(
+        self,
+        axis: str,
+        shape_per_ds: list[tuple[int, int]],
+        ploidy: int,
+        *,
+        order: "NDArray[np.int64] | None" = None,
+    ) -> None:
+        if axis not in ("regions", "samples"):
+            raise ValueError(f'axis must be "regions" or "samples", got {axis!r}')
+        self.axis = axis
+        self.ploidy = int(ploidy)
+        self.shape_per_ds = [(int(r), int(s)) for r, s in shape_per_ds]
+        n_ds = len(self.shape_per_ds)
+        if order is None:
+            counts = [r if axis == "regions" else s for r, s in self.shape_per_ds]
+            self.order = _default_order(n_ds, counts)
+        else:
+            self.order = np.asarray(order, dtype=np.int64).reshape(-1, 2)
+
+    def _segments(self) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
+        """Half-open ``[start, stop)`` spans of ``order`` with no break inside."""
+        ds, w = self.order[:, 0], self.order[:, 1]
+        brk = (ds[1:] != ds[:-1]) | (w[1:] != w[:-1] + 1)
+        starts = np.concatenate([np.zeros(1, np.int64), np.flatnonzero(brk) + 1])
+        stops = np.concatenate([starts[1:], np.array([len(self.order)], np.int64)])
+        return starts, stops
+
+    def __iter__(self) -> "Iterator[Run]":
+        if self.axis == "regions":
+            yield from self._iter_regions()
+        else:
+            yield from self._iter_samples()
+
+    def _iter_regions(self) -> "Iterator[Run]":
+        # Merged region i owns one contiguous S*P block in BOTH source and
+        # destination, so a segment of `order` maps to exactly one run and no
+        # carry is needed: adjacent segments are non-contiguous by construction.
+        cell = self.shape_per_ds[0][1] * self.ploidy if self.shape_per_ds else 0
+        if len(self.order) == 0 or cell == 0:
+            return
+        ds, w = self.order[:, 0], self.order[:, 1]
+        for a, b in zip(*self._segments()):
+            yield Run(
+                src=int(ds[a]),
+                src_start=int(w[a]) * cell,
+                src_stop=(int(w[a]) + int(b - a)) * cell,
+                dst_start=int(a) * cell,
+            )
+
+    def _iter_samples(self) -> "Iterator[Run]":
+        n_regions = self.shape_per_ds[0][0] if self.shape_per_ds else 0
+        n_merged = len(self.order)
+        if n_regions == 0 or n_merged == 0 or self.ploidy == 0:
+            return
+        per_ds_samples = np.asarray([s for _, s in self.shape_per_ds], np.int64)
+        ds, w = self.order[:, 0], self.order[:, 1]
+        seg_starts, seg_stops = self._segments()
+
+        # One pending run, extended whenever the next segment continues it in
+        # both source and destination. This is what makes a run that spans a
+        # region boundary come out merged, with no special case for that
+        # boundary -- verified against the oracle at 2,880 configurations.
+        pending: Run | None = None
+        for r in range(n_regions):
+            for a, b in zip(seg_starts, seg_stops):
+                d = int(ds[a])
+                s_d = int(per_ds_samples[d])
+                src_start = (r * s_d + int(w[a])) * self.ploidy
+                src_stop = (r * s_d + int(w[b - 1]) + 1) * self.ploidy
+                dst_start = (r * n_merged + int(a)) * self.ploidy
+                if (
+                    pending is not None
+                    and pending.src == d
+                    and pending.src_stop == src_start
+                    and pending.dst_start + (pending.src_stop - pending.src_start)
+                    == dst_start
+                ):
+                    pending = Run(d, pending.src_start, src_stop, pending.dst_start)
+                else:
+                    if pending is not None:
+                        yield pending
+                    pending = Run(d, src_start, src_stop, dst_start)
+        if pending is not None:
+            yield pending

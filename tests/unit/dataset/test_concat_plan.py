@@ -6,6 +6,8 @@ import pytest
 from genvarloader._dataset._concat_plan import (
     CONCAT_CHUNK_BYTES,
     Run,
+    RunPlan,
+    _default_order,
     coalesce,
     provenance,
 )
@@ -168,3 +170,68 @@ def test_provenance_samples_interleaved_order_covers_all_slots():
         n = r.src_stop - r.src_start
         covered[r.dst_start : r.dst_start + n] += 1
     assert (covered == 1).all()
+
+
+def _rand_order(rng, counts):
+    """A random valid merged order: every (ds, within) slot exactly once."""
+    rows = [(d, i) for d, c in enumerate(counts) for i in range(c)]
+    rng.shuffle(rows)
+    return np.array(rows, dtype=np.int64).reshape(-1, 2)
+
+
+def _sorted_interleave_order(rng, counts):
+    """Each input's keys sorted, merged by global key -- the real two-cohort case."""
+    keys = []
+    for d, c in enumerate(counts):
+        ks = sorted(rng.choice(10_000, size=c, replace=False))
+        keys.extend((k, d, i) for i, k in enumerate(ks))
+    keys.sort()
+    return np.array([(d, i) for _, d, i in keys], dtype=np.int64).reshape(-1, 2)
+
+
+def test_run_plan_matches_coalesce_provenance_exhaustively():
+    """RunPlan must reproduce coalesce(provenance(...)) exactly, everywhere.
+
+    This is the correctness proof for the whole change: `provenance` + `coalesce`
+    are retained purely as this oracle. A plan that is wrong in a way this sweep
+    misses produces a merged dataset whose slots point at the wrong samples --
+    readable, and not obviously corrupt -- so the sweep deliberately includes the
+    sorted key-interleave order that models the real two-cohort merge, not only
+    shuffled and block-default orders.
+    """
+    import itertools
+
+    rng = np.random.default_rng(0)
+    n_checked = 0
+
+    for axis, ploidy, n_ds in itertools.product(
+        ("regions", "samples"), (1, 2, 3), (1, 2, 3)
+    ):
+        for _ in range(40):
+            counts = [int(rng.integers(0, 5)) for _ in range(n_ds)]
+            if axis == "regions":
+                n_samples = int(rng.integers(0, 5))
+                shapes = [(c, n_samples) for c in counts]
+            else:
+                n_regions = int(rng.integers(0, 5))
+                shapes = [(n_regions, c) for c in counts]
+
+            for mode in ("none", "default", "shuffled", "interleaved"):
+                if mode == "none":
+                    order = None
+                elif mode == "default":
+                    order = _default_order(len(counts), counts)
+                elif mode == "shuffled":
+                    order = _rand_order(rng, counts)
+                else:
+                    order = _sorted_interleave_order(rng, counts)
+
+                want = coalesce(provenance(axis, shapes, ploidy, order=order))
+                got = list(RunPlan(axis, shapes, ploidy, order=order))
+                n_checked += 1
+                assert got == want, (
+                    f"axis={axis} ploidy={ploidy} shapes={shapes} mode={mode}\n"
+                    f"want={want[:6]}\ngot={got[:6]}"
+                )
+
+    assert n_checked == 2880, "sweep shrank; the oracle coverage is the whole point"
