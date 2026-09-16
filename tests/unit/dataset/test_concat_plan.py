@@ -257,9 +257,12 @@ def test_slot_batches_reproduce_the_provenance_map():
             want = provenance(axis, shapes, ploidy, order=order)
             got = np.zeros_like(want)
             seen = np.zeros(len(want), bool)
-            for dst_start, ds_vec, slots in plan.slot_batches():
+            for dst_start, ds_vec, slots, ds_uniq in plan.slot_batches():
                 n = len(slots)
                 assert len(ds_vec) == n
+                # The yielded uniques must be exactly what a consumer would
+                # have computed itself; copy_runs trusts them to pick files.
+                np.testing.assert_array_equal(ds_uniq, np.unique(ds_vec))
                 got[dst_start : dst_start + n, 0] = ds_vec
                 got[dst_start : dst_start + n, 1] = slots
                 seen[dst_start : dst_start + n] = True
@@ -295,12 +298,12 @@ def test_slot_batches_chunk_large_region_runs(monkeypatch):
     assert len(list(plan)) == 1
 
     batches = list(plan.slot_batches())
-    assert [len(slots) for _, _, slots in batches] == [5, 5, 5, 5, 4]
+    assert [len(slots) for _, _, slots, _ in batches] == [5, 5, 5, 5, 4]
     assert plan.n_slots == 24
     # Destination stays contiguous across every chunk boundary.
-    assert [dst for dst, _, _ in batches] == [0, 5, 10, 15, 20]
+    assert [dst for dst, _, _, _ in batches] == [0, 5, 10, 15, 20]
     np.testing.assert_array_equal(
-        np.concatenate([slots for _, _, slots in batches]), np.arange(24)
+        np.concatenate([slots for _, _, slots, _ in batches]), np.arange(24)
     )
 
 
@@ -314,6 +317,9 @@ def test_explicit_run_plan_round_trips_a_hand_built_list():
     assert [b[0] for b in batches] == [0, 2]
     np.testing.assert_array_equal(batches[0][2], [0, 1])
     np.testing.assert_array_equal(batches[1][1], [1, 1])
+    # A run is single-sourced, so each batch reports exactly one dataset.
+    np.testing.assert_array_equal(batches[0][3], [0])
+    np.testing.assert_array_equal(batches[1][3], [1])
 
 
 def test_as_plan_rejects_a_generator():

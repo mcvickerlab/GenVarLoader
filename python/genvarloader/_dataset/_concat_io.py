@@ -80,10 +80,17 @@ def copy_runs(
     merged = np.empty(n_slots + 1, np.int64)
     merged[0] = 0
     lengths = merged[1:]
-    for dst_start, ds_vec, slots in plan.slot_batches():
+    for dst_start, ds_vec, slots, ds_uniq in plan.slot_batches():
         n = len(slots)
         out = lengths[dst_start : dst_start + n]
-        for d in np.unique(ds_vec):
+        if len(ds_uniq) == 1:
+            # Single-sourced batch -- every region-axis batch and every
+            # ExplicitRunPlan batch. Skip the mask entirely: it would be all-True
+            # over as many as _SLOT_BATCH_SLOTS elements.
+            off = src_offsets[int(ds_uniq[0])]
+            out[:] = off[slots + 1] - off[slots]
+            continue
+        for d in ds_uniq:
             m = ds_vec == d
             off = src_offsets[int(d)]
             sl = slots[m]
