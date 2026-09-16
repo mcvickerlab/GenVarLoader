@@ -282,20 +282,31 @@ class RunPlan:
 
     def slot_batches(
         self,
-    ) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
-        """Yield ``(dst_start, src_ds, src_slots)`` batches in destination order.
+    ) -> (
+        "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]]"
+    ):
+        """Yield ``(dst_start, src_ds, src_slots, src_ds_uniq)`` in destination order.
 
         Each batch describes a destination-contiguous span: ``src_ds[i]`` and
         ``src_slots[i]`` are the origin of merged slot ``dst_start + i``.
-        Concatenating every batch in order rebuilds :func:`provenance`'s output
-        exactly, which is what pins this method.
+        Concatenating every batch's first three fields in order rebuilds
+        :func:`provenance`'s output exactly, which is what pins this method.
+
+        ``src_ds_uniq`` is the sorted distinct values of ``src_ds``. It is
+        yielded rather than left to the consumer because this method already
+        knows it for free: on the regions axis a batch is single-sourced, and on
+        the samples axis ``src_ds`` is loop-invariant, so a consumer calling
+        ``np.unique`` per batch would re-sort the identical array once per
+        region -- 3,734 sorts of a 1.07e6-element array at the chr22 grid.
 
         Yields:
-            ``(dst_start, src_ds, src_slots)``, where the two arrays are int64
-            and equal in length.
+            ``(dst_start, src_ds, src_slots, src_ds_uniq)``. The first three are
+            int64, with ``src_ds`` and ``src_slots`` equal in length.
         """
         if self.axis == "regions":
             for run in self:
+                # Every batch of a region run is single-sourced.
+                uniq = np.array([run.src], np.int64)
                 pos, dst = run.src_start, run.dst_start
                 while pos < run.src_stop:
                     n = min(_SLOT_BATCH_SLOTS, run.src_stop - pos)
@@ -303,6 +314,7 @@ class RunPlan:
                         dst,
                         np.full(n, run.src, np.int64),
                         np.arange(pos, pos + n, dtype=np.int64),
+                        uniq,
                     )
                     pos += n
                     dst += n
@@ -318,10 +330,13 @@ class RunPlan:
         p = np.arange(self.ploidy, dtype=np.int64)
         # `order` is per merged SAMPLE; each contributes `ploidy` adjacent slots.
         ds_vec = np.repeat(ds, self.ploidy)
+        # Loop-invariant: the merged sample axis, hence its source-dataset
+        # grouping, is identical for every region.
+        ds_uniq = np.unique(ds_vec)
         for r in range(n_regions):
             base = (r * s_d + w) * self.ploidy
             slots = (base[:, None] + p[None, :]).reshape(-1)
-            yield (r * n_merged * self.ploidy, ds_vec, slots)
+            yield (r * n_merged * self.ploidy, ds_vec, slots, ds_uniq)
 
     def _segments(self) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         """Half-open ``[start, stop)`` spans of ``order`` with no break inside."""
@@ -413,14 +428,21 @@ class ExplicitRunPlan:
 
     def slot_batches(
         self,
-    ) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
-        """Yield one ``(dst_start, src_ds, src_slots)`` batch per run."""
+    ) -> (
+        "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]]"
+    ):
+        """Yield one ``(dst_start, src_ds, src_slots, src_ds_uniq)`` batch per run.
+
+        A run is drawn from exactly one source dataset, so ``src_ds_uniq`` is
+        always a single element here.
+        """
         for r in self._runs:
             n = r.src_stop - r.src_start
             yield (
                 r.dst_start,
                 np.full(n, r.src, np.int64),
                 np.arange(r.src_start, r.src_stop, dtype=np.int64),
+                np.array([r.src], np.int64),
             )
 
 

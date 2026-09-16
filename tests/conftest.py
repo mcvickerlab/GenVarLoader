@@ -177,6 +177,33 @@ def _svar2_slot_src(tmp_path_factory) -> tuple[Path, Path]:
 
 
 @pytest.fixture(scope="session")
+def svar2_slot_store(_svar2_slot_src, tmp_path_factory) -> Path:
+    """The ``.svar2`` store built from `_svar2_slot_src`.
+
+    Shared and session-scoped, so consumers must treat it as READ-ONLY: copy it
+    into ``tmp_path`` before mutating anything inside it, or the corruption
+    leaks into every later consumer of this fixture.
+    """
+    from genoray import _core
+
+    bcf, ref = _svar2_slot_src
+    store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(store),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (store / "meta.json").exists(), "svar2 conversion did not finish"
+    return store
+
+
+@pytest.fixture(scope="session")
 def svar2_slot_reference(_svar2_slot_src):
     """Opened ``gvl.Reference`` matching `phased_svar2_gvl`'s tiny chr1.
 
@@ -192,7 +219,7 @@ def svar2_slot_reference(_svar2_slot_src):
 
 
 @pytest.fixture(scope="session")
-def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
+def phased_svar2_gvl(svar2_slot_store, tmp_path_factory) -> Path:
     """A gvl dataset written from a ``.svar2`` source -> opens as ``Svar2Haps``.
 
     Reproduces the Phase-0-pinned record class for #315 (see
@@ -215,24 +242,11 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
     empirically before picking 80 (green up to ~40 regions, red by 60+).
     """
     import polars as pl
-    from genoray import SparseVar2, _core
+    from genoray import SparseVar2
 
     import genvarloader as gvl
 
-    bcf, ref = _svar2_slot_src
-    store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(store),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (store / "meta.json").exists(), "svar2 conversion did not finish"
+    store = svar2_slot_store
 
     n_regions = 80
     bed = pl.DataFrame(
@@ -325,7 +339,7 @@ def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
     return out
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def svar2_store_2s(tmp_path_factory) -> Path:
     """A two-sample (S0, S1) .svar2 store.
 
@@ -333,6 +347,14 @@ def svar2_store_2s(tmp_path_factory) -> Path:
     six of this fixture's former copies were private duplicates, three of which
     lived in ``tests/dataset/`` and silently shadowed ``tests/dataset/conftest.py``'s
     same-named three-sample fixture.
+
+    Session-scoped, and therefore SHARED: treat it as READ-ONLY. A test that
+    needs to mutate the store must ``shutil.copytree`` it into ``tmp_path`` and
+    mutate the copy. Mutating it in place corrupts every later consumer, and the
+    resulting failures surface in other modules -- when
+    ``test_fingerprint_detects_mutated_store`` appended one byte to a ``.bin``
+    here, it produced 17 failures plus a Rust ``cast_slice`` panic. That is why
+    this fixture was module-scoped until the mutating test was fixed to copy.
     """
     d = tmp_path_factory.mktemp("svar2_2s")
     return _build_svar2(_SVAR2_VCF_2S, ["S0", "S1"], d, "store")
