@@ -55,9 +55,10 @@ def copy_runs(
     Args:
         srcs: Payload file per input dataset (raw, headerless arrays).
         dst: Destination payload file, created or truncated.
-        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, or any
-            re-iterable sequence of :class:`._concat_plan.Run`. Iterated twice,
-            so a one-shot generator is not accepted.
+        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, a
+            :class:`._concat_plan.ExplicitRunPlan`, or any re-iterable sequence of
+            :class:`._concat_plan.Run`. Iterated twice, so a one-shot generator is
+            not accepted.
         src_offsets: Cumulative offsets per input dataset, each of length
             ``n_source_slots + 1``, in elements (not bytes).
         itemsize: Bytes per element of the payload dtype.
@@ -69,11 +70,13 @@ def copy_runs(
     n_slots = plan.n_slots
 
     # Lengths are written straight into the output buffer and cumsummed in
-    # place: a separate `lengths` array would be another n_slots int64s, 16.0 GB
-    # at the All of Us chr22 grid. Filling happens per destination-contiguous
-    # BATCH rather than per run, because on an interleaved sample merge every
-    # run is one slot long and a per-run numpy slice-assignment would be 2.0e9
-    # scalar calls -- slower than the byte streaming it feeds.
+    # place: a separate `lengths` array would be another n_slots int64s, 32.0 GB
+    # at the All of Us chr22 grid for the ploidy-bearing genotype payload
+    # (R*S*P = 4.0e9 slots; half that for per-sample tracks, which have no
+    # ploidy axis). Filling happens per destination-contiguous BATCH rather
+    # than per run, because on an interleaved sample merge every run is one
+    # slot long and a per-run numpy slice-assignment would be 4.0e9 scalar
+    # calls -- slower than the byte streaming it feeds.
     merged = np.empty(n_slots + 1, np.int64)
     merged[0] = 0
     lengths = merged[1:]
@@ -121,9 +124,9 @@ def gather_fixed(
     Args:
         srcs: Source file per input dataset.
         dst: Destination file, created or truncated.
-        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, or any
-            re-iterable sequence of :class:`._concat_plan.Run`. Iterated twice,
-            so a one-shot generator is not accepted.
+        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, a
+            :class:`._concat_plan.ExplicitRunPlan`, or any re-iterable sequence of
+            :class:`._concat_plan.Run`. Iterated once.
         record_bytes: Bytes per slot.
     """
     plan = as_plan(runs)
