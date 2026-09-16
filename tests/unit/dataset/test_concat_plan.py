@@ -321,3 +321,33 @@ def test_run_plan_is_re_iterable():
     plan = RunPlan("samples", [(2, 2), (2, 1)], 2)
     assert list(plan) == list(plan)
     assert len(list(plan)) > 0
+
+
+def test_run_plan_never_materializes_the_slot_space():
+    """Peak allocation must stay O(R + S), not O(R * S * P).
+
+    The old path on this grid allocates a (800_000, 2) int64 provenance map
+    (12.8 MB) and coalesces it into 800_000 one-slot Runs (~147 MB at 184 bytes
+    each). Both are invisible to every behavioural test, because RunPlan yields
+    exactly the same runs -- so this bound is what stops a future edit from
+    silently restoring them.
+    """
+    import tracemalloc
+
+    shapes = [(200, 1000), (200, 1000)]
+    # Interleaved samples: the worst case, one run per slot.
+    order = np.array(
+        [(d, i) for i in range(1000) for d in (0, 1)], dtype=np.int64
+    ).reshape(-1, 2)
+
+    tracemalloc.start()
+    try:
+        plan = RunPlan("samples", shapes, 2, order=order)
+        n_runs = sum(1 for _ in plan)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert plan.n_slots == 200 * 2000 * 2
+    assert n_runs == plan.n_slots // 2, "interleaved merge should give one run per cell"
+    assert peak < (1 << 20), f"peak {peak} bytes: the slot space is being materialized"
