@@ -63,18 +63,21 @@ def vcf_and_ref(tmp_path_factory) -> tuple[Path, Path]:
 def svar2_store(vcf_and_ref, tmp_path_factory) -> Path:
     bcf, ref = vcf_and_ref
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     out = tmp_path_factory.mktemp("svar2_write") / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1", "S2"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["chr1"], samples=["S0", "S1", "S2"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out

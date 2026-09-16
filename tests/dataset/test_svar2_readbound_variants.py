@@ -97,6 +97,7 @@ chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
 @pytest.fixture(scope="module")
 def svar2_store_dense_snp(tmp_path_factory) -> Path:
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     d = tmp_path_factory.mktemp("svar2_readbound_variants_dense_snp")
     ref = d / "ref.fa"
@@ -111,15 +112,17 @@ def svar2_store_dense_snp(tmp_path_factory) -> Path:
 
     out = d / "store"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["chr1"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out

@@ -40,6 +40,7 @@ _VCF = """\
 def ensembl_svar2_store(tmp_path_factory) -> Path:
     """A ``.svar2`` store whose only contig is spelled ``1``."""
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     d = tmp_path_factory.mktemp("svar2_contig_naming")
     ref = d / "ref.fa"
@@ -54,15 +55,17 @@ def ensembl_svar2_store(tmp_path_factory) -> Path:
 
     out = d / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["1"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
