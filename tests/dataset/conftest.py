@@ -9,26 +9,37 @@ import pytest
 import pyBigWig
 
 import genvarloader as gvl
+from tests.conftest import _SVAR2_REF as _REF
 
 SEQLEN = 20
 
-# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6 (C>CAT),
-# DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both ploids.
-# S2 is 0|0 everywhere: an ENTIRELY EMPTY sample column, so the sparse cache's
-# "cell not present" branch is exercised. Variants stop at 0-based 13, so a
-# region past that (see test_write_svar2_emits_cache) is an entirely empty ROW.
-# Mirrors tests/test_svar2_reconstruct.py's svar2_store fixture (which keeps only
-# S0/S1), so the matched .svar (SVAR1) store built from the same VCF is still a
-# valid parity oracle.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
+# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
+# (C>CAT), SNP@8 (T>C), DEL@11 (GTA>G, ilen -2), SNP@16 (A>C) each carry a
+# single ALT haplotype call (one ploid, in one sample), which keeps genoray's
+# cost model from routing them to the per-region dense channel. INS@18
+# (C>CGG) and SNP@29 (G>A) are 1|1 in every sample -- 6 carrier calls (3
+# samples x both ploids) -- crossing the dense threshold, so each populates
+# one of the two dense channels (indel and SNP respectively).
+# Over regions [0,20), [5,15), [25,40): S2 is 0|0 at every sparse variant, an
+# ENTIRELY EMPTY sample column in the vk view, so the sparse cache's "cell not
+# present" branch is still exercised. The resulting vk grid (region x sample x
+# ploid) has 7 of 18 cells occupied -- see test_fixture_grid_is_non_degenerate
+# in test_write_svar2.py for the exact layout. Shares its reference sequence
+# (``_SVAR2_REF``) with tests/conftest.py's svar2_store_2s fixture, but the two
+# VCFs are no longer the same variants, so this store is not a parity oracle
+# for that fixture.
 _VCF = """\
 ##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=40>
 ##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1\tS2
 chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1\t0|0
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1\t0|0
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t0|0\t0|0
+chr1\t9\t.\tT\tC\t.\t.\t.\tGT\t0|0\t0|1\t0|0
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t0|0\t1|0\t0|0
+chr1\t17\t.\tA\tC\t.\t.\t.\tGT\t0|1\t0|0\t0|0
+chr1\t19\t.\tC\tCGG\t.\t.\t.\tGT\t1|1\t1|1\t1|1
+chr1\t30\t.\tG\tA\t.\t.\t.\tGT\t1|1\t1|1\t1|1
 """
 
 

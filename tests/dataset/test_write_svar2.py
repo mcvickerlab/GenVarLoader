@@ -29,8 +29,10 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     svar2 = SparseVar2(svar2_store)
     bed = pl.DataFrame(
         {
-            # [25, 40) holds no variants at all: an entirely empty region row,
-            # which the sparse layout must round-trip as (0, 0) everywhere.
+            # [25, 40) holds no sparse variants: an entirely empty region row in
+            # the vk view, which the sparse layout must round-trip as (0, 0)
+            # everywhere. (The dense SNP at 0-based 29 lives here, but it's read
+            # through dense_snp_range, not the vk cache this row exercises.)
             "chrom": ["chr1", "chr1", "chr1"],
             "chromStart": [0, 5, 25],
             "chromEnd": [20, 15, 40],
@@ -621,24 +623,24 @@ def test_write_svar2_duplicate_store_samples_raises(
         gvl.write(tmp_path / "ds.gvl", bed, variants=svar2, overwrite=True)
 
 
-def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
-    """The fixture must NOT be 100% fill, or the sparse cache is untested.
+def test_fixture_grid_is_non_degenerate(svar2_store: Path, tmp_path: Path):
+    """The fixture's vk (sparse) grid must be a real 7-of-18 grid, not degenerate.
 
     Empty cells are the entire point of the sparse layout (#357): if every
     (region, sample, ploid) window holds a variant, the "cell is absent" branch
     never executes and a sparse/dense divergence there is invisible. S2 is 0|0
-    everywhere (empty column) and [25, 40) holds no variants (empty row).
+    everywhere (empty column) and [25, 40) holds no sparse variants (empty row).
 
     genoray also routes each variant to the per-sample SPARSE (vk) channel or
     the per-region DENSE channel by carrier-call count (see
-    `choose_representation` in genoray's cost model), and only the sparse
-    channel reaches this grid. This fixture's single-carrier SNP stays sparse
-    but both three-carrier indels route dense, so the grid this test inspects
-    is already 1/18 fill by construction, not 8/8 -- exactly one cell
-    (region 0, S0, ploid 0) is occupied. A cost-model shift that pushed that
-    last SNP dense too would empty the grid entirely and make every
-    sparse/dense parity test built on this fixture pass vacuously; guard
-    against that directly rather than assuming any occupancy at all.
+    `choose_representation` in genoray's cost model): every variant in this
+    fixture that carries a single ALT haplotype call stays sparse, and the two
+    all-1|1 variants (6 carrier calls each: 3 samples x both ploids) route
+    dense, one per dense channel. The resulting vk grid is 7 of
+    18 cells occupied (region x sample x ploid over 3 regions, 3 samples,
+    ploidy 2) -- a mix of present/absent cells, present cells with only one
+    channel filled, and an ordered (non-symmetric) sample axis, none of which
+    the old 1-of-18 grid could express (#406).
     """
     from genoray import SparseVar2
 
@@ -654,39 +656,69 @@ def test_fixture_has_empty_cells(svar2_store: Path, tmp_path: Path):
     )
     snp = np.asarray(d["vk_snp_range"], np.int64)  # (R*S*P, 2)
     indel = np.asarray(d["vk_indel_range"], np.int64)
-    nonempty = (snp[:, 1] > snp[:, 0]) | (indel[:, 1] > indel[:, 0])
+    w_snp = (snp[:, 1] - snp[:, 0]).reshape(3, len(sorted_samples), svar2.ploidy)
+    w_indel = (indel[:, 1] - indel[:, 0]).reshape(w_snp.shape)
+    occ = (w_snp > 0) | (w_indel > 0)
 
-    S, P = len(sorted_samples), svar2.ploidy
-    assert len(nonempty) == 3 * S * P
+    s0, s1, s2 = (sorted_samples.index(s) for s in ("S0", "S1", "S2"))
+
     # Row-major (R, S, P) -- pinned by the layout oracle in
     # test_write_svar2_emits_cache, which asserts this same reshape against the
-    # cache memmaps. Assert each empty structure SEPARATELY: a single
-    # `not nonempty.all()` is a disjunction that stays green when either one
-    # regresses alone, which is exactly the regression this guard exists to catch.
-    grid = nonempty.reshape(3, S, P)
-    s2 = sorted_samples.index("S2")
-    assert not grid[:, s2].any(), (
+    # cache memmaps. Assert each structure SEPARATELY: a single `not occ.all()`
+    # is a disjunction that stays green when any one of them regresses alone.
+    assert not occ[:, s2].any(), (
         "S2 is no longer all-reference; the empty COLUMN is gone"
     )
-    assert not grid[2].any(), (
-        "region [25, 40) now holds variants; the empty ROW is gone"
+    assert not occ[2].any(), (
+        "region [25, 40) now holds sparse variants; the empty ROW is gone"
     )
-    # Non-vacuity. genoray routes each variant to the per-sample SPARSE (vk)
-    # channel or the per-region DENSE channel by carrier-call count, and only
-    # the sparse channel lands in this grid: the fixture's single-carrier SNP
-    # stays sparse, both three-carrier indels route dense. Exactly one cell is
-    # therefore occupied -- (region 0, S0, ploid 0). If a cost-model change
-    # pushed that last variant dense too, this grid would be ALL empty and
-    # every sparse/dense parity test built on this fixture would pass
-    # trivially against an empty table, green and meaningless. Pin it.
-    assert grid.any(), (
+
+    # The measured grid. Every sparse variant carries exactly one call, which is
+    # what keeps genoray's cost model from routing it to the per-region dense
+    # channel; if a cost-model change pushes any of them dense this fails loudly
+    # rather than letting the sparse/dense parity tests pass against a thinner
+    # table while appearing green.
+    expected = np.zeros_like(occ)
+    expected[0, s0] = [True, True]
+    expected[0, s1] = [True, True]
+    expected[1, s0] = [False, True]
+    expected[1, s1] = [True, True]
+    np.testing.assert_array_equal(occ, expected)
+    assert int(occ.sum()) == 7, (
+        "fixture occupancy changed; update this pin deliberately"
+    )
+
+    # Non-vacuity, kept from the original guard: an all-empty vk grid would make
+    # every sparse/dense parity test built on this fixture pass trivially.
+    assert occ.any(), (
         "vk channel is entirely empty: genoray routed every variant to the "
         "dense channel, so all sparse-cache parity tests on this fixture are "
         "now vacuous"
     )
-    assert grid[0, sorted_samples.index("S0"), 0], (
-        "the fixture's one sparse-channel cell (region 0, S0, ploid 0) is gone"
-    )
+
+    # Mixed per-channel emptiness inside a PRESENT cell -- the property the old
+    # one-cell grid could not express, and the reason two shipped oracles were
+    # able to mask per channel without failing.
+    assert (w_snp[0, s0, 0] > 0) and (w_indel[0, s0, 0] == 0)
+    assert (w_snp[0, s0, 1] > 0) and (w_indel[0, s0, 1] > 0)
+    assert (w_snp[0, s1, 0] == 0) and (w_indel[0, s1, 0] > 0)
+
+    # An ABSENT cell inside a non-empty region: region 1 holds variants, but
+    # (S0, ploid 0) has none, so lookup must return (0, 0) there rather than a
+    # neighbour's range.
+    assert not occ[1, s0, 0]
+
+    # The sample axis is now ORDERED, not just occupied: S0 and S1 differ at
+    # (region 1, ploid 0), so a transposed sample axis is detectable. During
+    # #357 this guard had to be withdrawn as unsatisfiable.
+    assert not np.array_equal(occ[:, s0], occ[:, s1])
+
+    # Both dense channels are exercised. dense_snp_range was all zeros before
+    # this fixture was enriched, so the dense SNP path had no coverage here.
+    dense_snp = np.asarray(d["dense_snp_range"], np.int64)
+    dense_indel = np.asarray(d["dense_indel_range"], np.int64)
+    assert (dense_snp[:, 1] > dense_snp[:, 0]).any(), "dense SNP channel is empty again"
+    assert (dense_indel[:, 1] > dense_indel[:, 0]).any(), "dense indel channel is empty"
 
 
 def test_sparse_writer_rejects_oversized_grid(tmp_path):
@@ -743,21 +775,48 @@ def test_dense_layout_dataset_still_opens_and_reads(
     on MAJOR only, so a bump would make new GVL refuse every old dataset). The
     dense reader is what keeps old datasets openable.
 
-    This is a round-trip smoke test, not a parity pin: this fixture's grid has
-    only one non-empty cell (see `svar2_store`), so it can't distinguish a
-    correct dense reader from one that always returns the same wrong answer.
-    `test_dense_ranges_matches_fancy_indexing` in
-    `tests/unit/dataset/test_svar2_ranges.py` is what actually pins
-    `_DenseRanges.lookup` against dense fancy-indexing over a randomized grid;
-    this test's job is only to confirm the dense layout still opens and reads
-    through the full `Dataset.open` -> `with_seqs` stack.
+    This fixture's vk grid is 7 of 18 cells occupied (see
+    `test_fixture_grid_is_non_degenerate`), with a mix of present and absent
+    cells and a non-symmetric sample axis, so the read-for-read comparison of
+    the dense-layout dataset against the sparse-layout dataset below is no
+    longer vacuous the way it was against the old 1-of-18 grid.
 
-    Deviation from the brief: `Dataset.open` (not `gvl.write`) is what takes
-    `reference=` -- `with_seqs("haplotypes")` raises `ValueError` without one,
-    which the brief's snippet omitted. Added `vcf_and_ref` for the FASTA path.
+    It is, however, still not sufficient on its own to pin `_DenseRanges.lookup`
+    end-to-end: this bed's regions happen to nest ([0,20) is a superset of
+    [5,15), and disjoint from [25,40)), and haplotype construction filters
+    variant calls by absolute position. Confirmed by mutation-testing
+    `r_q = np.zeros_like(r_q)` at the top of `_DenseRanges.lookup` (#406):
+    every region query silently reads region 0's row, but the rendered
+    haplotype bytes still matched dataset `a` byte-for-byte, because the wrong
+    (region-0) variants either coincide with the right ones (shared position
+    6) or land outside the query window and get filtered as if absent. So the
+    byte-level loop below is kept as an end-to-end smoke check, but the
+    load-bearing parity pin is the raw-range comparison that follows: it calls
+    `_DenseRanges.lookup` (the exact code the mutation targets) directly and
+    compares its output against `_SparseRanges.lookup` on the same store,
+    which is immune to the positional self-healing above because it compares
+    indices, not rendered bytes.
+
+    That comparison pins the DENSE reader, not the sparse one, and the two
+    sides are less independent than they look: `rewrite_as_dense` builds
+    `dense_ds`'s vk arrays by calling `_SparseRanges.lookup` with this exact
+    `unravel_index(arange(R * S))` query, so a `_SparseRanges.lookup` bug would
+    reproduce on both sides of this comparison and cancel out. That blind spot
+    is covered elsewhere: `test_lookup_parity_*` in
+    `tests/unit/dataset/test_svar2_ranges.py` pins `_SparseRanges.lookup`
+    against a randomized independent reference, and
+    `test_dense_ranges_matches_fancy_indexing` in the same module pins
+    `_DenseRanges.lookup` against dense fancy-indexing directly (and was
+    independently confirmed to fail under this same mutation) -- so between
+    the three tests, both readers are pinned against something other than
+    each other. Defense in depth, not a single self-consistent check.
+
+    `Dataset.open`, not `gvl.write`, takes `reference=`; `with_seqs("haplotypes")`
+    raises `ValueError` without one, hence `vcf_and_ref`.
     """
     from genoray import SparseVar2
 
+    from genvarloader._dataset._svar2_ranges import _ranges_reader
     from tests._oracles.svar2_dense_layout import rewrite_as_dense
 
     _bcf, ref = vcf_and_ref
@@ -779,6 +838,19 @@ def test_dense_layout_dataset_still_opens_and_reads(
                 np.asarray(b[r, s].to_padded(b"N")),
             )
 
+    # The load-bearing check: compare _DenseRanges.lookup's raw output against
+    # _SparseRanges.lookup on the byte-identical sparse store, over the full
+    # (region, sample) grid. Unlike the byte comparison above, this cannot be
+    # satisfied by coincidence -- see the docstring.
+    sparse_reader = _ranges_reader(sparse_ds / "genotypes" / "svar2_ranges")
+    dense_reader = _ranges_reader(dense_ds / "genotypes" / "svar2_ranges")
+    R, S, P = sparse_reader.n_regions, sparse_reader.n_samples, sparse_reader.ploidy
+    r_q, si_q = np.unravel_index(np.arange(R * S), (R, S))
+    sparse_snp, sparse_indel = sparse_reader.lookup(r_q, si_q, P)
+    dense_snp, dense_indel = dense_reader.lookup(r_q, si_q, P)
+    np.testing.assert_array_equal(dense_snp, sparse_snp)
+    np.testing.assert_array_equal(dense_indel, sparse_indel)
+
 
 def test_write_svar2_empty_cell_is_zero_not_insertion_point(
     svar2_store: Path, tmp_path: Path
@@ -792,12 +864,13 @@ def test_write_svar2_empty_cell_is_zero_not_insertion_point(
     dense cell at the same coordinate would instead carry genoray's real
     insertion point (x, x) for x > 0.
 
-    This fixture's grid (bed [0,20)/[5,15)/[25,40) over samples S0/S1/S2) has
-    exactly one non-empty cell: (region 0, S0, ploid 0). Region 0 / S1 / ploid 0
-    is empty in both channels, and genoray's own dense insertion point there is
-    (1, 1) -- confirmed directly via `_find_ranges` below -- so this test would
-    fail loudly (assert (1, 1) == (0, 0)) if the sparse writer ever stored
-    empty cells verbatim instead of collapsing them to (0, 0).
+    This fixture's grid (bed [0,20)/[5,15)/[25,40) over samples S0/S1/S2) has 7
+    of 18 non-empty cells (see `test_fixture_grid_is_non_degenerate`). (region
+    1, S0, ploid 0) is one of the empty ones, and genoray's own dense
+    insertion point there is (1, 1) in the SNP channel -- confirmed directly
+    via `_find_ranges` below -- so this test would fail loudly
+    (assert (1, 1) == (0, 0)) if the sparse writer ever stored empty cells
+    verbatim instead of collapsing them to (0, 0).
     """
     from genoray import SparseVar2
 
@@ -824,20 +897,20 @@ def test_write_svar2_empty_cell_is_zero_not_insertion_point(
         samples=sorted_samples,
     )
     P = svar2.ploidy
-    s1 = sorted_samples.index("S1")
+    s0 = sorted_samples.index("S0")
     exp_snp = np.asarray(d["vk_snp_range"], np.int64).reshape(bed.height, -1, P, 2)
     exp_indel = np.asarray(d["vk_indel_range"], np.int64).reshape(bed.height, -1, P, 2)
-    assert tuple(exp_snp[0, s1, 0]) != (0, 0), (
+    assert tuple(exp_snp[1, s0, 0]) != (0, 0), (
         "fixture assumption broken: genoray's dense insertion point for the"
-        " empty (region 0, S1, ploid 0) cell is expected to be nonzero"
+        " empty (region 1, S0, ploid 0) cell is expected to be nonzero"
     )
-    assert exp_indel[0, s1, 0, 1] == exp_indel[0, s1, 0, 0], (
+    assert exp_indel[1, s0, 0, 1] == exp_indel[1, s0, 0, 0], (
         "fixture assumption broken: expected the indel channel empty too"
     )
 
     reader = _ranges_reader(out / "genotypes" / "svar2_ranges")
     got_snp, got_indel = reader.lookup(
-        np.array([0], np.int64), np.array([s1], np.int64), P
+        np.array([1], np.int64), np.array([s0], np.int64), P
     )
     np.testing.assert_array_equal(got_snp[0], (0, 0))
     np.testing.assert_array_equal(got_indel[0], (0, 0))

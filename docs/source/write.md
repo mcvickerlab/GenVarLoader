@@ -162,6 +162,19 @@ size of the merged dataset at sequential-IO speed, so a merge of a very large da
 order of a terabyte) could plausibly take hours rather than minutes. It's worth doing against the
 alternative of re-extracting genotypes from scratch, not as a routine step.
 
+`gvl.concat`'s planning is streaming: it derives the merge plan from the sorted
+merge order rather than building a map over every `(region, sample, ploid)` slot,
+so its memory stays proportional to regions plus samples rather than to their
+product. The merged `offsets.npy` it writes is still one int64 per merged
+`(region, sample[, ploid])` slot — about 16 GB for per-sample tracks (no ploidy
+axis) or 32 GB for diploid genotypes, at a 3,734-region by 535,662-sample grid —
+and that is a property of the ragged on-disk format, not of the merge. Peak
+resident memory during the copy is roughly double that figure: the copy also
+holds each input's own offsets array for the duration, and since the inputs
+partition the merged grid, their combined size is about the same as the merged
+array itself — so about 32 GB for per-sample tracks or 64 GB for diploid
+genotypes, at the same grid.
+
 For contig-sharded `.svar2` workflows there is a cheaper path at the variant-store layer:
 `genoray.SparseVar2.concat(output, sources, mode="copy")` merges disjoint-contig `.svar2` stores
 that share identical samples/ploidy/fields, then a single `gvl.write` call over the merged store

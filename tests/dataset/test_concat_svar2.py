@@ -431,20 +431,23 @@ def test_concat_svar2_samples_axis_remaps_nonzero_local_slot(tmp_path: Path):
     """The samples-axis s_map (scatter-inverse of `order`) must be exercised at a
     non-trivial local index, not just index 0.
 
-    The shared `svar2_store` fixture (used by `svar2_shards_by_samples`) has only
-    ONE occupied sparse cell across its whole (3 region, 3 sample, ploidy 2) grid,
-    and that cell sits at local sample slot 0 in both its owning shard and the
-    merged order -- so it stays in place under a completely broken s_map that
-    forgets to invert `order` at all (`s_maps[d][w] = w`). Verified directly: that
-    exact one-line mutation in `_concat_svar2_ranges` left the whole
-    `test_concat_svar2.py` suite (all 9 tests, including both characterization
-    tests) passing.
+    The shared `svar2_store` fixture (used by `svar2_shards_by_samples`) has a
+    7-of-18 occupied grid over (3 region, 3 sample, ploidy 2) -- see
+    `test_fixture_grid_is_non_degenerate` in `test_write_svar2.py` -- with
+    occupied cells at non-trivial local sample slots, so a completely broken
+    s_map that forgets to invert `order` at all (`s_maps[d][w] = w`) is now
+    also caught incidentally by the characterization tests: verified directly,
+    that exact one-line mutation in `_concat_svar2_ranges` now fails 4 of the
+    12 tests in `test_concat_svar2.py` (this one plus 3 others, including both
+    characterization tests).
 
-    This test builds two minimal, from-scratch `svar2_ranges/` directories (no
-    `gvl.write`, no VCF) whose one occupied cell each sits at a local index that
-    is NOT its merged index, and drives `_concat_svar2_ranges` directly so the
-    scatter-inverse itself is what's under test, not diluted by an otherwise-empty
-    grid.
+    This test remains the TARGETED pin for the s_map regardless: it builds two
+    minimal, from-scratch `svar2_ranges/` directories (no `gvl.write`, no VCF)
+    whose one occupied cell each sits at a local index that is NOT its merged
+    index, and drives `_concat_svar2_ranges` directly, so the scatter-inverse
+    itself is what's under test -- isolated from the shared fixture's other
+    axes and the rest of the write/read pipeline, and unambiguous about which
+    mutation broke it, rather than relying on incidental fallout elsewhere.
     """
     import json
 
@@ -520,34 +523,37 @@ def test_concat_svar2_regions_axis_remaps_and_orders_correctly(tmp_path: Path):
     """Regions-axis twin of `..._samples_axis_remaps_nonzero_local_slot`.
 
     `axis="regions"` has TWO independent merge implementations, each with its
-    own way to get the region order wrong, and the shared fixture's regions
-    shards (`svar2_shards_by_regions`) only ever put their one occupied cell in
-    merged region 0 -- where every ordering agrees -- so neither bug is visible
-    to `..._regions_reads_like_single_write` or
-    `..._regions_fast_path_matches_general_merge`. Verified directly, by
-    injecting each bug into `_concat_svar2_ranges` and re-running the whole
-    `test_concat_svar2.py` suite (10 tests, both characterization tests
-    included):
+    own way to get the region order wrong. The shared fixture's regions shards
+    (`svar2_shards_by_regions`) are built from the enriched 7-of-18 grid (see
+    `test_fixture_grid_is_non_degenerate` in `test_write_svar2.py`), so both
+    bugs are now caught incidentally by other tests in this file too --
+    verified directly, by injecting each bug into `_concat_svar2_ranges` and
+    re-running the whole `test_concat_svar2.py` suite (12 tests total, both
+    characterization tests included):
 
     - the general merge path's `r_maps` (used whenever any input is
       `_DenseRanges`, so the fast path is unavailable) must be the
       scatter-inverse of `order` (source -> merged). Setting
-      `r_maps[d][w] = w` (un-inverted / identity) left all 10 tests passing.
+      `r_maps[d][w] = w` (un-inverted / identity) now fails 2 of the 12 tests:
+      this one and `..._regions_fast_path_matches_general_merge`.
     - the fast path (all-sparse inputs) reorders region-CSR blocks via
-      `provenance("regions", ..., order=order)`; passing `order=None` (block
-      concat: all of input #0's regions, then all of input #1's) also left
-      all 10 tests passing.
+      `_region_plan`'s `RunPlan(..., order=order)`; passing `order=None`
+      (block concat: all of input #0's regions, then all of input #1's) now
+      fails 3 of the 12 tests: this one, `..._regions_fast_path_matches_general_merge`,
+      and the `..._regions_reads_like_single_write` characterization test.
 
     Both bugs preserve every per-region entry COUNT and never collide two
     entries onto the same `(region, cell_id)` pair, so `region_ptr`'s shape is
     unaffected, nothing raises, and the dataset opens cleanly -- they only
     move entries to the wrong region or reorder them within one. This test
+    remains the TARGETED pin regardless of that incidental coverage: it
     hand-builds two from-scratch shards (no `gvl.write`) with entries placed
     so the correct interleaved order visibly disagrees with both bugs' output,
     and drives `_concat_svar2_ranges` directly against both shards sparse
     (fast path) and with one rewritten dense (general path via
     `rewrite_as_dense`, the existing dense-input test oracle), so both merge
-    implementations are actually exercised.
+    implementations are actually exercised in isolation, unambiguous about
+    which one broke.
     """
     import json
 

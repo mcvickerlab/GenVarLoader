@@ -16,49 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6 (C>CAT),
-# DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both ploids.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
-_VCF = """\
-##fileformat=VCFv4.2
-##contig=<ID=chr1,length=40>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
-chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
-"""
-
-
-@pytest.fixture(scope="module")
-def svar2_store(tmp_path_factory) -> Path:
-    from genoray import _core
-
-    d = tmp_path_factory.mktemp("svar2_readbound")
-    ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
-    subprocess.run(["samtools", "faidx", str(ref)], check=True)
-
-    vcf = d / "in.vcf"
-    vcf.write_text(_VCF)
-    bcf = d / "in.bcf"
-    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
-    subprocess.run(["bcftools", "index", str(bcf)], check=True)
-
-    out = d / "store"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (out / "meta.json").exists(), "conversion did not finish"
-    return out
+from tests.conftest import _SVAR2_REF
 
 
 @pytest.mark.parametrize(
@@ -69,18 +27,18 @@ def svar2_store(tmp_path_factory) -> Path:
         [(0, 40), (2, 2), (20, 25)],  # empty region + a variant-free window
     ],
 )
-def test_readbound_matches_union_oracle(svar2_store, regions):
+def test_readbound_matches_union_oracle(svar2_store_2s, regions):
     import genoray
 
     from tests._oracles.svar2_source import SparseVar2Source
     from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     contig = "chr1"
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_arr = np.frombuffer(ref_bytes, np.uint8)
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_store_2s))
     S, P = sv.n_samples, sv.ploidy
     assert (S, P) == (2, 2)
 
@@ -131,7 +89,7 @@ def test_readbound_matches_union_oracle(svar2_store, regions):
         pytest.fail("data mismatch but no single hap slice differed (offset bug?)")
 
 
-def test_readbound_haps_noncontiguous_ref_raises(svar2_store):
+def test_readbound_haps_noncontiguous_ref_raises(svar2_store_2s):
     """A non-C-contiguous ``ref_`` view must surface as ``ValueError``, not a Rust
     panic.
 
@@ -152,17 +110,17 @@ def test_readbound_haps_noncontiguous_ref_raises(svar2_store):
 
     contig = "chr1"
     regions = [(0, 40)]
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 
-    # A strided (non-contiguous) view carrying the same bytes as `_REF`: double up
+    # A strided (non-contiguous) view carrying the same bytes as `_SVAR2_REF`: double up
     # each byte, then stride over every other one to recover the original values.
     doubled = np.repeat(np.frombuffer(ref_bytes, np.uint8), 2)
     ref_strided = doubled[::2]
     assert ref_strided.flags["C_CONTIGUOUS"] is False
     assert bytes(ref_strided) == ref_bytes
 
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_store_2s))
     S, P = sv.n_samples, sv.ploidy
 
     d = sv._find_ranges(
@@ -211,7 +169,7 @@ def test_readbound_haps_noncontiguous_ref_raises(svar2_store):
         )
 
 
-def test_readbound_matches_union_oracle_with_shifts(svar2_store):
+def test_readbound_matches_union_oracle_with_shifts(svar2_store_2s):
     """Non-trivial per-hap jitter shifts must also match byte-for-byte."""
     import genoray
 
@@ -220,11 +178,11 @@ def test_readbound_matches_union_oracle_with_shifts(svar2_store):
 
     contig = "chr1"
     regions = [(0, 40), (5, 20)]
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_arr = np.frombuffer(ref_bytes, np.uint8)
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_store_2s))
     S, P = sv.n_samples, sv.ploidy
     n_q = len(regions) * S
     rng = np.random.default_rng(0)
@@ -282,7 +240,7 @@ def svar2_store_dense_snp(tmp_path_factory) -> Path:
 
     d = tmp_path_factory.mktemp("svar2_readbound_dense_snp")
     ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
+    ref.write_text(f">chr1\n{_SVAR2_REF}\n")
     subprocess.run(["samtools", "faidx", str(ref)], check=True)
 
     vcf = d / "in.vcf"
@@ -321,7 +279,7 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
     from tests._oracles.svar2_readbound_inputs import build_readbound_haps
 
     contig = "chr1"
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_arr = np.frombuffer(ref_bytes, np.uint8)
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 
@@ -372,8 +330,8 @@ def test_readbound_dense_snp_matches_union_oracle(svar2_store_dense_snp):
     )
 
 
-def _svar2_haps_dataset(tmp_path: Path, svar2_store: Path):
-    """Build a full gvl Dataset over the ``svar2_store`` fixture and return its
+def _svar2_haps_dataset(tmp_path: Path, svar2_store_2s: Path):
+    """Build a full gvl Dataset over the ``svar2_store_2s`` fixture and return its
     haplotypes view (Svar2Haps-backed).
 
     Lifted/adapted from ``test_svar2_dataset.py::_open_pair`` -- this file has no
@@ -387,14 +345,14 @@ def _svar2_haps_dataset(tmp_path: Path, svar2_store: Path):
     import genvarloader as gvl
 
     bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
-    ref = svar2_store.parent / "ref.fa"
+    ref = svar2_store_2s.parent / "ref.fa"
     d = tmp_path / "ds.gvl"
-    gvl.write(d, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True)
+    gvl.write(d, bed, variants=SparseVar2(svar2_store_2s), samples=None, overwrite=True)
     return gvl.Dataset.open(d, reference=ref).with_seqs("haplotypes")
 
 
 def test_deterministic_haps_read_skips_pre_reconstruct_diffs(
-    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, svar2_store_2s: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A deterministic (shifts=0) haplotypes read must NOT call the separate
     hap_diffs readbound kernel -- reconstruct sizes itself internally. Guards the
@@ -410,13 +368,13 @@ def test_deterministic_haps_read_skips_pre_reconstruct_diffs(
 
     monkeypatch.setattr(m, "hap_diffs_from_svar2_readbound", counting)
 
-    ds2 = _svar2_haps_dataset(tmp_path, svar2_store)
+    ds2 = _svar2_haps_dataset(tmp_path, svar2_store_2s)
     ds2[:, :]
     assert calls["diffs"] == 0
 
 
-def _svar2_spliced_dataset(tmp_path: Path, svar2_store: Path):
-    """A spliced (2-exon transcript) view over the ``svar2_store`` fixture.
+def _svar2_spliced_dataset(tmp_path: Path, svar2_store_2s: Path):
+    """A spliced (2-exon transcript) view over the ``svar2_store_2s`` fixture.
 
     Splicing is the path where sizing and reconstruction are separate calls --
     the plan builder needs per-query haplotype lengths before the kernel can be
@@ -437,9 +395,9 @@ def _svar2_spliced_dataset(tmp_path: Path, svar2_store: Path):
             "exon_number": [1, 2],
         }
     )
-    ref = svar2_store.parent / "ref.fa"
+    ref = svar2_store_2s.parent / "ref.fa"
     d = tmp_path / "spliced.gvl"
-    gvl.write(d, bed, variants=SparseVar2(svar2_store), samples=None, overwrite=True)
+    gvl.write(d, bed, variants=SparseVar2(svar2_store_2s), samples=None, overwrite=True)
     return (
         gvl.Dataset.open(d, reference=ref)
         .with_settings(splice_info=("transcript_id", "exon_number"))
@@ -448,7 +406,7 @@ def _svar2_spliced_dataset(tmp_path: Path, svar2_store: Path):
 
 
 def test_spliced_haps_read_gathers_inputs_once_per_contig(
-    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, svar2_store_2s: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Regression for #349: the sizing and reconstruct passes share one gather.
 
@@ -469,7 +427,7 @@ def test_spliced_haps_read_gathers_inputs_once_per_contig(
 
     monkeypatch.setattr(m.Svar2Haps, "_gather_inputs", counting)
 
-    ds = _svar2_spliced_dataset(tmp_path, svar2_store)
+    ds = _svar2_spliced_dataset(tmp_path, svar2_store_2s)
     out = ds[:, :]
 
     assert calls["gather"] == 1
@@ -477,7 +435,7 @@ def test_spliced_haps_read_gathers_inputs_once_per_contig(
 
 
 def test_spliced_haps_read_runs_the_rust_gather_once(
-    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, svar2_store_2s: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Regression for #349: the two FFI passes share one ``gather_haps_readbound``.
 
@@ -499,7 +457,7 @@ def test_spliced_haps_read_runs_the_rust_gather_once(
 
     monkeypatch.setattr(m, "gather_svar2_readbound", counting)
 
-    ds = _svar2_spliced_dataset(tmp_path, svar2_store)
+    ds = _svar2_spliced_dataset(tmp_path, svar2_store_2s)
     out = ds[:, :]
 
     assert calls["gather"] == 1  # one contig group, one gather for both passes
@@ -507,7 +465,7 @@ def test_spliced_haps_read_runs_the_rust_gather_once(
 
 
 def test_spliced_haps_read_is_byte_identical_without_the_shared_gather(
-    tmp_path: Path, svar2_store: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, svar2_store_2s: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Sharing the gather must not change a single output byte.
 
@@ -517,17 +475,17 @@ def test_spliced_haps_read_is_byte_identical_without_the_shared_gather(
     """
     import genvarloader._dataset._svar2_haps as m
 
-    shared = _svar2_spliced_dataset(tmp_path, svar2_store)[:, :]
+    shared = _svar2_spliced_dataset(tmp_path, svar2_store_2s)[:, :]
 
     monkeypatch.setattr(m.Svar2Haps, "_readbound_gather", lambda self, ci, gi, P: None)
-    per_pass = _svar2_spliced_dataset(tmp_path / "again", svar2_store)[:, :]
+    per_pass = _svar2_spliced_dataset(tmp_path / "again", svar2_store_2s)[:, :]
 
     np.testing.assert_array_equal(shared.data, per_pass.data)
     np.testing.assert_array_equal(shared.offsets, per_pass.offsets)
 
 
 def test_readbound_gather_matches_the_unfused_call_and_guards_its_shape(
-    svar2_store: Path,
+    svar2_store_2s: Path,
 ):
     """The handle is a pure caching detail, and a mismatched one must raise.
 
@@ -545,7 +503,7 @@ def test_readbound_gather_matches_the_unfused_call_and_guards_its_shape(
 
     from tests._oracles.svar2_readbound_inputs import readbound_diff_inputs
 
-    svar2 = SparseVar2(svar2_store)
+    svar2 = SparseVar2(svar2_store_2s)
     contig = svar2.contigs[0]
     args = readbound_diff_inputs(svar2, contig, [(0, 13), (20, 40)])
 
@@ -564,7 +522,7 @@ def test_readbound_gather_matches_the_unfused_call_and_guards_its_shape(
 
 
 def test_svar2_haps_n_variants_is_a_readonly_zero_stride_view(
-    tmp_path: Path, svar2_store: Path
+    tmp_path: Path, svar2_store_2s: Path
 ):
     """#355 mutation-kill: assert on a REAL ``Svar2Haps.n_variants``, not a
     standalone ``np.broadcast_to`` call.
@@ -576,7 +534,7 @@ def test_svar2_haps_n_variants_is_a_readonly_zero_stride_view(
     goes back to a real ``np.zeros`` allocation: shape/dtype are preserved by a
     plain ``np.zeros`` too, but strides/writeability are not.
     """
-    ds = _svar2_haps_dataset(tmp_path, svar2_store)
+    ds = _svar2_haps_dataset(tmp_path, svar2_store_2s)
     seqs = ds._seqs
     n_variants = seqs.n_variants
 

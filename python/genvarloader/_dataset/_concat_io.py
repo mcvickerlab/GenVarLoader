@@ -12,11 +12,18 @@ from __future__ import annotations
 import errno
 import shutil
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ._concat_plan import CONCAT_CHUNK_BYTES, Run
+from ._concat_plan import (
+    CONCAT_CHUNK_BYTES,
+    ExplicitRunPlan,
+    Run,
+    RunPlan,
+    as_plan,
+)
 
 __all__ = ["copy_runs", "gather_fixed", "link_or_copy_buffered"]
 
@@ -39,7 +46,7 @@ def _stream_range(fi, fo, start: int, stop: int) -> None:
 def copy_runs(
     srcs: list[Path],
     dst: Path,
-    runs: list[Run],
+    runs: "RunPlan | ExplicitRunPlan | Sequence[Run]",
     src_offsets: list[NDArray[np.int64]],
     itemsize: int,
 ) -> NDArray[np.int64]:
@@ -48,7 +55,10 @@ def copy_runs(
     Args:
         srcs: Payload file per input dataset (raw, headerless arrays).
         dst: Destination payload file, created or truncated.
-        runs: Destination-ordered runs from :func:`._concat_plan.coalesce`.
+        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, a
+            :class:`._concat_plan.ExplicitRunPlan`, or any re-iterable sequence of
+            :class:`._concat_plan.Run`. Iterated twice, so a one-shot generator is
+            not accepted.
         src_offsets: Cumulative offsets per input dataset, each of length
             ``n_source_slots + 1``, in elements (not bytes).
         itemsize: Bytes per element of the payload dtype.
@@ -56,23 +66,34 @@ def copy_runs(
     Returns:
         Merged cumulative offsets, length ``total_merged_slots + 1``, in elements.
     """
-    n_slots = sum(r.src_stop - r.src_start for r in runs)
-    lengths = np.empty(n_slots, np.int64)
-    for r in runs:
-        off = src_offsets[r.src]
-        n = r.src_stop - r.src_start
-        lengths[r.dst_start : r.dst_start + n] = (
-            off[r.src_start + 1 : r.src_stop + 1] - off[r.src_start : r.src_stop]
-        )
+    plan = as_plan(runs)
+    n_slots = plan.n_slots
 
+    # Lengths are written straight into the output buffer and cumsummed in
+    # place: a separate `lengths` array would be another n_slots int64s, 32.0 GB
+    # at the All of Us chr22 grid for the ploidy-bearing genotype payload
+    # (R*S*P = 4.0e9 slots; half that for per-sample tracks, which have no
+    # ploidy axis). Filling happens per destination-contiguous BATCH rather
+    # than per run, because on an interleaved sample merge every run is one
+    # slot long and a per-run numpy slice-assignment would be 4.0e9 scalar
+    # calls -- slower than the byte streaming it feeds.
     merged = np.empty(n_slots + 1, np.int64)
     merged[0] = 0
-    np.cumsum(lengths, out=merged[1:])
+    lengths = merged[1:]
+    for dst_start, ds_vec, slots in plan.slot_batches():
+        n = len(slots)
+        out = lengths[dst_start : dst_start + n]
+        for d in np.unique(ds_vec):
+            m = ds_vec == d
+            off = src_offsets[int(d)]
+            sl = slots[m]
+            out[m] = off[sl + 1] - off[sl]
+    np.cumsum(lengths, out=lengths)
 
     handles: dict[int, object] = {}
     try:
         with open(dst, "wb") as fo:
-            for r in runs:
+            for r in plan:
                 if r.src not in handles:
                     handles[r.src] = open(srcs[r.src], "rb")
                 fi = handles[r.src]
@@ -92,7 +113,7 @@ def copy_runs(
 def gather_fixed(
     srcs: list[Path],
     dst: Path,
-    runs: list[Run],
+    runs: "RunPlan | ExplicitRunPlan | Sequence[Run]",
     record_bytes: int,
 ) -> None:
     """Gather fixed-size records through a run plan.
@@ -103,13 +124,16 @@ def gather_fixed(
     Args:
         srcs: Source file per input dataset.
         dst: Destination file, created or truncated.
-        runs: Destination-ordered runs.
+        runs: Destination-ordered runs — a :class:`._concat_plan.RunPlan`, a
+            :class:`._concat_plan.ExplicitRunPlan`, or any re-iterable sequence of
+            :class:`._concat_plan.Run`. Iterated once.
         record_bytes: Bytes per slot.
     """
+    plan = as_plan(runs)
     handles: dict[int, object] = {}
     try:
         with open(dst, "wb") as fo:
-            for r in runs:
+            for r in plan:
                 if r.src not in handles:
                     handles[r.src] = open(srcs[r.src], "rb")
                 _stream_range(

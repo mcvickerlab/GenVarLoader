@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from .._atomic import atomic_dir
 from .._fasta_cache import fingerprint as _bounded_fingerprint
 from ._concat_io import copy_runs, gather_fixed, link_or_copy_buffered
-from ._concat_plan import Run, coalesce, provenance
+from ._concat_plan import ExplicitRunPlan, Run, RunPlan, as_plan
 from ._concat_validate import (
     ConcatInput,
     load_inputs,
@@ -200,10 +200,15 @@ def _assert_annot_track_matches(name: str, src_dirs: list[Path]) -> None:
                 )
 
 
+def _region_plan(shapes: list[tuple[int, int]], order: "NDArray[np.int64]") -> RunPlan:
+    """Build the region-only (``n_samples=1, ploidy=1``) merge plan shared by both region-axis sites."""
+    return RunPlan("regions", [(r, 1) for r, _ in shapes], 1, order=order)
+
+
 def _gather_svar_offsets(
     paths: list[Path],
     out_dir: Path,
-    runs: list[Run],
+    runs: "RunPlan | ExplicitRunPlan | Sequence[Run]",
     shapes: list[tuple[int, int]],
     ploidy: int,
 ) -> None:
@@ -211,7 +216,7 @@ def _gather_svar_offsets(
 
     Stored as two leading planes (starts, then stops), each a flat ``(R*S*P,)``
     int64 array over the same ``(region, sample, ploid)`` C-order flat-slot
-    space ``runs`` was coalesced over (see ``_concat_plan``). ``gather_fixed``
+    space ``runs`` plans over (see ``_concat_plan``). ``gather_fixed``
     streams fixed-stride *records* through a single byte-addressed file and
     can't express this layout: the slot axis is nested *inside* the two
     leading planes, so a given slot's start and stop live ``R*S*P`` elements
@@ -222,6 +227,7 @@ def _gather_svar_offsets(
     backend) is the correct call here, not a shortcut around the "don't
     materialize a full array" constraint.
     """
+    plan = as_plan(runs)
     n_src_slots = [r * s * ploidy for r, s in shapes]
     planes = []
     for plane in (0, 1):
@@ -229,8 +235,8 @@ def _gather_svar_offsets(
         for p, n in zip(paths, n_src_slots):
             arr = np.fromfile(p / "genotypes" / "offsets.npy", dtype=np.int64)
             srcs.append(arr.reshape(2, -1)[plane])
-        out = np.empty(sum(r.src_stop - r.src_start for r in runs), np.int64)
-        for r in runs:
+        out = np.empty(plan.n_slots, np.int64)
+        for r in plan:
             n = r.src_stop - r.src_start
             out[r.dst_start : r.dst_start + n] = srcs[r.src][r.src_start : r.src_stop]
         planes.append(out)
@@ -256,13 +262,15 @@ def _concat_svar2_ranges(
     input, remapped into the merged keyspace, ordered, and appended. Legacy dense
     inputs feed the same merge through ``_DenseRanges.entries_for_regions``.
 
-    After this change an svar2 ``concat`` with no per-sample tracks holds nothing
-    ``R x S``-sized: the ``(R*S*P, 2)`` ``provenance`` array (64 GB at All of Us
-    chr22) and the ``list[Run]`` ``coalesce`` builds from it (~204 bytes per run,
-    which on an interleaved sample merge degenerates to one run per slot) are both
-    gone from this path. Per-sample tracks still plan in core at
-    ``_concat.py:465`` -- 32 GB plus a ~424 GB run list at the same projection --
-    so ``concat`` is bounded only for tracks-free datasets. Tracked separately.
+    No stage of this merge plans in core any more. The ``(R*S*P, 2)``
+    ``provenance`` array (64 GB at the All of Us chr22 grid) and the
+    ``list[Run]`` ``coalesce`` built from it (184 bytes per run, degenerating
+    to one run per slot on an interleaved sample merge) are gone from every
+    path in this module, per-sample tracks included: ``RunPlan`` derives the
+    same runs from ``order`` alone. What remains is the output offsets array
+    itself -- the merged file this function (or ``copy_runs``/``gather_fixed``
+    on its behalf) writes -- which is irreducible, not a planning artifact.
+    See ``_concat_plan.RunPlan``.
 
     ``dense_snp_range``/``dense_indel_range`` are per-region only (sample- and
     ploidy-independent), and cannot be sparsified -- genoray's ``dense_abs_row``
@@ -332,16 +340,16 @@ def _concat_svar2_ranges(
     # dense_snp_range/dense_indel_range gather need "which input contributed
     # each merged region, in merged order", and it is the same value either
     # way -- computing it twice would let a future edit that changes one
-    # `provenance` call and not the other silently order the dense_* gather
-    # differently from the cell_* copy. Only meaningful on `axis == "regions"`:
-    # on `axis == "samples"`, `order` maps merged *sample* slots, not regions,
-    # so this must stay unevaluated there (dense_snp_range/dense_indel_range
-    # are instead linked from input #0 below, unchanged across inputs).
-    region_runs = (
-        coalesce(provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order))
-        if axis == "regions"
-        else None
-    )
+    # `_region_plan` call and not the other silently order the dense_* gather
+    # differently from the cell_* copy. `_region_plan` is the same helper the
+    # annot-track region-axis site below calls, one scope up -- a single
+    # obvious way to build a region-only plan, instead of the two independent
+    # `RunPlan("regions", ...)` constructions this used to be. Only meaningful
+    # on `axis == "regions"`: on `axis == "samples"`, `order` maps merged
+    # *sample* slots, not regions, so this must stay unevaluated there
+    # (dense_snp_range/dense_indel_range are instead linked from input #0
+    # below, unchanged across inputs).
+    region_runs = _region_plan(shapes, order) if axis == "regions" else None
 
     out_span = n_samples * ploidy
     if axis == "regions" and all(isinstance(rd, _SparseRanges) for rd in readers):
@@ -526,8 +534,7 @@ def concat(
             )
             meta["variants_fingerprint"] = variants_fingerprint(paths[0])
 
-            prov = provenance(axis, shapes, ploidy, order=order)
-            runs = coalesce(prov)
+            runs = RunPlan(axis, shapes, ploidy, order=order)
             src_offsets = [
                 np.fromfile(p / "genotypes" / "offsets.npy", dtype=np.int64)
                 for p in paths
@@ -554,8 +561,7 @@ def concat(
             # global array. Gather the R/S axes in the same merged `order` as
             # every other store; values copy verbatim (they're absolute indices
             # into the shared external store, not slot-relative).
-            prov = provenance(axis, shapes, ploidy, order=order)
-            runs = coalesce(prov)
+            runs = RunPlan(axis, shapes, ploidy, order=order)
             _gather_svar_offsets(paths, geno, runs, shapes, ploidy)
             shape = [2, n_regions, len(samples), ploidy]
             (geno / "svar_meta.json").write_text(
@@ -582,8 +588,12 @@ def concat(
         # `order` as everything else -- a track store is indexed by the same
         # (region, sample) grid as the genotypes/offsets stores above.
         if ref.tracks:
-            t_prov = provenance(axis, shapes, 1, order=order)
-            t_runs = coalesce(t_prov)
+            # Hoisted once per `concat` call, not per track: a `RunPlan` re-derives
+            # its runs on every `for r in plan` rather than caching a list, so this
+            # only saves the object construction, not run computation -- the
+            # re-derivation across tracks is the design's deliberate memory-for-CPU
+            # trade, not something this hoist avoids.
+            t_runs = RunPlan(axis, shapes, 1, order=order)
             for name in ref.tracks:
                 src_dirs = [p / "intervals" / name for p in paths]
                 out_t = tmp / "intervals" / name
@@ -628,10 +638,7 @@ def concat(
                             src_dirs[0] / f"{fname}.npy", out_a / f"{fname}.npy"
                         )
                 else:
-                    a_prov = provenance(
-                        "regions", [(r, 1) for r, _ in shapes], 1, order=order
-                    )
-                    a_runs = coalesce(a_prov)
+                    a_runs = _region_plan(shapes, order)
                     a_offsets = [
                         np.fromfile(d / "offsets.npy", dtype=np.int64) for d in src_dirs
                     ]

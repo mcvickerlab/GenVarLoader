@@ -6,6 +6,9 @@ import pytest
 from genvarloader._dataset._concat_plan import (
     CONCAT_CHUNK_BYTES,
     Run,
+    RunPlan,
+    _default_order,
+    as_plan,
     coalesce,
     provenance,
 )
@@ -168,3 +171,197 @@ def test_provenance_samples_interleaved_order_covers_all_slots():
         n = r.src_stop - r.src_start
         covered[r.dst_start : r.dst_start + n] += 1
     assert (covered == 1).all()
+
+
+def _rand_order(rng, counts):
+    """A random valid merged order: every (ds, within) slot exactly once."""
+    rows = [(d, i) for d, c in enumerate(counts) for i in range(c)]
+    rng.shuffle(rows)
+    return np.array(rows, dtype=np.int64).reshape(-1, 2)
+
+
+def _sorted_interleave_order(rng, counts):
+    """Each input's keys sorted, merged by global key -- the real two-cohort case."""
+    keys = []
+    for d, c in enumerate(counts):
+        ks = sorted(rng.choice(10_000, size=c, replace=False))
+        keys.extend((k, d, i) for i, k in enumerate(ks))
+    keys.sort()
+    return np.array([(d, i) for _, d, i in keys], dtype=np.int64).reshape(-1, 2)
+
+
+def test_run_plan_matches_coalesce_provenance_exhaustively():
+    """RunPlan must reproduce coalesce(provenance(...)) exactly, everywhere.
+
+    This is the correctness proof for the whole change: `provenance` + `coalesce`
+    are retained purely as this oracle. A plan that is wrong in a way this sweep
+    misses produces a merged dataset whose slots point at the wrong samples --
+    readable, and not obviously corrupt -- so the sweep deliberately includes the
+    sorted key-interleave order that models the real two-cohort merge, not only
+    shuffled and block-default orders.
+    """
+    import itertools
+
+    rng = np.random.default_rng(0)
+    n_checked = 0
+
+    for axis, ploidy, n_ds in itertools.product(
+        ("regions", "samples"), (1, 2, 3), (1, 2, 3)
+    ):
+        for _ in range(40):
+            counts = [int(rng.integers(0, 5)) for _ in range(n_ds)]
+            if axis == "regions":
+                n_samples = int(rng.integers(0, 5))
+                shapes = [(c, n_samples) for c in counts]
+            else:
+                n_regions = int(rng.integers(0, 5))
+                shapes = [(n_regions, c) for c in counts]
+
+            for mode in ("none", "default", "shuffled", "interleaved"):
+                if mode == "none":
+                    order = None
+                elif mode == "default":
+                    order = _default_order(len(counts), counts)
+                elif mode == "shuffled":
+                    order = _rand_order(rng, counts)
+                else:
+                    order = _sorted_interleave_order(rng, counts)
+
+                want = coalesce(provenance(axis, shapes, ploidy, order=order))
+                got = list(RunPlan(axis, shapes, ploidy, order=order))
+                n_checked += 1
+                assert got == want, (
+                    f"axis={axis} ploidy={ploidy} shapes={shapes} mode={mode}\n"
+                    f"want={want[:6]}\ngot={got[:6]}"
+                )
+
+    assert n_checked == 2880, "sweep shrank; the oracle coverage is the whole point"
+
+
+def test_slot_batches_reproduce_the_provenance_map():
+    """Concatenating the batches must rebuild `provenance` row for row.
+
+    `copy_runs` gathers source lengths through these batches, so a batch whose
+    slots are right but whose dataset column is wrong would read the correct
+    offsets out of the wrong file -- a silent wrong merge, not a crash.
+    """
+    for axis, shapes, ploidy in (
+        ("regions", [(3, 4), (2, 4)], 2),
+        ("samples", [(3, 2), (3, 3)], 2),
+        ("samples", [(2, 1), (2, 2)], 1),
+    ):
+        counts = [s for _, s in shapes] if axis == "samples" else [r for r, _ in shapes]
+        interleaved = _sorted_interleave_order(np.random.default_rng(1), counts)
+        for order in (None, interleaved):
+            plan = RunPlan(axis, shapes, ploidy, order=order)
+            want = provenance(axis, shapes, ploidy, order=order)
+            got = np.zeros_like(want)
+            seen = np.zeros(len(want), bool)
+            for dst_start, ds_vec, slots in plan.slot_batches():
+                n = len(slots)
+                assert len(ds_vec) == n
+                got[dst_start : dst_start + n, 0] = ds_vec
+                got[dst_start : dst_start + n, 1] = slots
+                seen[dst_start : dst_start + n] = True
+            assert seen.all(), f"{axis} {shapes} left slots uncovered"
+            np.testing.assert_array_equal(got, want)
+
+
+def test_n_slots_matches_provenance_length():
+    for axis, shapes, ploidy in (
+        ("regions", [(3, 4), (2, 4)], 2),
+        ("samples", [(3, 2), (3, 3)], 2),
+        ("regions", [(0, 4), (2, 4)], 1),
+        ("samples", [(0, 2), (0, 3)], 2),
+    ):
+        plan = RunPlan(axis, shapes, ploidy)
+        assert plan.n_slots == len(provenance(axis, shapes, ploidy))
+
+
+def test_slot_batches_chunk_large_region_runs(monkeypatch):
+    """A regions-axis run can span the whole grid, so batches must be chunked.
+
+    The production cap is 1Mi slots, far above anything a unit test can build,
+    so this shrinks it and checks the chunking actually happens. Asserting only
+    `max(sizes) <= cap` would pass vacuously on a single batch -- including
+    against the unchunked implementation this test exists to rule out.
+    """
+    from genvarloader._dataset import _concat_plan
+
+    monkeypatch.setattr(_concat_plan, "_SLOT_BATCH_SLOTS", 5)
+
+    # One input, identity order -> exactly one run over 4 * 3 * 2 = 24 slots.
+    plan = RunPlan("regions", [(4, 3)], 2)
+    assert len(list(plan)) == 1
+
+    batches = list(plan.slot_batches())
+    assert [len(slots) for _, _, slots in batches] == [5, 5, 5, 5, 4]
+    assert plan.n_slots == 24
+    # Destination stays contiguous across every chunk boundary.
+    assert [dst for dst, _, _ in batches] == [0, 5, 10, 15, 20]
+    np.testing.assert_array_equal(
+        np.concatenate([slots for _, _, slots in batches]), np.arange(24)
+    )
+
+
+def test_explicit_run_plan_round_trips_a_hand_built_list():
+    runs = [Run(0, 0, 2, 0), Run(1, 5, 7, 2)]
+    plan = as_plan(runs)
+    assert list(plan) == runs
+    assert plan.n_slots == 4
+    assert as_plan(plan) is plan
+    batches = list(plan.slot_batches())
+    assert [b[0] for b in batches] == [0, 2]
+    np.testing.assert_array_equal(batches[0][2], [0, 1])
+    np.testing.assert_array_equal(batches[1][1], [1, 1])
+
+
+def test_as_plan_rejects_a_generator():
+    """A one-shot generator must raise, not silently list()-materialize.
+
+    That materialization is exactly the 768 GB the analytic RunPlan exists to
+    avoid in the degenerate interleaved case.
+    """
+
+    def gen():
+        yield Run(0, 0, 2, 0)
+
+    with pytest.raises(TypeError, match="re-iterable"):
+        as_plan(gen())
+
+
+def test_run_plan_is_re_iterable():
+    """copy_runs iterates twice; a generator here would silently truncate output."""
+    plan = RunPlan("samples", [(2, 2), (2, 1)], 2)
+    assert list(plan) == list(plan)
+    assert len(list(plan)) > 0
+
+
+def test_run_plan_never_materializes_the_slot_space():
+    """Peak allocation must stay O(R + S), not O(R * S * P).
+
+    The old path on this grid allocates a (800_000, 2) int64 provenance map
+    (12.8 MB) and coalesces it into 800_000 one-slot Runs (~147 MB at 184 bytes
+    each). Both are invisible to every behavioural test, because RunPlan yields
+    exactly the same runs -- so this bound is what stops a future edit from
+    silently restoring them.
+    """
+    import tracemalloc
+
+    shapes = [(200, 1000), (200, 1000)]
+    # Interleaved samples: the worst case, one run per slot.
+    order = np.array(
+        [(d, i) for i in range(1000) for d in (0, 1)], dtype=np.int64
+    ).reshape(-1, 2)
+
+    tracemalloc.start()
+    try:
+        plan = RunPlan("samples", shapes, 2, order=order)
+        n_runs = sum(1 for _ in plan)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert plan.n_slots == 200 * 2000 * 2
+    assert n_runs == plan.n_slots // 2, "interleaved merge should give one run per cell"
+    assert peak < (1 << 20), f"peak {peak} bytes: the slot space is being materialized"
