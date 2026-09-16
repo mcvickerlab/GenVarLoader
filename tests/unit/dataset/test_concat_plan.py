@@ -8,6 +8,7 @@ from genvarloader._dataset._concat_plan import (
     Run,
     RunPlan,
     _default_order,
+    as_plan,
     coalesce,
     provenance,
 )
@@ -235,3 +236,88 @@ def test_run_plan_matches_coalesce_provenance_exhaustively():
                 )
 
     assert n_checked == 2880, "sweep shrank; the oracle coverage is the whole point"
+
+
+def test_slot_batches_reproduce_the_provenance_map():
+    """Concatenating the batches must rebuild `provenance` row for row.
+
+    `copy_runs` gathers source lengths through these batches, so a batch whose
+    slots are right but whose dataset column is wrong would read the correct
+    offsets out of the wrong file -- a silent wrong merge, not a crash.
+    """
+    for axis, shapes, ploidy in (
+        ("regions", [(3, 4), (2, 4)], 2),
+        ("samples", [(3, 2), (3, 3)], 2),
+        ("samples", [(2, 1), (2, 2)], 1),
+    ):
+        counts = [s for _, s in shapes] if axis == "samples" else [r for r, _ in shapes]
+        interleaved = _sorted_interleave_order(np.random.default_rng(1), counts)
+        for order in (None, interleaved):
+            plan = RunPlan(axis, shapes, ploidy, order=order)
+            want = provenance(axis, shapes, ploidy, order=order)
+            got = np.zeros_like(want)
+            seen = np.zeros(len(want), bool)
+            for dst_start, ds_vec, slots in plan.slot_batches():
+                n = len(slots)
+                assert len(ds_vec) == n
+                got[dst_start : dst_start + n, 0] = ds_vec
+                got[dst_start : dst_start + n, 1] = slots
+                seen[dst_start : dst_start + n] = True
+            assert seen.all(), f"{axis} {shapes} left slots uncovered"
+            np.testing.assert_array_equal(got, want)
+
+
+def test_n_slots_matches_provenance_length():
+    for axis, shapes, ploidy in (
+        ("regions", [(3, 4), (2, 4)], 2),
+        ("samples", [(3, 2), (3, 3)], 2),
+        ("regions", [(0, 4), (2, 4)], 1),
+        ("samples", [(0, 2), (0, 3)], 2),
+    ):
+        plan = RunPlan(axis, shapes, ploidy)
+        assert plan.n_slots == len(provenance(axis, shapes, ploidy))
+
+
+def test_slot_batches_chunk_large_region_runs(monkeypatch):
+    """A regions-axis run can span the whole grid, so batches must be chunked.
+
+    The production cap is 1Mi slots, far above anything a unit test can build,
+    so this shrinks it and checks the chunking actually happens. Asserting only
+    `max(sizes) <= cap` would pass vacuously on a single batch -- including
+    against the unchunked implementation this test exists to rule out.
+    """
+    from genvarloader._dataset import _concat_plan
+
+    monkeypatch.setattr(_concat_plan, "_SLOT_BATCH_SLOTS", 5)
+
+    # One input, identity order -> exactly one run over 4 * 3 * 2 = 24 slots.
+    plan = RunPlan("regions", [(4, 3)], 2)
+    assert len(list(plan)) == 1
+
+    batches = list(plan.slot_batches())
+    assert [len(slots) for _, _, slots in batches] == [5, 5, 5, 5, 4]
+    assert plan.n_slots == 24
+    # Destination stays contiguous across every chunk boundary.
+    assert [dst for dst, _, _ in batches] == [0, 5, 10, 15, 20]
+    np.testing.assert_array_equal(
+        np.concatenate([slots for _, _, slots in batches]), np.arange(24)
+    )
+
+
+def test_explicit_run_plan_round_trips_a_hand_built_list():
+    runs = [Run(0, 0, 2, 0), Run(1, 5, 7, 2)]
+    plan = as_plan(runs)
+    assert list(plan) == runs
+    assert plan.n_slots == 4
+    assert as_plan(plan) is plan
+    batches = list(plan.slot_batches())
+    assert [b[0] for b in batches] == [0, 2]
+    np.testing.assert_array_equal(batches[0][2], [0, 1])
+    np.testing.assert_array_equal(batches[1][1], [1, 1])
+
+
+def test_run_plan_is_re_iterable():
+    """copy_runs iterates twice; a generator here would silently truncate output."""
+    plan = RunPlan("samples", [(2, 2), (2, 1)], 2)
+    assert list(plan) == list(plan)
+    assert len(list(plan)) > 0

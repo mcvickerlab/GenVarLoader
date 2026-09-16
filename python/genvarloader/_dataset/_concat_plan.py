@@ -10,15 +10,31 @@ large byte ranges instead of individual slots.
 
 from __future__ import annotations
 
-from typing import Iterator, NamedTuple
+from typing import Iterable, Iterator, NamedTuple, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["CONCAT_CHUNK_BYTES", "Run", "RunPlan", "coalesce", "provenance"]
+__all__ = [
+    "CONCAT_CHUNK_BYTES",
+    "ExplicitRunPlan",
+    "Run",
+    "RunPlan",
+    "as_plan",
+    "coalesce",
+    "provenance",
+]
 
 CONCAT_CHUNK_BYTES = 16 << 20
 """Buffered-IO chunk size. 16 MiB is the measured knee on NFSv3; 64 MiB is no better."""
+
+_SLOT_BATCH_SLOTS = 1 << 20
+"""Slots per `slot_batches` chunk on the regions axis: 8 MiB of int64 indices.
+
+A regions-axis run can cover the whole merged grid (4.0e9 slots at chr22), so
+emitting one batch per run would rebuild exactly the array this module exists to
+avoid. The samples axis is naturally bounded at `n_merged * ploidy` instead.
+"""
 
 
 def _default_order(n_ds: int, counts: list[int]) -> NDArray[np.int64]:
@@ -233,6 +249,58 @@ class RunPlan:
         else:
             self.order = np.asarray(order, dtype=np.int64).reshape(-1, 2)
 
+    @property
+    def n_slots(self) -> int:
+        """Total merged flat slots this plan covers, computed arithmetically."""
+        if not self.shape_per_ds:
+            return 0
+        if self.axis == "regions":
+            return len(self.order) * self.shape_per_ds[0][1] * self.ploidy
+        return self.shape_per_ds[0][0] * len(self.order) * self.ploidy
+
+    def slot_batches(
+        self,
+    ) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
+        """Yield ``(dst_start, src_ds, src_slots)`` batches in destination order.
+
+        Each batch describes a destination-contiguous span: ``src_ds[i]`` and
+        ``src_slots[i]`` are the origin of merged slot ``dst_start + i``.
+        Concatenating every batch in order rebuilds :func:`provenance`'s output
+        exactly, which is what pins this method.
+
+        Yields:
+            ``(dst_start, src_ds, src_slots)``, where the two arrays are int64
+            and equal in length.
+        """
+        if self.axis == "regions":
+            for run in self:
+                pos, dst = run.src_start, run.dst_start
+                while pos < run.src_stop:
+                    n = min(_SLOT_BATCH_SLOTS, run.src_stop - pos)
+                    yield (
+                        dst,
+                        np.full(n, run.src, np.int64),
+                        np.arange(pos, pos + n, dtype=np.int64),
+                    )
+                    pos += n
+                    dst += n
+            return
+
+        n_regions = self.shape_per_ds[0][0] if self.shape_per_ds else 0
+        n_merged = len(self.order)
+        if n_regions == 0 or n_merged == 0 or self.ploidy == 0:
+            return
+        per_ds_samples = np.asarray([s for _, s in self.shape_per_ds], np.int64)
+        ds, w = self.order[:, 0], self.order[:, 1]
+        s_d = per_ds_samples[ds]
+        p = np.arange(self.ploidy, dtype=np.int64)
+        # `order` is per merged SAMPLE; each contributes `ploidy` adjacent slots.
+        ds_vec = np.repeat(ds, self.ploidy)
+        for r in range(n_regions):
+            base = (r * s_d + w) * self.ploidy
+            slots = (base[:, None] + p[None, :]).reshape(-1)
+            yield (r * n_merged * self.ploidy, ds_vec, slots)
+
     def _segments(self) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
         """Half-open ``[start, stop)`` spans of ``order`` with no break inside."""
         ds, w = self.order[:, 0], self.order[:, 1]
@@ -298,3 +366,55 @@ class RunPlan:
                     pending = Run(d, src_start, src_stop, dst_start)
         if pending is not None:
             yield pending
+
+
+class ExplicitRunPlan:
+    """A hand-built run list presented through :class:`RunPlan`'s interface.
+
+    The IO layer takes either this or a :class:`RunPlan`, so its unit tests can
+    exercise streaming with a two-run list without constructing a merge.
+
+    Args:
+        runs: Destination-ordered runs. Materialized, so it may be any iterable.
+    """
+
+    def __init__(self, runs: "Iterable[Run]") -> None:
+        self._runs = list(runs)
+
+    def __iter__(self) -> "Iterator[Run]":
+        return iter(self._runs)
+
+    @property
+    def n_slots(self) -> int:
+        """Total merged flat slots covered by the run list."""
+        return sum(r.src_stop - r.src_start for r in self._runs)
+
+    def slot_batches(
+        self,
+    ) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
+        """Yield one ``(dst_start, src_ds, src_slots)`` batch per run."""
+        for r in self._runs:
+            n = r.src_stop - r.src_start
+            yield (
+                r.dst_start,
+                np.full(n, r.src, np.int64),
+                np.arange(r.src_start, r.src_stop, dtype=np.int64),
+            )
+
+
+def as_plan(
+    runs: "RunPlan | ExplicitRunPlan | Sequence[Run]",
+) -> "RunPlan | ExplicitRunPlan":
+    """Normalize a run source so the IO layer has one consuming path.
+
+    Args:
+        runs: A plan, or a re-iterable sequence of runs. A one-shot generator is
+            deliberately not accepted: ``copy_runs`` iterates its runs twice.
+
+    Returns:
+        ``runs`` itself when it is already a plan, else an
+        :class:`ExplicitRunPlan` wrapping it.
+    """
+    if isinstance(runs, (RunPlan, ExplicitRunPlan)):
+        return runs
+    return ExplicitRunPlan(runs)
