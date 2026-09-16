@@ -209,17 +209,47 @@ def test_gather_fixed_from_a_run_plan_is_byte_identical_to_the_oracle(tmp_path):
     assert out_plan.stat().st_size == plan.n_slots * 4
 
 
-def test_gather_svar_offsets_from_a_run_plan_is_byte_identical(tmp_path):
+@pytest.mark.parametrize(
+    ("axis", "shapes", "order"),
+    [
+        # axis="samples" requires equal n_regions (index 0) across datasets.
+        ("samples", [(2, 2), (2, 1)], None),
+        # Interleaved merged-sample order: ds0 sample0, ds1 sample0, ds0
+        # sample1 -- built the same way test_concat_plan.py's interleaved-order
+        # tests do, with an explicit (dataset_idx, within_idx) literal.
+        ("samples", [(2, 2), (2, 1)], np.array([[0, 0], [1, 0], [0, 1]])),
+        # axis="regions" requires equal n_samples (index 1) across datasets.
+        ("regions", [(2, 2), (3, 2)], None),
+        # Interleaved merged-region order over ds0's 2 regions and ds1's 3.
+        (
+            "regions",
+            [(2, 2), (3, 2)],
+            np.array([[1, 0], [0, 0], [1, 1], [0, 1], [1, 2]]),
+        ),
+    ],
+    ids=[
+        "samples-block",
+        "samples-interleaved",
+        "regions-block",
+        "regions-interleaved",
+    ],
+)
+def test_gather_svar_offsets_from_a_run_plan_is_byte_identical(
+    tmp_path, axis, shapes, order
+):
     """The svar offsets gather must agree with the retained oracle.
 
     This one cannot go through `gather_fixed`: its slot axis is nested inside
     two leading planes, so a slot's start and stop live `n_slots` elements
     apart. It therefore has its own run-consuming loop, and needs its own pin.
+    Parametrized over both axes and both an `order=None` block merge and an
+    interleaved `order`, since every production call site always passes an
+    explicit `order` and interleaving is the case the design calls load-bearing.
     """
     from genvarloader._dataset._concat import _gather_svar_offsets
     from genvarloader._dataset._concat_plan import RunPlan, coalesce, provenance
 
-    shapes, axis, ploidy = [(2, 2), (2, 1)], "samples", 2
+    ploidy = 2
 
     paths = []
     for d, (r, sm) in enumerate(shapes):
@@ -235,15 +265,21 @@ def test_gather_svar_offsets_from_a_run_plan_is_byte_identical(tmp_path):
     out_plan.mkdir()
     out_list.mkdir()
 
-    _gather_svar_offsets(paths, out_plan, RunPlan(axis, shapes, ploidy), shapes, ploidy)
+    _gather_svar_offsets(
+        paths, out_plan, RunPlan(axis, shapes, ploidy, order=order), shapes, ploidy
+    )
     _gather_svar_offsets(
         paths,
         out_list,
-        coalesce(provenance(axis, shapes, ploidy)),
+        coalesce(provenance(axis, shapes, ploidy, order=order)),
         shapes,
         ploidy,
     )
 
-    assert (out_plan / "offsets.npy").read_bytes() == (
-        out_list / "offsets.npy"
-    ).read_bytes()
+    plan_bytes = (out_plan / "offsets.npy").read_bytes()
+    assert plan_bytes == (out_list / "offsets.npy").read_bytes()
+    # A shared bug that writes one plane instead of two would still pass the
+    # byte-identity check above (both paths would be wrong the same way), so
+    # also pin the absolute size against a freshly built plan's `n_slots`.
+    expected_n_slots = RunPlan(axis, shapes, ploidy, order=order).n_slots
+    assert len(plan_bytes) == 2 * expected_n_slots * 8

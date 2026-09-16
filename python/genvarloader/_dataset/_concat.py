@@ -200,6 +200,11 @@ def _assert_annot_track_matches(name: str, src_dirs: list[Path]) -> None:
                 )
 
 
+def _region_plan(shapes: list[tuple[int, int]], order: "NDArray[np.int64]") -> RunPlan:
+    """Build the region-only (``n_samples=1, ploidy=1``) merge plan shared by both region-axis sites."""
+    return RunPlan("regions", [(r, 1) for r, _ in shapes], 1, order=order)
+
+
 def _gather_svar_offsets(
     paths: list[Path],
     out_dir: Path,
@@ -257,12 +262,15 @@ def _concat_svar2_ranges(
     input, remapped into the merged keyspace, ordered, and appended. Legacy dense
     inputs feed the same merge through ``_DenseRanges.entries_for_regions``.
 
-    No stage of this merge holds anything ``R x S``-sized. The
-    ``(R*S*P, 2)`` ``provenance`` array (64 GB at the All of Us chr22 grid) and
-    the ``list[Run]`` ``coalesce`` built from it (184 bytes per run, degenerating
-    to one run per slot on an interleaved sample merge) are gone from every path
-    in this module, per-sample tracks included: ``RunPlan`` derives the same runs
-    from ``order`` alone. See ``_concat_plan.RunPlan``.
+    No stage of this merge plans in core any more. The ``(R*S*P, 2)``
+    ``provenance`` array (64 GB at the All of Us chr22 grid) and the
+    ``list[Run]`` ``coalesce`` built from it (184 bytes per run, degenerating
+    to one run per slot on an interleaved sample merge) are gone from every
+    path in this module, per-sample tracks included: ``RunPlan`` derives the
+    same runs from ``order`` alone. What remains is the output offsets array
+    itself -- the merged file this function (or ``copy_runs``/``gather_fixed``
+    on its behalf) writes -- which is irreducible, not a planning artifact.
+    See ``_concat_plan.RunPlan``.
 
     ``dense_snp_range``/``dense_indel_range`` are per-region only (sample- and
     ploidy-independent), and cannot be sparsified -- genoray's ``dense_abs_row``
@@ -332,16 +340,16 @@ def _concat_svar2_ranges(
     # dense_snp_range/dense_indel_range gather need "which input contributed
     # each merged region, in merged order", and it is the same value either
     # way -- computing it twice would let a future edit that changes one
-    # `RunPlan` construction and not the other silently order the dense_* gather
-    # differently from the cell_* copy. Only meaningful on `axis == "regions"`:
-    # on `axis == "samples"`, `order` maps merged *sample* slots, not regions,
-    # so this must stay unevaluated there (dense_snp_range/dense_indel_range
-    # are instead linked from input #0 below, unchanged across inputs).
-    region_runs = (
-        RunPlan("regions", [(r, 1) for r, _ in shapes], 1, order=order)
-        if axis == "regions"
-        else None
-    )
+    # `_region_plan` call and not the other silently order the dense_* gather
+    # differently from the cell_* copy. `_region_plan` is the same helper the
+    # annot-track region-axis site below calls, one scope up -- a single
+    # obvious way to build a region-only plan, instead of the two independent
+    # `RunPlan("regions", ...)` constructions this used to be. Only meaningful
+    # on `axis == "regions"`: on `axis == "samples"`, `order` maps merged
+    # *sample* slots, not regions, so this must stay unevaluated there
+    # (dense_snp_range/dense_indel_range are instead linked from input #0
+    # below, unchanged across inputs).
+    region_runs = _region_plan(shapes, order) if axis == "regions" else None
 
     out_span = n_samples * ploidy
     if axis == "regions" and all(isinstance(rd, _SparseRanges) for rd in readers):
@@ -580,6 +588,11 @@ def concat(
         # `order` as everything else -- a track store is indexed by the same
         # (region, sample) grid as the genotypes/offsets stores above.
         if ref.tracks:
+            # Hoisted once per `concat` call, not per track: a `RunPlan` re-derives
+            # its runs on every `for r in plan` rather than caching a list, so this
+            # only saves the object construction, not run computation -- the
+            # re-derivation across tracks is the design's deliberate memory-for-CPU
+            # trade, not something this hoist avoids.
             t_runs = RunPlan(axis, shapes, 1, order=order)
             for name in ref.tracks:
                 src_dirs = [p / "intervals" / name for p in paths]
@@ -625,9 +638,7 @@ def concat(
                             src_dirs[0] / f"{fname}.npy", out_a / f"{fname}.npy"
                         )
                 else:
-                    a_runs = RunPlan(
-                        "regions", [(r, 1) for r, _ in shapes], 1, order=order
-                    )
+                    a_runs = _region_plan(shapes, order)
                     a_offsets = [
                         np.fromfile(d / "offsets.npy", dtype=np.int64) for d in src_dirs
                     ]
