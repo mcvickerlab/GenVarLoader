@@ -71,9 +71,11 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     # independent oracle for this fixture's grid. It does NOT by itself prove a
     # mis-transposed axis order fails loudly here -- `_find_ranges`'s test
     # fixture happens not to distinguish some axis permutations, so that
-    # property is enforced structurally instead, by `nonempty_entries`'s own
-    # shape check (raises on any transpose that changes rank or the ploidy
-    # axis) and pinned end-to-end by tests/dataset/test_svar2_fields_read.py.
+    # property used to be enforced structurally by `nonempty_entries`'s shape
+    # check. Since the writer consumes genoray's sparse stream (#405) there is
+    # no transpose left to get wrong -- the chunk arrives region-major with
+    # absolute cell ids -- so the axis order is now unrepresentable rather than
+    # checked. Still pinned end-to-end by tests/dataset/test_svar2_fields_read.py.
     #
     # It compares WIDTHS and NON-EMPTY entries, not raw bytes: the sparse layout
     # deliberately discards an empty cell's insertion point, which is exactly the
@@ -217,6 +219,7 @@ chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t0|1\t0|0
 def tie_stores(tmp_path_factory) -> tuple[Path, Path]:
     """Matched .svar2 and .svar stores from the same two-same-POS-records VCF."""
     from genoray import VCF, SparseVar, _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     from tests.dataset.conftest import _REF
 
@@ -233,15 +236,17 @@ def tie_stores(tmp_path_factory) -> tuple[Path, Path]:
 
     svar2_out = d / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(svar2_out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(svar2_out),
+        regions=RegionSpec(chroms=["chr1"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (svar2_out / "meta.json").exists(), "svar2 conversion did not finish"
 
@@ -319,7 +324,7 @@ def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
     )
 
     calls: list[int] = []
-    real = SparseVar2._find_ranges_chunked
+    real = SparseVar2._find_ranges_chunked_sparse
 
     def spy(self, *args, **kwargs):
         stream = real(self, *args, **kwargs)
@@ -336,11 +341,14 @@ def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
         overwrite=True,
     )
 
-    SparseVar2._find_ranges_chunked = spy
+    SparseVar2._find_ranges_chunked_sparse = spy
     try:
         small = tmp_path / "small.gvl"
         # 2 regions x ploidy 2 x 2 channels x 2 endpoints x 8 bytes = 128 bytes
-        # per sample; the chunker's own 2x safety margin needs 256 bytes for
+        # per sample. The sparse stream is planned from that same DENSE
+        # per-sample cost (genoray sizes chunks for the worst case, not the
+        # realized fill), so this budget still forces the same split.
+        # The chunker's own 2x safety margin needs 256 bytes for
         # even one sample, so 256 is the smallest budget that both succeeds
         # and forces one-sample-per-chunk (this store has S=2, so that's 2
         # chunks).
@@ -353,7 +361,7 @@ def test_write_svar2_chunked_matches_unchunked(svar2_store: Path, tmp_path):
             overwrite=True,
         )
     finally:
-        SparseVar2._find_ranges_chunked = real
+        SparseVar2._find_ranges_chunked_sparse = real
 
     assert calls and all(c == 1 for c in calls), (
         f"expected one sample per chunk under a 256-byte budget, got {calls}"
@@ -533,18 +541,23 @@ def svar2_store_unsorted(vcf_and_ref, tmp_path_factory) -> Path:
     """
     bcf, ref = vcf_and_ref
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     out = tmp_path_factory.mktemp("svar2_write_unsorted") / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S1", "S0"],  # reversed vs. the lexicographic order gvl.write emits
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(
+            chroms=["chr1"], samples=["S1", "S0"]
+        ),  # reversed vs. the lexicographic order gvl.write emits
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
@@ -857,7 +870,7 @@ def test_write_svar2_empty_cell_is_zero_not_insertion_point(
 ):
     """A genuinely empty cell reads back as (0, 0), not genoray's insertion point.
 
-    `nonempty_entries` filters on width, so an all-empty (region, sample, ploid)
+    genoray's sparse stream filters on width, so an all-empty (region, sample, ploid)
     cell is never written. `_SparseRanges.lookup` then returns (0, 0) for it --
     the one place `_SparseRanges` and `_DenseRanges` diverge (see
     `_SparseRanges`'s docstring and the comment in `_write_from_svar2`), since a

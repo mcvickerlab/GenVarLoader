@@ -38,7 +38,6 @@ __all__ = [
     "_DenseRanges",
     "_ranges_reader",
     "_SparseWriter",
-    "nonempty_entries",
     "merge_region_blocks",
 ]
 
@@ -715,7 +714,8 @@ class _SparseWriter:
     ) -> None:
         """Merge one contig's per-chunk blocks into region-major order and append.
 
-        Each block from :func:`nonempty_entries` is already region-major, and
+        Each block from genoray's sparse range stream is already region-major,
+        and
         chunk ``i``'s sample slots lie entirely below chunk ``i + 1``'s, so the
         merged order is fixed by region alone. That makes this a stable counting
         sort with ``O(rc)`` of auxiliary state, not a comparison sort.
@@ -867,72 +867,6 @@ class _SparseWriter:
             self.ranges_dir / "region_ptr.npy"
         )
         return self.n_entries
-
-
-def nonempty_entries(
-    snp: NDArray[np.int64], indel: NDArray[np.int64], slot0: int, ploidy: int
-) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.void]]:
-    """Extract non-empty cells from a ``(rc, ns, P, 2)`` pair of range blocks.
-
-    Args:
-        snp: SNP ranges, ``(rc, ns, P, 2)`` -- normally a ``transpose(2, 0, 1, 3)``
-            view of a hap-major genoray chunk.
-        indel: Indel ranges, same shape.
-        slot0: Dataset sample slot of this block's first column.
-        ploidy: ``P``.
-
-    Returns:
-        ``(region, cell, entries)``, region-major: ``region`` is **contig-local**
-        and non-decreasing, ``cell`` is ``slot * ploidy + ploid`` and ascends
-        within each region. Split rather than combined into one key because
-        :meth:`_SparseWriter.append_contig` needs the region axis on its own to
-        count, and ``cell`` is what lands on disk -- combining them would only be
-        undone again.
-
-    Raises:
-        ValueError: If ``snp`` and ``indel`` don't share a shape, or their
-            ploidy axis doesn't match ``ploidy``. A caller that transposes the
-            wrong axes (e.g. swapping the region and sample axes) still
-            produces a same-rank ``(a, b, c, 2)`` array, so this is checked
-            explicitly rather than left to fail downstream -- without it, a
-            mis-transposed cache still writes a self-consistent CSR table
-            with no invariant violated, just region/sample-scrambled entries.
-    """
-    if snp.shape != indel.shape:
-        raise ValueError(
-            "svar2 range cache: snp and indel blocks must share a shape, got"
-            f" {snp.shape} and {indel.shape}"
-        )
-    if snp.ndim != 4 or snp.shape[2] != ploidy:
-        raise ValueError(
-            f"svar2 range cache: expected (regions, samples, ploidy={ploidy}, 2)"
-            f" blocks, got shape {snp.shape}"
-        )
-    ne = (snp[..., 1] > snp[..., 0]) | (indel[..., 1] > indel[..., 0])
-    # np.nonzero walks the LOGICAL shape in C order, so (r, slot, ploid) comes
-    # out ascending even though `ne` is NOT C-contiguous: the `>` above inherits
-    # the transposed view's stride permutation, because numpy allocates ufunc
-    # output with NPY_KEEPORDER. Do not "fix" that with ascontiguousarray --
-    # materializing (rc, ns, P) in C order is a strided scatter costing ~11x the
-    # comparison itself (97.7 ms vs 8.8 ms on a 15e6-cell chunk).
-    ri, sj, pj = np.nonzero(ne)
-    ent = np.empty(len(ri), ENTRY_DTYPE)
-    ent["snp_start"] = snp[ri, sj, pj, 0]
-    ent["snp_len"] = snp[ri, sj, pj, 1] - snp[ri, sj, pj, 0]
-    ent["indel_start"] = indel[ri, sj, pj, 0]
-    ent["indel_len"] = indel[ri, sj, pj, 1] - indel[ri, sj, pj, 0]
-    # Overflow guard local to this function: the sole production call site
-    # (`_write_from_svar2`) already guards `n_samples * ploidy < 2**31` by
-    # constructing `_SparseWriter` first, but `nonempty_entries` is a public
-    # module-level function callable independently of that guard.
-    max_cell = (int(slot0) + int(snp.shape[1]) - 1) * int(ploidy) + int(ploidy) - 1
-    if max_cell > np.iinfo(np.int32).max:
-        raise ValueError(
-            "svar2 range cache: slot0 * ploidy overflows int32"
-            f" (max cell id {max_cell})"
-        )
-    cell = (slot0 + sj).astype(np.int64) * ploidy + pj
-    return ri.astype(np.int32), cell.astype(np.int32), ent
 
 
 def merge_region_blocks(

@@ -44,7 +44,7 @@ from .._utils import lengths_to_offsets, normalize_contig_name
 from .._variants._utils import path_is_pgen, path_is_vcf
 from ._indexing import s2i
 from ._svar2_link import Svar2Link
-from ._svar2_ranges import ENTRY_DTYPE, _SparseWriter, nonempty_entries
+from ._svar2_ranges import ENTRY_DTYPE, _SparseWriter
 from ._svar_link import SvarLink
 from ._utils import bed_to_regions, regions_to_bed
 
@@ -1267,7 +1267,7 @@ def _write_from_svar2(
             ends = df["chromEnd"].to_numpy()
             # extend_to_length is validated at function entry (False raises); the
             # read-bound kernel sizes haplotype output at read time.
-            stream = svar2._find_ranges_chunked(
+            stream = svar2._find_ranges_chunked_sparse(
                 c, starts, ends, samples=sel, max_mem=max_mem
             )
             dense_snp[lo:hi] = np.asarray(stream.dense_snp_range, np.int64).reshape(
@@ -1290,7 +1290,7 @@ def _write_from_svar2(
                 # append_contig's counting-sort merge assumes chunk i's sample
                 # slots lie entirely below chunk i + 1's (see its docstring): the
                 # merged order is fixed by region alone only because of that.
-                # genoray's `_find_ranges_chunked` happens to yield ascending
+                # genoray's `_find_ranges_chunked_sparse` happens to yield ascending
                 # `sample_start` today, but that is a generator's behaviour in a
                 # separate package, asserted nowhere on either side -- an
                 # out-of-order chunk stream would corrupt the merge silently
@@ -1308,26 +1308,36 @@ def _write_from_svar2(
                         f" {prev_sample_start}."
                     )
                 prev_sample_start = ch.sample_start
-                # Chunks are hap-major (samples, ploidy, regions, 2); transpose to
-                # region-major (regions, samples, ploidy, 2). transpose() is a
-                # view, and nonempty_entries relies on that -- see its comment on
-                # np.nonzero and NPY_KEEPORDER.
-                r, cell, ent = nonempty_entries(
-                    ch.vk_snp_range.transpose(2, 0, 1, 3),
-                    ch.vk_indel_range.transpose(2, 0, 1, 3),
-                    slot0=ch.sample_start,
-                    ploidy=P,
-                )
-                # `nonempty_entries` filters on width, not on genoray's raw start ==
-                # end insertion point (which is what a *dense* cell would carry at
-                # the same coordinate). An all-empty (region, sample, ploid) cell
-                # is therefore never written here, so a real dataset's
+                # The chunk already IS the non-empty set, region-major with
+                # ascending cell_id -- the shape append_contig wants. What used
+                # to stand here was a transpose plus an `np.nonzero` scan over a
+                # dense (samples, ploidy, regions, 2) block, 71% of this kernel
+                # and ~128 GB per All of Us chr22 contig (#405). genoray filters
+                # on the same predicate (`end > start` in either channel) and
+                # emits the same absolute `slot * ploidy + ploid`, so the bytes
+                # written here are unchanged.
+                #
+                # CSR in, region column out: append_contig counts on the region
+                # axis, so expand `region_ptr` rather than make genoray send a
+                # column it would have to build from the same offsets.
+                r = np.repeat(np.arange(rc, dtype=np.int32), np.diff(ch.region_ptr))
+                ent = np.empty(len(ch.cell_id), ENTRY_DTYPE)
+                ent["snp_start"] = ch.snp_start
+                ent["snp_len"] = ch.snp_len
+                ent["indel_start"] = ch.indel_start
+                ent["indel_len"] = ch.indel_len
+                # genoray filters on width, not on its raw start == end insertion
+                # point (which is what a *dense* cell would carry at the same
+                # coordinate). An all-empty (region, sample, ploid) cell is
+                # therefore never written here, so a real dataset's
                 # `_SparseRanges.lookup` always returns (0, 0) for it, never
                 # genoray's insertion point -- unlike `_DenseRanges.lookup`, which
                 # would surface (x, x). That is the one place the two layouts are
-                # not byte-identical (see `_SparseRanges`'s docstring).
+                # not byte-identical (see `_SparseRanges`'s docstring). A cell
+                # non-empty in only ONE channel still carries the other channel's
+                # raw start with length 0, exactly as the dense path produced it.
                 acc_r.append(r)
-                acc_c.append(cell)
+                acc_c.append(ch.cell_id)
                 acc_e.append(ent)
                 np.maximum(keys, ch.max_end_keys, out=keys)
                 pbar.update(rc * ch.n_samples / S)

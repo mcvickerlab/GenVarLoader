@@ -185,19 +185,22 @@ def svar2_slot_store(_svar2_slot_src, tmp_path_factory) -> Path:
     leaks into every later consumer of this fixture.
     """
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     bcf, ref = _svar2_slot_src
     store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(store),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(store),
+        regions=RegionSpec(chroms=["chr1"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (store / "meta.json").exists(), "svar2 conversion did not finish"
     return store
@@ -312,6 +315,7 @@ def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
         Path to the finished ``.svar2`` store.
     """
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     ref = d / "ref.fa"
     ref.write_text(f">chr1\n{_SVAR2_REF}\n")
@@ -325,15 +329,17 @@ def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
 
     out = d / name
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        samples,
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["chr1"], samples=samples),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out

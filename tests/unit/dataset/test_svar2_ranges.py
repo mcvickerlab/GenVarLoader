@@ -924,40 +924,6 @@ def test_append_contig_rejects_out_of_range_cell_id(tmp_path):
     w.close()
 
 
-def test_nonempty_entries_rejects_snp_indel_shape_mismatch():
-    """snp and indel blocks must share a shape.
-
-    A caller that slices or transposes the two channels inconsistently (e.g.
-    a stale sample count on one channel) would otherwise index past one
-    array's bounds or silently pair up unrelated cells -- checked explicitly
-    since both are same-rank, same-dtype arrays that would not otherwise fail
-    fast in `snp[..., 1] > snp[..., 0]`-style broadcasting.
-    """
-    from genvarloader._dataset._svar2_ranges import nonempty_entries
-
-    snp = np.zeros((2, 3, 2, 2), np.int64)
-    indel = np.zeros((2, 4, 2, 2), np.int64)  # samples axis mismatch: 3 vs 4
-    with pytest.raises(ValueError, match="share a shape"):
-        nonempty_entries(snp, indel, slot0=0, ploidy=2)
-
-
-def test_nonempty_entries_rejects_ploidy_axis_mismatch():
-    """The ploidy axis must match the declared `ploidy`.
-
-    Reproduced without this guard: declaring `ploidy=2` against a block whose
-    axis-2 size is actually 3 makes `cell = (slot0 + sj) * ploidy + pj` alias
-    distinct `(sample, ploid)` pairs onto the same cell id -- e.g. cell id 2
-    is emitted by both `(sj=0, pj=2)` and `(sj=1, pj=0)` -- with no error at
-    all, silently merging two samples' variants into one cell.
-    """
-    from genvarloader._dataset._svar2_ranges import nonempty_entries
-
-    snp = np.zeros((2, 3, 3, 2), np.int64)  # real ploidy axis is 3
-    indel = np.zeros((2, 3, 3, 2), np.int64)
-    with pytest.raises(ValueError, match="ploidy"):
-        nonempty_entries(snp, indel, slot0=0, ploidy=2)
-
-
 def test_svar2_n_variants_is_a_zero_stride_view():
     """#355: a dense (R, S, P) int32 of zeros is 50.7 GB at All of Us chr19.
 
