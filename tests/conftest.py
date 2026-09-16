@@ -339,7 +339,7 @@ def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
     return out
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def svar2_store_2s(tmp_path_factory) -> Path:
     """A two-sample (S0, S1) .svar2 store.
 
@@ -347,6 +347,14 @@ def svar2_store_2s(tmp_path_factory) -> Path:
     six of this fixture's former copies were private duplicates, three of which
     lived in ``tests/dataset/`` and silently shadowed ``tests/dataset/conftest.py``'s
     same-named three-sample fixture.
+
+    Session-scoped, and therefore SHARED: treat it as READ-ONLY. A test that
+    needs to mutate the store must ``shutil.copytree`` it into ``tmp_path`` and
+    mutate the copy. Mutating it in place corrupts every later consumer, and the
+    resulting failures surface in other modules -- when
+    ``test_fingerprint_detects_mutated_store`` appended one byte to a ``.bin``
+    here, it produced 17 failures plus a Rust ``cast_slice`` panic. That is why
+    this fixture was module-scoped until the mutating test was fixed to copy.
     """
     d = tmp_path_factory.mktemp("svar2_2s")
     return _build_svar2(_SVAR2_VCF_2S, ["S0", "S1"], d, "store")

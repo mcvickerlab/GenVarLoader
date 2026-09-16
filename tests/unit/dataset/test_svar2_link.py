@@ -44,8 +44,9 @@ def test_verify_none_link_is_noop(tmp_path: Path):
 
 
 def test_fingerprint_detects_mutated_store(svar2_store_2s: Path, tmp_path: Path):
-    # `svar2_store_2s` is a module-scoped fixture shared with five other test
-    # modules -- mutate a private copy, never the shared store itself.
+    # `svar2_store_2s` is a session-scoped fixture shared with five other test
+    # modules -- mutate a private copy, never the shared store itself. Mutating
+    # it in place corrupts every later consumer across the whole session.
     store = shutil.copytree(svar2_store_2s, tmp_path / "store.svar2")
 
     gvl_path = tmp_path / "ds.gvl"
