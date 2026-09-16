@@ -260,7 +260,7 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
 # live in tests/test_svar2_reconstruct.py, tests/unit/dataset/test_svar2_store.py,
 # tests/unit/dataset/test_svar2_link.py, and tests/dataset/test_svar2_readbound_
 # {variants,haps,diffs}.py. Named `svar2_store_2s` (not `svar2_store`) because
-# tests/dataset/conftest.py separately defines a 3-sample `svar2_store` -- four
+# tests/dataset/conftest.py separately defines a 3-sample `svar2_store` -- three
 # of the folded-in modules live under tests/dataset/ and would otherwise
 # silently shadow that fixture. tests/dataset/test_svar2_readbound_tracks.py
 # keeps its own private fixture: its VCF carries a fourth variant and is not a
@@ -327,7 +327,7 @@ def svar2_store_2s(tmp_path_factory) -> Path:
     """A two-sample (S0, S1) .svar2 store.
 
     Named apart from the dataset suite's three-sample ``svar2_store`` on purpose:
-    six of this fixture's former copies were private duplicates, four of which
+    six of this fixture's former copies were private duplicates, three of which
     lived in ``tests/dataset/`` and silently shadowed ``tests/dataset/conftest.py``'s
     same-named three-sample fixture.
     """
