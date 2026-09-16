@@ -140,3 +140,70 @@ def test_copy_runs_writes_nothing_for_no_runs(tmp_path):
     merged = copy_runs([], dst, [], [], itemsize=4)
     assert merged.tolist() == [0]
     assert dst.read_bytes() == b""
+
+
+def test_copy_runs_accepts_a_run_plan_and_matches_an_explicit_list(tmp_path):
+    """Driving copy_runs from RunPlan must be byte-identical to the old path."""
+    from genvarloader._dataset._concat_plan import RunPlan, coalesce, provenance
+
+    shapes = [(2, 2), (2, 1)]
+    axis, ploidy = "samples", 2
+    n_src = [r * s * ploidy for r, s in shapes]
+
+    srcs, offsets = [], []
+    for d, n in enumerate(n_src):
+        lens = np.arange(1, n + 1, dtype=np.int64)
+        off = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+        payload = np.arange(off[-1], dtype=np.int32) + d * 1000
+        p = tmp_path / f"src{d}.bin"
+        _write_raw(p, payload)
+        srcs.append(p)
+        offsets.append(off)
+
+    out_plan = tmp_path / "plan.npy"
+    out_list = tmp_path / "list.npy"
+    plan = RunPlan(axis, shapes, ploidy)
+    merged_plan = copy_runs(srcs, out_plan, plan, offsets, itemsize=4)
+    merged_list = copy_runs(
+        srcs, out_list, coalesce(provenance(axis, shapes, ploidy)), offsets, itemsize=4
+    )
+
+    np.testing.assert_array_equal(merged_plan, merged_list)
+    assert out_plan.read_bytes() == out_list.read_bytes()
+
+
+def test_copy_runs_in_place_cumsum_matches_out_of_place(tmp_path):
+    """merged[1:] is cumsummed into itself; pin that against the naive form."""
+    lens = np.array([3, 0, 5, 2, 7], np.int64)
+    off = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+    payload = np.arange(off[-1], dtype=np.int32)
+    p = tmp_path / "src.bin"
+    _write_raw(p, payload)
+
+    runs = [Run(0, 0, 5, 0)]
+    merged = copy_runs([p], tmp_path / "out.npy", runs, [off], itemsize=4)
+
+    want = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+    np.testing.assert_array_equal(merged, want)
+
+
+def test_gather_fixed_from_a_run_plan_is_byte_identical_to_the_oracle(tmp_path):
+    """gather_fixed must produce the same bytes from a plan as from a run list."""
+    from genvarloader._dataset._concat_plan import RunPlan, coalesce, provenance
+
+    shapes, axis, ploidy = [(2, 2), (3, 2)], "regions", 1
+    srcs = []
+    for d, (r, sm) in enumerate(shapes):
+        p = tmp_path / f"g{d}.bin"
+        _write_raw(p, np.arange(r * sm * ploidy, dtype=np.int32) + d * 100)
+        srcs.append(p)
+
+    plan = RunPlan(axis, shapes, ploidy)
+    out_plan, out_list = tmp_path / "plan.bin", tmp_path / "list.bin"
+    gather_fixed(srcs, out_plan, plan, record_bytes=4)
+    gather_fixed(
+        srcs, out_list, coalesce(provenance(axis, shapes, ploidy)), record_bytes=4
+    )
+
+    assert out_plan.read_bytes() == out_list.read_bytes()
+    assert out_plan.stat().st_size == plan.n_slots * 4
