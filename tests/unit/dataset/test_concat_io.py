@@ -207,3 +207,43 @@ def test_gather_fixed_from_a_run_plan_is_byte_identical_to_the_oracle(tmp_path):
 
     assert out_plan.read_bytes() == out_list.read_bytes()
     assert out_plan.stat().st_size == plan.n_slots * 4
+
+
+def test_gather_svar_offsets_from_a_run_plan_is_byte_identical(tmp_path):
+    """The svar offsets gather must agree with the retained oracle.
+
+    This one cannot go through `gather_fixed`: its slot axis is nested inside
+    two leading planes, so a slot's start and stop live `n_slots` elements
+    apart. It therefore has its own run-consuming loop, and needs its own pin.
+    """
+    from genvarloader._dataset._concat import _gather_svar_offsets
+    from genvarloader._dataset._concat_plan import RunPlan, coalesce, provenance
+
+    shapes, axis, ploidy = [(2, 2), (2, 1)], "samples", 2
+
+    paths = []
+    for d, (r, sm) in enumerate(shapes):
+        n = r * sm * ploidy
+        p = tmp_path / f"ds{d}"
+        (p / "genotypes").mkdir(parents=True)
+        starts = np.arange(n, dtype=np.int64) + d * 100
+        planes = np.stack([starts, starts + 1])
+        _write_raw(p / "genotypes" / "offsets.npy", planes)
+        paths.append(p)
+
+    out_plan, out_list = tmp_path / "plan", tmp_path / "list"
+    out_plan.mkdir()
+    out_list.mkdir()
+
+    _gather_svar_offsets(paths, out_plan, RunPlan(axis, shapes, ploidy), shapes, ploidy)
+    _gather_svar_offsets(
+        paths,
+        out_list,
+        coalesce(provenance(axis, shapes, ploidy)),
+        shapes,
+        ploidy,
+    )
+
+    assert (out_plan / "offsets.npy").read_bytes() == (
+        out_list / "offsets.npy"
+    ).read_bytes()
