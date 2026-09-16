@@ -14,11 +14,12 @@ from tests.conftest import _SVAR2_REF as _REF
 SEQLEN = 20
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
-# (C>CAT), SNP@8 (T>C), DEL@11 (GTA>G, ilen -2), SNP@16 (A>C) are all
-# single-carrier variants, which keeps genoray's cost model from routing them
-# to the per-region dense channel. INS@18 (C>CGG) and SNP@29 (G>A) are 1|1 in
-# every sample, so their 3-carrier-call count crosses the dense threshold and
-# each populates one of the two dense channels (indel and SNP respectively).
+# (C>CAT), SNP@8 (T>C), DEL@11 (GTA>G, ilen -2), SNP@16 (A>C) each carry a
+# single ALT haplotype call (one ploid, in one sample), which keeps genoray's
+# cost model from routing them to the per-region dense channel. INS@18
+# (C>CGG) and SNP@29 (G>A) are 1|1 in every sample -- 6 carrier calls (3
+# samples x both ploids) -- crossing the dense threshold, so each populates
+# one of the two dense channels (indel and SNP respectively).
 # Over regions [0,20), [5,15), [25,40): S2 is 0|0 at every sparse variant, an
 # ENTIRELY EMPTY sample column in the vk view, so the sparse cache's "cell not
 # present" branch is still exercised. The resulting vk grid (region x sample x

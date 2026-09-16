@@ -29,8 +29,10 @@ def test_write_svar2_emits_cache(svar2_store: Path, tmp_path: Path):
     svar2 = SparseVar2(svar2_store)
     bed = pl.DataFrame(
         {
-            # [25, 40) holds no variants at all: an entirely empty region row,
-            # which the sparse layout must round-trip as (0, 0) everywhere.
+            # [25, 40) holds no sparse variants: an entirely empty region row in
+            # the vk view, which the sparse layout must round-trip as (0, 0)
+            # everywhere. (The dense SNP at 0-based 29 lives here, but it's read
+            # through dense_snp_range, not the vk cache this row exercises.)
             "chrom": ["chr1", "chr1", "chr1"],
             "chromStart": [0, 5, 25],
             "chromEnd": [20, 15, 40],
@@ -631,9 +633,10 @@ def test_fixture_grid_is_non_degenerate(svar2_store: Path, tmp_path: Path):
 
     genoray also routes each variant to the per-sample SPARSE (vk) channel or
     the per-region DENSE channel by carrier-call count (see
-    `choose_representation` in genoray's cost model): every single-carrier
-    variant in this fixture stays sparse, and the two 3-carrier (all-1|1)
-    variants route dense, one per dense channel. The resulting vk grid is 7 of
+    `choose_representation` in genoray's cost model): every variant in this
+    fixture that carries a single ALT haplotype call stays sparse, and the two
+    all-1|1 variants (6 carrier calls each: 3 samples x both ploids) route
+    dense, one per dense channel. The resulting vk grid is 7 of
     18 cells occupied (region x sample x ploid over 3 regions, 3 samples,
     ploidy 2) -- a mix of present/absent cells, present cells with only one
     channel filled, and an ordered (non-symmetric) sample axis, none of which
@@ -782,27 +785,34 @@ def test_dense_layout_dataset_still_opens_and_reads(
     end-to-end: this bed's regions happen to nest ([0,20) is a superset of
     [5,15), and disjoint from [25,40)), and haplotype construction filters
     variant calls by absolute position. Confirmed by mutation-testing
-    `r_q = np.zeros_like(r_q)` at the top of `_DenseRanges.lookup` (#406,
-    task 7 step 6): every region query silently reads region 0's row, but the
-    rendered haplotype bytes still matched dataset `a` byte-for-byte, because
-    the wrong (region-0) variants either coincide with the right ones (shared
-    position 6) or land outside the query window and get filtered as if
-    absent. So the byte-level loop below is kept as an end-to-end smoke
-    check, but the load-bearing parity pin is the raw-range comparison that
-    follows: it calls `_DenseRanges.lookup` (the exact code the mutation
-    targets) directly and compares its output against `_SparseRanges.lookup`
-    on the same store, which is immune to the positional self-healing above
-    because it compares indices, not rendered bytes. `sparse_ds` and
-    `dense_ds` are byte-for-byte the same dataset except for the range-cache
-    layout (see `rewrite_as_dense`), so `_SparseRanges.lookup` on `sparse_ds`
-    is a valid oracle for what `_DenseRanges.lookup` on `dense_ds` must
-    return. `test_dense_ranges_matches_fancy_indexing` in
-    `tests/unit/dataset/test_svar2_ranges.py` additionally pins
-    `_DenseRanges.lookup` against dense fancy-indexing over a randomized grid.
+    `r_q = np.zeros_like(r_q)` at the top of `_DenseRanges.lookup` (#406):
+    every region query silently reads region 0's row, but the rendered
+    haplotype bytes still matched dataset `a` byte-for-byte, because the wrong
+    (region-0) variants either coincide with the right ones (shared position
+    6) or land outside the query window and get filtered as if absent. So the
+    byte-level loop below is kept as an end-to-end smoke check, but the
+    load-bearing parity pin is the raw-range comparison that follows: it calls
+    `_DenseRanges.lookup` (the exact code the mutation targets) directly and
+    compares its output against `_SparseRanges.lookup` on the same store,
+    which is immune to the positional self-healing above because it compares
+    indices, not rendered bytes.
 
-    Deviation from the brief: `Dataset.open` (not `gvl.write`) is what takes
-    `reference=` -- `with_seqs("haplotypes")` raises `ValueError` without one,
-    which the brief's snippet omitted. Added `vcf_and_ref` for the FASTA path.
+    That comparison pins the DENSE reader, not the sparse one, and the two
+    sides are less independent than they look: `rewrite_as_dense` builds
+    `dense_ds`'s vk arrays by calling `_SparseRanges.lookup` with this exact
+    `unravel_index(arange(R * S))` query, so a `_SparseRanges.lookup` bug would
+    reproduce on both sides of this comparison and cancel out. That blind spot
+    is covered elsewhere: `test_lookup_parity_*` in
+    `tests/unit/dataset/test_svar2_ranges.py` pins `_SparseRanges.lookup`
+    against a randomized independent reference, and
+    `test_dense_ranges_matches_fancy_indexing` in the same module pins
+    `_DenseRanges.lookup` against dense fancy-indexing directly (and was
+    independently confirmed to fail under this same mutation) -- so between
+    the three tests, both readers are pinned against something other than
+    each other. Defense in depth, not a single self-consistent check.
+
+    `Dataset.open`, not `gvl.write`, takes `reference=`; `with_seqs("haplotypes")`
+    raises `ValueError` without one, hence `vcf_and_ref`.
     """
     from genoray import SparseVar2
 
