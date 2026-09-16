@@ -1055,7 +1055,8 @@ git commit -m "test(concat): pin RunPlan's peak allocation below the materialize
 
 **Files:**
 - Create: `tests/conftest.py`
-- Modify: `tests/test_svar2_reconstruct.py`, `tests/unit/dataset/test_svar2_store.py`, `tests/unit/dataset/test_svar2_link.py`, `tests/dataset/test_svar2_readbound_variants.py`, `tests/dataset/test_svar2_readbound_haps.py`, `tests/dataset/test_svar2_readbound_tracks.py`, `tests/dataset/conftest.py`
+- Modify: `tests/test_svar2_reconstruct.py`, `tests/unit/dataset/test_svar2_store.py`, `tests/unit/dataset/test_svar2_link.py`, `tests/dataset/test_svar2_readbound_variants.py`, `tests/dataset/test_svar2_readbound_haps.py`, `tests/dataset/test_svar2_readbound_diffs.py`, `tests/dataset/conftest.py`
+- **Do not modify:** `tests/dataset/test_svar2_readbound_tracks.py` (see "The situation" below)
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks. Independent of Tasks 1–5.
@@ -1063,9 +1064,25 @@ git commit -m "test(concat): pin RunPlan's peak allocation below the materialize
 
 **This task changes no test content.** It is pure deduplication, and its gate is that the full suite stays green with **zero assertion edits**. Do not enrich anything here — that is Task 7.
 
-**The situation.** `svar2_store` is defined seven times. `tests/dataset/conftest.py:52` builds a **3-sample** store (`S0, S1, S2`) from `vcf_and_ref`. Six other modules define their own **2-sample** (`S0, S1`) `svar2_store`, each with a private copy of the same 40 bp `_REF` and a 2-sample `_VCF`, and each re-running `samtools faidx` + `bcftools view` + `bcftools index`. Two of those modules (`test_svar2_readbound_variants.py:140`, `test_svar2_readbound_haps.py:280`) also define `svar2_store_dense_snp`, which is **deliberately different** and stays exactly where it is.
+**The situation, as measured.** `svar2_store` is defined **eight** times. `tests/dataset/conftest.py:52` builds the **3-sample** store (`S0, S1, S2`) from `vcf_and_ref` — that is Task 7's fixture, untouched here. The other seven are **2-sample** (`S0, S1`), each with a private copy of the same 40 bp `_REF` and a `_VCF`, each re-running `samtools faidx` + `bcftools view` + `bcftools index`.
 
-Three of the six shadows live in `tests/dataset/`, where they silently shadow `tests/dataset/conftest.py`'s 3-sample fixture of the same name. Renaming the shared 2-sample fixture to `svar2_store_2s` makes that distinction explicit instead of accidental — that is the point of the rename, not cosmetics.
+**Only six of those seven are duplicates.** Their `_VCF` bodies are byte-identical (the same three variants at chr1:3, :7, :12):
+
+| module | line | fold in? |
+|---|---|---|
+| `tests/test_svar2_reconstruct.py` | 34 | yes |
+| `tests/unit/dataset/test_svar2_store.py` | 28 | yes |
+| `tests/unit/dataset/test_svar2_link.py` | 59 | yes |
+| `tests/dataset/test_svar2_readbound_variants.py` | 36 | yes |
+| `tests/dataset/test_svar2_readbound_haps.py` | 34 | yes |
+| `tests/dataset/test_svar2_readbound_diffs.py` | 38 | yes |
+| `tests/dataset/test_svar2_readbound_tracks.py` | 39 | **NO** |
+
+`test_svar2_readbound_tracks.py` carries a **four**-variant `_VCF` — it adds `chr1 10 . G C ... 1|1 1|0` to the other three. Folding it onto the shared fixture would silently change the data its assertions were written against, which is exactly what this task's zero-assertion-edit gate forbids. Leave its `_VCF` and its `svar2_store` fixture exactly where they are. It may take `_SVAR2_REF` from the shared module (its `_REF` *is* identical), but nothing else.
+
+**Also leave alone**, all purpose-built rather than duplicated: `svar2_store_dense_snp` in **three** modules (`test_svar2_readbound_variants.py:140`, `test_svar2_readbound_haps.py:280`, `test_svar2_readbound_diffs.py:83`) and `svar2_store_unsorted` (`test_write_svar2.py:526`).
+
+Four of the six folded shadows live in `tests/dataset/`, where they silently shadow `tests/dataset/conftest.py`'s 3-sample fixture of the same name. Renaming the shared 2-sample fixture to `svar2_store_2s` makes that distinction explicit instead of accidental — that is the point of the rename, not cosmetics.
 
 - [ ] **Step 1: Create `tests/conftest.py`**
 
@@ -1141,7 +1158,7 @@ def svar2_store_2s(tmp_path_factory) -> Path:
 
 - [ ] **Step 2: Delete the six shadows and repoint their consumers**
 
-In each of `tests/test_svar2_reconstruct.py`, `tests/unit/dataset/test_svar2_store.py`, `tests/unit/dataset/test_svar2_link.py`, `tests/dataset/test_svar2_readbound_variants.py`, `tests/dataset/test_svar2_readbound_haps.py`, `tests/dataset/test_svar2_readbound_tracks.py`:
+In each of the **six** modules marked "fold in" above — `tests/test_svar2_reconstruct.py`, `tests/unit/dataset/test_svar2_store.py`, `tests/unit/dataset/test_svar2_link.py`, `tests/dataset/test_svar2_readbound_variants.py`, `tests/dataset/test_svar2_readbound_haps.py`, `tests/dataset/test_svar2_readbound_diffs.py` (**not** `test_svar2_readbound_tracks.py`):
 
 1. Delete the module-level `_REF` and `_VCF` constants.
 2. Delete the whole `svar2_store` fixture function and its `@pytest.fixture` decorator.
@@ -1167,7 +1184,18 @@ Expected: PASS with the same counts as before this task (1253 passed, 58 skipped
 - [ ] **Step 5: Confirm the duplication is actually gone**
 
 Run: `pixi run -e dev python -c "import subprocess; print(subprocess.run(['grep','-rn','def svar2_store','tests/'],capture_output=True,text=True).stdout)"`
-Expected: exactly three lines — `tests/conftest.py` (`svar2_store_2s`), `tests/dataset/conftest.py` (`svar2_store`), and the two `svar2_store_dense_snp` definitions.
+
+Expected: exactly **seven** definitions remain, and no more —
+
+| definition | where |
+|---|---|
+| `svar2_store_2s` | `tests/conftest.py` (new, shared) |
+| `svar2_store` | `tests/dataset/conftest.py` (3-sample) |
+| `svar2_store` | `tests/dataset/test_svar2_readbound_tracks.py` (4-variant, deliberately kept) |
+| `svar2_store_dense_snp` | `test_svar2_readbound_variants.py`, `test_svar2_readbound_haps.py`, `test_svar2_readbound_diffs.py` |
+| `svar2_store_unsorted` | `test_write_svar2.py` |
+
+Six definitions were removed. If any other `def svar2_store(` survives, the dedup is incomplete; if one of the seven above is gone, something was folded in that should not have been.
 
 - [ ] **Step 6: Commit**
 
