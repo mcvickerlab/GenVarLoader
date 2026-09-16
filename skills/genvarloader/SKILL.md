@@ -196,9 +196,10 @@ misresolving.
 **Cost:** `gvl.concat` streams bytes rather than re-deriving anything, so its cost tracks I/O, not
 compute — it moves roughly the full size of the merged dataset. Planning is streaming — memory
 scales with regions plus samples, not their product — so the resident cost is the merged offsets
-array (one int64 per merged `(region, sample[, ploid])` slot), not the merge plan. Only worth it
-against the alternative of re-extracting genotypes from scratch, not as a routine step. See
-"Merging datasets" in `docs/source/write.md` for the full cost discussion and the
+array (one int64 per merged `(region, sample[, ploid])` slot) plus the inputs' own offsets arrays
+(together roughly twice that figure, since the inputs partition the merged grid), not the merge
+plan. Only worth it against the alternative of re-extracting genotypes from scratch, not as a
+routine step. See "Merging datasets" in `docs/source/write.md` for the full cost discussion and the
 `genoray.SparseVar2.concat` store-level alternative for contig-sharded `.svar2` workflows.
 
 Source: `python/genvarloader/_dataset/_concat.py`, `_concat_validate.py`.

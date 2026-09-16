@@ -316,6 +316,20 @@ def test_explicit_run_plan_round_trips_a_hand_built_list():
     np.testing.assert_array_equal(batches[1][1], [1, 1])
 
 
+def test_as_plan_rejects_a_generator():
+    """A one-shot generator must raise, not silently list()-materialize.
+
+    That materialization is exactly the 768 GB the analytic RunPlan exists to
+    avoid in the degenerate interleaved case.
+    """
+
+    def gen():
+        yield Run(0, 0, 2, 0)
+
+    with pytest.raises(TypeError, match="re-iterable"):
+        as_plan(gen())
+
+
 def test_run_plan_is_re_iterable():
     """copy_runs iterates twice; a generator here would silently truncate output."""
     plan = RunPlan("samples", [(2, 2), (2, 1)], 2)

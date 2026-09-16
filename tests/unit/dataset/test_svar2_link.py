@@ -10,6 +10,7 @@ detects a mutated store.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -43,16 +44,20 @@ def test_verify_none_link_is_noop(tmp_path: Path):
 
 
 def test_fingerprint_detects_mutated_store(svar2_store_2s: Path, tmp_path: Path):
+    # `svar2_store_2s` is a module-scoped fixture shared with five other test
+    # modules -- mutate a private copy, never the shared store itself.
+    store = shutil.copytree(svar2_store_2s, tmp_path / "store.svar2")
+
     gvl_path = tmp_path / "ds.gvl"
     gvl_path.mkdir()
 
-    link = make_svar2_link(gvl_path, svar2_store_2s)
-    _verify_svar2_fingerprint(svar2_store_2s, link)  # must not raise
+    link = make_svar2_link(gvl_path, store)
+    _verify_svar2_fingerprint(store, link)  # must not raise
 
-    bin_files = sorted(svar2_store_2s.rglob("*.bin"))
+    bin_files = sorted(store.rglob("*.bin"))
     assert bin_files, "expected at least one .bin file in a real .svar2 store"
     with open(bin_files[0], "ab") as f:
         f.write(b"\x00")
 
     with pytest.raises(ValueError):
-        _verify_svar2_fingerprint(svar2_store_2s, link)
+        _verify_svar2_fingerprint(store, link)

@@ -3,9 +3,18 @@
 A GVL dataset stores parallel ragged arrays over an ``(R, S[, P])`` C-order grid;
 the flat slot for ``(r, s, p)`` is ``((r * S) + s) * P + p``. Merging two or more
 datasets means deciding, for each *merged* flat slot, which input dataset and which
-*source* flat slot it comes from. That mapping is the provenance map, and
-:func:`coalesce` compresses it into maximal contiguous runs so the IO layer can move
-large byte ranges instead of individual slots.
+*source* flat slot it comes from.
+
+:class:`RunPlan` is the production path: it derives the destination-ordered run
+list analytically from the sorted merge ``order`` alone, without ever
+materializing a map over every merged slot. :func:`provenance` and
+:func:`coalesce` describe that same mapping the naive way — a full
+``(n_slots, 2)`` provenance map, compressed into runs by brute-force scanning —
+and are kept **only** as the equivalence oracle
+``test_run_plan_matches_coalesce_provenance_exhaustively`` checks
+:class:`RunPlan` against in ``tests/unit/dataset/test_concat_plan.py``. Neither
+function is called from the IO layer (``_concat.py``/``_concat_io.py``); do not
+delete them.
 """
 
 from __future__ import annotations
@@ -78,6 +87,12 @@ def provenance(
     order: "NDArray[np.int64] | None" = None,
 ) -> NDArray[np.int64]:
     """Map each merged flat slot to its ``(dataset, source flat slot)`` origin.
+
+    Not on the production path: :class:`RunPlan` derives the same runs
+    analytically without ever materializing this map. Retained solely as the
+    equivalence oracle ``test_run_plan_matches_coalesce_provenance_exhaustively``
+    (in ``tests/unit/dataset/test_concat_plan.py``) checks :class:`RunPlan`
+    against — do not delete.
 
     Without ``order``, merged positions along ``axis`` are laid out as dataset 0's
     whole block, then dataset 1's, etc. (block-concatenation) — the default is
@@ -162,6 +177,13 @@ def provenance(
 
 def coalesce(prov: NDArray[np.int64]) -> list[Run]:
     """Compress a provenance map into maximal contiguous runs.
+
+    Not on the production path: :class:`RunPlan` derives the same runs
+    analytically without ever materializing a provenance map to compress.
+    Retained solely as the equivalence oracle
+    ``test_run_plan_matches_coalesce_provenance_exhaustively`` (in
+    ``tests/unit/dataset/test_concat_plan.py``) checks :class:`RunPlan`
+    against — do not delete.
 
     A run is a maximal span of consecutive merged slots over which the source
     dataset is constant and the source slot increases by exactly 1. Iterating the
@@ -409,12 +431,31 @@ def as_plan(
 
     Args:
         runs: A plan, or a re-iterable sequence of runs. A one-shot generator is
-            deliberately not accepted: ``copy_runs`` iterates its runs twice.
+            deliberately not accepted: ``copy_runs`` iterates its runs twice, and
+            a one-shot iterator would silently exhaust on the first pass and
+            truncate the second rather than raise.
 
     Returns:
         ``runs`` itself when it is already a plan, else an
         :class:`ExplicitRunPlan` wrapping it.
+
+    Raises:
+        TypeError: if ``runs`` is neither a plan nor a :class:`~typing.Sequence`
+            (e.g. a generator). This matches the declared parameter type --
+            ``RunPlan | ExplicitRunPlan | Sequence[Run]`` -- rather than
+            silently ``list()``-materializing whatever is iterable, which for a
+            one-shot generator over the full slot space would rebuild exactly
+            the run list this module exists to avoid (768 GB in the degenerate
+            interleaved case at the All of Us chr22 grid).
     """
     if isinstance(runs, (RunPlan, ExplicitRunPlan)):
         return runs
+    if not isinstance(runs, Sequence):
+        raise TypeError(
+            "as_plan() requires a RunPlan, ExplicitRunPlan, or Sequence[Run], "
+            f"got {type(runs).__name__}. A one-shot generator is not accepted: "
+            "the plan must be re-iterable because consumers (e.g. copy_runs) "
+            "iterate it more than once, and a one-shot iterator would silently "
+            "truncate rather than raise."
+        )
     return ExplicitRunPlan(runs)

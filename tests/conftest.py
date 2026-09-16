@@ -264,7 +264,10 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
 # of the folded-in modules live under tests/dataset/ and would otherwise
 # silently shadow that fixture. tests/dataset/test_svar2_readbound_tracks.py
 # keeps its own private fixture: its VCF carries a fourth variant and is not a
-# duplicate of this one.
+# duplicate of `_SVAR2_VCF_2S` above. It IS byte-identical to the
+# `_SVAR2_SLOT_REF` / `_SVAR2_SLOT_VCF` / `_svar2_slot_src` fixture defined
+# elsewhere in this file; folding it into that fixture is tracked separately
+# and deliberately out of scope here.
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
 # (C>CAT), DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both
