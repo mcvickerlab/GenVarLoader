@@ -26,6 +26,7 @@
 - **prek hooks must be installed** before committing (`prek install`). They run ruff check, ruff format, pyrefly, and commitizen.
 - **Lint covers both trees:** `pixi run -e dev ruff check python/ tests/` and `pixi run -e dev ruff format python/ tests/`. `python/` alone misses test-only issues.
 - **Docstrings are Google style** (`Args:` / `Returns:` / `Raises:`), enforced by ruff pydocstyle on `python/genvarloader/` only.
+- **Test data must be generated once per worktree** before any test run: `pixi run -e dev gen`. Without it a fresh worktree reports ~387 errors and ~52 failures from missing fixture files, which look like real breakage and are not. (Already done in this worktree.)
 - **The chr22 reference grid**, used for every size figure in this plan: `R` = 3,734 regions, `S` = 535,662 samples, `P` = 2. `R*S` = 2,000,161,908; `R*S*P` = 4,000,323,816. A `Run` measures 184 bytes on this codebase.
 
 ---
@@ -970,7 +971,7 @@ Expected: PASS, with **zero test files modified** in this task. If a concat test
 - [ ] **Step 10: Run the full tree**
 
 Run: `pixi run -e dev pytest tests -q`
-Expected: PASS (the baseline on this branch is 1253 passed, 58 skipped, 4 xfailed).
+Expected: PASS. The measured baseline on this branch is **1250 passed, 61 skipped, 4 xfailed** (macOS/darwin, `pixi run -e dev pytest tests -q`, after `pixi run -e dev gen`). Counts are platform-dependent — CI runs slow/torch tiers this does not — so treat a differing skip count on another machine as environment, and a differing *failure* count as a real regression.
 
 - [ ] **Step 11: Commit**
 
@@ -1179,7 +1180,7 @@ If that import path does not resolve under this repo's pytest configuration, def
 - [ ] **Step 4: Run the full tree**
 
 Run: `pixi run -e dev pytest tests -q`
-Expected: PASS with the same counts as before this task (1253 passed, 58 skipped, 4 xfailed). **No assertion may have been edited to achieve this.** If a test fails, the consolidation changed behavior — most likely a module silently picked up the 3-sample fixture — and the fix is to repoint it, never to weaken the assertion.
+Expected: PASS with the same counts as before this task (**1250 passed, 61 skipped, 4 xfailed** on darwin). **No assertion may have been edited to achieve this.** If a test fails, the consolidation changed behavior — most likely a module silently picked up the 3-sample fixture — and the fix is to repoint it, never to weaken the assertion.
 
 - [ ] **Step 5: Confirm the duplication is actually gone**
 
@@ -1211,7 +1212,7 @@ git commit -m "test(svar2): hoist the duplicated svar2_store fixture into tests/
 ### Task 7: Enrich the three-sample fixture and rewrite its guards
 
 **Files:**
-- Modify: `tests/dataset/conftest.py` (the `_VCF` constant), `tests/dataset/test_write_svar2.py:~645-690` (the occupancy guard), `tests/dataset/test_write_svar2.py:737-758` (the dense-layout test's docstring)
+- Modify: `tests/dataset/conftest.py` (the `_VCF` constant), `tests/dataset/test_write_svar2.py:624-690` (the occupancy guard), `tests/dataset/test_write_svar2.py:737-758` (the dense-layout test's docstring)
 
 **Interfaces:**
 - Consumes: the consolidated fixture layout from Task 6.
@@ -1252,7 +1253,7 @@ Expected: FAIL — at minimum `test_fixture_has_empty_cells`, which pins the old
 
 - [ ] **Step 3: Rewrite the occupancy guard**
 
-Replace the body of the fixture guard at `tests/dataset/test_write_svar2.py:~645-690` (the test asserting `sorted_samples == ["S0", "S1", "S2"]`, reshaping `nonempty` to `(3, S, P)`, and pinning `grid[0, S0, 0]`) with:
+Replace the body of the fixture guard at `tests/dataset/test_write_svar2.py:624-690` (the test asserting `sorted_samples == ["S0", "S1", "S2"]`, reshaping `nonempty` to `(3, S, P)`, and pinning `grid[0, S0, 0]`) with:
 
 ```python
     svar2 = SparseVar2(svar2_store)
@@ -1346,7 +1347,7 @@ Expected: FAIL. Revert the injection and confirm PASS. If it still passes with t
 - [ ] **Step 7: Run the full tree**
 
 Run: `pixi run -e dev pytest tests -q`
-Expected: PASS. Note the new counts in the task report; they will differ from 1253 if assertions were added.
+Expected: PASS. Note the new counts in the task report; they will differ from the 1250-passed baseline if assertions were added.
 
 - [ ] **Step 8: Commit**
 
