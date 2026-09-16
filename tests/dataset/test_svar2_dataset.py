@@ -112,18 +112,21 @@ def svar_fixture(_src, tmp_path_factory) -> Path:
 def svar2_fixture(_src, tmp_path_factory) -> Path:
     bcf, ref = _src
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     out = tmp_path_factory.mktemp("svar2") / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["chr1"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "svar2 conversion did not finish"
     return out
@@ -788,18 +791,21 @@ def svar_fixture2(_src2, tmp_path_factory) -> Path:
 def svar2_fixture2(_src2, tmp_path_factory) -> Path:
     bcf, ref = _src2
     from genoray import _core
+    from genoray._pipeline_args import FieldSpec, PlanSettings, RegionSpec
 
     out = tmp_path_factory.mktemp("svar2_mc") / "store.svar2"
     _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1", "chr2"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
+        vcf_path=str(bcf),
+        reference_path=str(ref),
+        output_dir=str(out),
+        regions=RegionSpec(chroms=["chr1", "chr2"], samples=["S0", "S1"]),
+        fields=FieldSpec(),
+        plan=PlanSettings(
+            chunk_size=25_000,
+            max_threads=1,
+            long_allele_capacity=8 * 1024 * 1024,
+        ),
+        ploidy=2,
     )
     assert (out / "meta.json").exists(), "svar2 conversion did not finish"
     return out

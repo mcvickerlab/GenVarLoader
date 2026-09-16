@@ -102,13 +102,13 @@ numba = "==0.59.1"
 pyarrow = ">=21"
 hirola = "==0.3"
 seqpro = "==0.22.0"
-# genoray >=4.1.0 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
-# py310-313 on both platforms. 4.1.0 carries
+# genoray >=5 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
+# py310-313 on both platforms. 5.0.0 carries
 # SparseVar2._find_ranges_chunked_sparse, the sparse chunked range API
 # _write_from_svar2 consumes (gvl#405), and the keyword-only, struct-grouped
-# _core.run_conversion_pipeline the test fixtures call (d-laub/genoray#153).
+# _core pipeline entry points the test fixtures call (d-laub/genoray#153, #200).
 # Mirrors the pyproject range.
-genoray = ">=4.1.0,<5"
+genoray = ">=5,<6"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
