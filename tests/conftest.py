@@ -177,6 +177,33 @@ def _svar2_slot_src(tmp_path_factory) -> tuple[Path, Path]:
 
 
 @pytest.fixture(scope="session")
+def svar2_slot_store(_svar2_slot_src, tmp_path_factory) -> Path:
+    """The ``.svar2`` store built from `_svar2_slot_src`.
+
+    Shared and session-scoped, so consumers must treat it as READ-ONLY: copy it
+    into ``tmp_path`` before mutating anything inside it, or the corruption
+    leaks into every later consumer of this fixture.
+    """
+    from genoray import _core
+
+    bcf, ref = _svar2_slot_src
+    store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(store),
+        ["S0", "S1"],
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (store / "meta.json").exists(), "svar2 conversion did not finish"
+    return store
+
+
+@pytest.fixture(scope="session")
 def svar2_slot_reference(_svar2_slot_src):
     """Opened ``gvl.Reference`` matching `phased_svar2_gvl`'s tiny chr1.
 
@@ -192,7 +219,7 @@ def svar2_slot_reference(_svar2_slot_src):
 
 
 @pytest.fixture(scope="session")
-def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
+def phased_svar2_gvl(svar2_slot_store, tmp_path_factory) -> Path:
     """A gvl dataset written from a ``.svar2`` source -> opens as ``Svar2Haps``.
 
     Reproduces the Phase-0-pinned record class for #315 (see
@@ -215,24 +242,11 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
     empirically before picking 80 (green up to ~40 regions, red by 60+).
     """
     import polars as pl
-    from genoray import SparseVar2, _core
+    from genoray import SparseVar2
 
     import genvarloader as gvl
 
-    bcf, ref = _svar2_slot_src
-    store = tmp_path_factory.mktemp("svar2_slot_store") / "store.svar2"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(store),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (store / "meta.json").exists(), "svar2 conversion did not finish"
+    store = svar2_slot_store
 
     n_regions = 80
     bed = pl.DataFrame(

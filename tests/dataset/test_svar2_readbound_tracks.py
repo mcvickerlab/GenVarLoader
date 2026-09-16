@@ -12,58 +12,21 @@ Both paths must be byte-identical: same offsets, same (NaN-equal) data.
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G, low-carrier,
-# routes to var_key), INS@6 (C>CAT), SNP@9 (G>C, carried by 3 haps -> dense/snp
-# per the cost model used in test_svar2_readbound_haps.py), DEL@11 (GTA>G,
-# ilen -2). Exercises both var_key and dense/snp + dense/indel channels.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
-_VCF = """\
-##fileformat=VCFv4.2
-##contig=<ID=chr1,length=40>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
-chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
-chr1\t10\t.\tG\tC\t.\t.\t.\tGT\t1|1\t1|0
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
-"""
-
-
-@pytest.fixture(scope="module")
-def svar2_store(tmp_path_factory) -> Path:
-    from genoray import _core
-
-    d = tmp_path_factory.mktemp("svar2_readbound_tracks")
-    ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
-    subprocess.run(["samtools", "faidx", str(ref)], check=True)
-
-    vcf = d / "in.vcf"
-    vcf.write_text(_VCF)
-    bcf = d / "in.bcf"
-    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
-    subprocess.run(["bcftools", "index", str(bcf)], check=True)
-
-    out = d / "store"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (out / "meta.json").exists(), "conversion did not finish"
-    return out
+# The store comes from the shared session-scoped `svar2_slot_store` fixture in
+# tests/conftest.py. Its reference and VCF used to be duplicated verbatim here:
+# SNP@2 (A>G, low-carrier, routes to var_key), INS@6 (C>CAT), SNP@9 (G>C,
+# carried by 3 haps -> dense/snp per the cost model used in
+# test_svar2_readbound_haps.py), DEL@11 (GTA>G, ilen -2) -- so both var_key and
+# the dense/snp + dense/indel channels are exercised. The fixture is shared and
+# must be treated as read-only.
+#
+# Used under its own name rather than aliased: this module lives under
+# tests/dataset/, where tests/dataset/conftest.py defines a DIFFERENT 3-sample
+# fixture named `svar2_store`, and an alias would silently bind to that instead.
 
 
 def _synthetic_track_inputs(regions, seed=0):
@@ -87,14 +50,14 @@ def _synthetic_track_inputs(regions, seed=0):
         [(0, 40), (2, 2), (20, 25)],  # empty region + a variant-free window
     ],
 )
-def test_readbound_tracks_match_union_oracle(svar2_store, regions):
+def test_readbound_tracks_match_union_oracle(svar2_slot_store, regions):
     import genoray
 
     from tests._oracles.svar2_source import SparseVar2Source
     from tests._oracles.svar2_readbound_inputs import build_readbound_tracks
 
     contig = "chr1"
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_slot_store))
     S, P = sv.n_samples, sv.ploidy
     assert (S, P) == (2, 2)
 
@@ -155,7 +118,7 @@ def test_readbound_tracks_match_union_oracle(svar2_store, regions):
         pytest.fail("data mismatch but no single hap slice differed (offset bug?)")
 
 
-def test_readbound_tracks_match_union_oracle_with_shifts(svar2_store):
+def test_readbound_tracks_match_union_oracle_with_shifts(svar2_slot_store):
     """Non-trivial per-hap jitter shifts must also match byte-for-byte."""
     import genoray
 
@@ -164,7 +127,7 @@ def test_readbound_tracks_match_union_oracle_with_shifts(svar2_store):
 
     contig = "chr1"
     regions = [(0, 40), (5, 20)]
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_slot_store))
     S, P = sv.n_samples, sv.ploidy
     n_q = len(regions) * S
 
