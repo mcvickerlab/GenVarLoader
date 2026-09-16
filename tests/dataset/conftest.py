@@ -9,6 +9,7 @@ import pytest
 import pyBigWig
 
 import genvarloader as gvl
+from tests.conftest import _SVAR2_REF as _REF
 
 SEQLEN = 20
 
@@ -17,10 +18,9 @@ SEQLEN = 20
 # S2 is 0|0 everywhere: an ENTIRELY EMPTY sample column, so the sparse cache's
 # "cell not present" branch is exercised. Variants stop at 0-based 13, so a
 # region past that (see test_write_svar2_emits_cache) is an entirely empty ROW.
-# Mirrors tests/test_svar2_reconstruct.py's svar2_store fixture (which keeps only
-# S0/S1), so the matched .svar (SVAR1) store built from the same VCF is still a
-# valid parity oracle.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
+# Mirrors tests/conftest.py's svar2_store_2s fixture (which keeps only S0/S1),
+# so the matched .svar (SVAR1) store built from the same VCF is still a valid
+# parity oracle. Shares its reference sequence (``_SVAR2_REF``) with that module.
 _VCF = """\
 ##fileformat=VCFv4.2
 ##contig=<ID=chr1,length=40>

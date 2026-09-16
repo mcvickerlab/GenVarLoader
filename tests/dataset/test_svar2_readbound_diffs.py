@@ -19,51 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Same fixtures as tests/dataset/test_svar2_readbound_haps.py: 40 bp reference
-# (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6 (C>CAT), DEL@11
-# (GTA>G, ilen -2). Genotypes exercise both samples and both ploids.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
-_VCF = """\
-##fileformat=VCFv4.2
-##contig=<ID=chr1,length=40>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
-chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
-"""
-
-
-@pytest.fixture(scope="module")
-def svar2_store(tmp_path_factory) -> Path:
-    from genoray import _core
-
-    d = tmp_path_factory.mktemp("svar2_readbound_diffs")
-    ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
-    subprocess.run(["samtools", "faidx", str(ref)], check=True)
-
-    vcf = d / "in.vcf"
-    vcf.write_text(_VCF)
-    bcf = d / "in.bcf"
-    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
-    subprocess.run(["bcftools", "index", str(bcf)], check=True)
-
-    out = d / "store"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (out / "meta.json").exists(), "conversion did not finish"
-    return out
-
+from tests.conftest import _SVAR2_REF
 
 # Fixture whose cost model routes a SNP into the DENSE/snp table (not var_key) —
 # see test_svar2_readbound_haps.py for the routing rationale.
@@ -85,7 +41,7 @@ def svar2_store_dense_snp(tmp_path_factory) -> Path:
 
     d = tmp_path_factory.mktemp("svar2_readbound_diffs_dense_snp")
     ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
+    ref.write_text(f">chr1\n{_SVAR2_REF}\n")
     subprocess.run(["samtools", "faidx", str(ref)], check=True)
 
     vcf = d / "in.vcf"
@@ -151,17 +107,17 @@ def _implied_diffs(regions, ref_arr, ref_offsets, sv, contig) -> np.ndarray:
         [(0, 40), (2, 2), (20, 25)],  # empty region + a variant-free window
     ],
 )
-def test_readbound_diffs_matches_implied_haps(svar2_store, regions):
+def test_readbound_diffs_matches_implied_haps(svar2_store_2s, regions):
     import genoray
 
     from tests._oracles.svar2_readbound_inputs import build_readbound_diffs
 
     contig = "chr1"
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_arr = np.frombuffer(ref_bytes, np.uint8)
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_store_2s))
     assert (sv.n_samples, sv.ploidy) == (2, 2)
 
     implied = _implied_diffs(regions, ref_arr, ref_offsets, sv, contig)
@@ -181,7 +137,7 @@ def test_readbound_diffs_dense_snp_matches_implied_haps(svar2_store_dense_snp):
     from tests._oracles.svar2_readbound_inputs import build_readbound_diffs
 
     contig = "chr1"
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
     ref_arr = np.frombuffer(ref_bytes, np.uint8)
     ref_offsets = np.array([0, len(ref_bytes)], np.int64)
 

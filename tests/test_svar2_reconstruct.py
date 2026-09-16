@@ -10,55 +10,12 @@ genoray's decode, and (b) gvl's reconstruction loop matches an independent refer
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
 import numpy as np
-import pytest
+
+from tests.conftest import _SVAR2_REF
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6 (C>CAT),
 # DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both ploids.
-_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
-_VCF = """\
-##fileformat=VCFv4.2
-##contig=<ID=chr1,length=40>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
-chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
-chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
-chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
-"""
-
-
-@pytest.fixture(scope="module")
-def svar2_store(tmp_path_factory) -> Path:
-    from genoray import _core
-
-    d = tmp_path_factory.mktemp("svar2")
-    ref = d / "ref.fa"
-    ref.write_text(f">chr1\n{_REF}\n")
-    subprocess.run(["samtools", "faidx", str(ref)], check=True)
-
-    vcf = d / "in.vcf"
-    vcf.write_text(_VCF)
-    bcf = d / "in.bcf"
-    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
-    subprocess.run(["bcftools", "index", str(bcf)], check=True)
-
-    out = d / "store"
-    _core.run_conversion_pipeline(
-        str(bcf),
-        str(ref),
-        ["chr1"],
-        str(out),
-        ["S0", "S1"],
-        25_000,
-        2,
-        1,
-        8 * 1024 * 1024,
-    )
-    assert (out / "meta.json").exists(), "conversion did not finish"
-    return out
 
 
 def _consensus(ref: bytes, pos, ilen, alleles, q_start: int, q_end: int) -> bytes:
@@ -90,16 +47,16 @@ def _consensus(ref: bytes, pos, ilen, alleles, q_start: int, q_end: int) -> byte
     return bytes(out)
 
 
-def test_svar2_two_source_matches_decode_oracle(svar2_store):
+def test_svar2_two_source_matches_decode_oracle(svar2_store_2s):
     import genoray
     from tests._oracles.svar2_source import SparseVar2Source
 
     contig = "chr1"
     q_start, q_end = 0, 40
     regions = [(q_start, q_end)]
-    ref_bytes = _REF.encode()
+    ref_bytes = _SVAR2_REF.encode()
 
-    sv = genoray.SparseVar2(str(svar2_store))
+    sv = genoray.SparseVar2(str(svar2_store_2s))
     S, P = sv.n_samples, sv.ploidy
     assert (S, P) == (2, 2)
 

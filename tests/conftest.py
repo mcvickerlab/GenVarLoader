@@ -254,6 +254,87 @@ def phased_svar2_gvl(_svar2_slot_src, tmp_path_factory) -> Path:
     return out
 
 
+# --- shared 2-sample .svar2 fixture -----------------------------------------
+#
+# Consolidates six byte-identical private `svar2_store` fixtures that used to
+# live in tests/test_svar2_reconstruct.py, tests/unit/dataset/test_svar2_store.py,
+# tests/unit/dataset/test_svar2_link.py, and tests/dataset/test_svar2_readbound_
+# {variants,haps,diffs}.py. Named `svar2_store_2s` (not `svar2_store`) because
+# tests/dataset/conftest.py separately defines a 3-sample `svar2_store` -- four
+# of the folded-in modules live under tests/dataset/ and would otherwise
+# silently shadow that fixture. tests/dataset/test_svar2_readbound_tracks.py
+# keeps its own private fixture: its VCF carries a fourth variant and is not a
+# duplicate of this one.
+
+# 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
+# (C>CAT), DEL@11 (GTA>G, ilen -2). Genotypes exercise both samples and both
+# ploids.
+_SVAR2_REF = "ACAGTACATGGGTACTAGCTAGGCTAACCGGTTAACCGGT"
+
+_SVAR2_VCF_2S = """\
+##fileformat=VCFv4.2
+##contig=<ID=chr1,length=40>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS0\tS1
+chr1\t3\t.\tA\tG\t.\t.\t.\tGT\t1|0\t0|0
+chr1\t7\t.\tC\tCAT\t.\t.\t.\tGT\t0|1\t1|1
+chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1
+"""
+
+
+def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
+    """Write a VCF + FASTA under ``d`` and convert them to a .svar2 store.
+
+    Args:
+        vcf_text: Full VCF text, including header.
+        samples: Sample names to convert, in the order genoray should store them.
+        d: Directory to build in.
+        name: Basename of the resulting store directory.
+
+    Returns:
+        Path to the finished ``.svar2`` store.
+    """
+    from genoray import _core
+
+    ref = d / "ref.fa"
+    ref.write_text(f">chr1\n{_SVAR2_REF}\n")
+    subprocess.run(["samtools", "faidx", str(ref)], check=True)
+
+    vcf = d / "in.vcf"
+    vcf.write_text(vcf_text)
+    bcf = d / "in.bcf"
+    subprocess.run(["bcftools", "view", "-Ob", "-o", str(bcf), str(vcf)], check=True)
+    subprocess.run(["bcftools", "index", str(bcf)], check=True)
+
+    out = d / name
+    _core.run_conversion_pipeline(
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        samples,
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
+    assert (out / "meta.json").exists(), "conversion did not finish"
+    return out
+
+
+@pytest.fixture(scope="module")
+def svar2_store_2s(tmp_path_factory) -> Path:
+    """A two-sample (S0, S1) .svar2 store.
+
+    Named apart from the dataset suite's three-sample ``svar2_store`` on purpose:
+    six of this fixture's former copies were private duplicates, four of which
+    lived in ``tests/dataset/`` and silently shadowed ``tests/dataset/conftest.py``'s
+    same-named three-sample fixture.
+    """
+    d = tmp_path_factory.mktemp("svar2_2s")
+    return _build_svar2(_SVAR2_VCF_2S, ["S0", "S1"], d, "store")
+
+
 # --- 1kg datasets (slow tier) ------------------------------------------------
 
 
