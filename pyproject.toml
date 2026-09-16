@@ -16,7 +16,7 @@ dependencies = [
     # contig's ranges at once (gvl#333). 4.x is supported: its breaking changes
     # (SparseVar2.from_vcf(tune=) removal, from_vcf_list(max_mem=) semantics)
     # are on APIs GVL never calls.
-    "genoray>=3.4.0,<5",
+    "genoray>=4.1.0,<5",
     "numpy",
     "loguru",
     "natsort",
