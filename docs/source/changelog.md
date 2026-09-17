@@ -88,6 +88,61 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.43.0 (2026-09-17)
+
+### BREAKING CHANGE
+
+- datasets written by 0.43.0+ cannot be opened by earlier
+GenVarLoader, which fails with KeyError: 'vk_snp_range'. Reading older datasets
+is unaffected. Re-run gvl.write to shrink an existing dataset; there is no
+migration tool.
+
+### Feat
+
+- **concat**: merge svar2 range caches by region batch
+- **svar2**: project the range cache from realized fill
+- **svar2**: write the range cache sparsely
+- **svar2**: add the sparse region-CSR range layout
+- **threads**: let a dataset state its own parallelism policy
+
+### Fix
+
+- **svar2**: name the offending cell id, not the maximum beside it
+- harden svar2 sparse range cache against silent-error regressions
+- **docs**: correct svar2 accumulator GB figures and add genome-wide size
+- **svar2**: guard sparse writer preconditions that corrupted silently
+- **svar2**: cross-check dense vk shapes, align lookup input handling
+- **svar2**: validate CSR invariants, bound entries_for_regions, bind Protocol
+- **ci**: cache the 1kg Zenodo source and retry the download
+- **svar2**: account for indels in haplotype_lengths
+
+### Refactor
+
+- **concat**: clear final-review findings on analytic run planning
+- **concat**: dedupe region-only plan, tighten docstring/comments from review
+- **svar2**: read ranges through a layout protocol
+- **haps**: split the Haps role from its SVAR1 implementation
+- **haps**: dispatch track realignment through the reconstructor
+- **haps**: measure variant payload through the reconstructor
+- **haps**: query the reconstructor, not SVAR1 storage
+
+### Perf
+
+- **svar2**: consume genoray's sparse range stream in the writer
+- **concat**: yield source-dataset uniques from slot_batches
+- **concat**: plan every merge through RunPlan, dropping the provenance map
+- **concat**: build merged offsets from slot batches, cumsum in place
+- **concat**: add vectorized slot batches and analytic slot count to RunPlan
+- **concat**: derive merge runs from order without materializing slots
+- **svar2**: add the sparse range-lookup benchmark gate
+- **svar2**: stop allocating a dense n_variants at open
+- **svar2**: cut the ascending-cell-id guard from ~25n to ~n bytes
+- **write**: replace O(S^2) svar2 sample_cols with a hash lookup
+- **svar2**: stop re-doing work on the read-bound spliced path
+
 ## v0.42.1 (2026-08-21)
 
 ### Fix
