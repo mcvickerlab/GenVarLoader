@@ -1,8 +1,10 @@
 """Rust seam for VCF/PGEN mixed variants+tracks (issue #375, Track B).
 
-`window_realign_inputs` is the pymethod the Python mixed path uses to size a
-window's deletion-extended track query before pulling the window's first
-batch. Task 6 consumes it; this file pins its contract.
+`current_window_realign_inputs` is the production seam: the drive reads the window
+the producer has already filled, so a mixed record window is decoded once (issue
+#400). `window_realign_inputs` decodes a window it is handed, in the caller's thread;
+it is now TEST-ONLY and stays as the independent oracle these tests check the folded
+path against.
 """
 
 from __future__ import annotations
@@ -125,6 +127,10 @@ def test_window_realign_inputs_matches_before_and_during_producer(
     the first `next_batch()` call returns, maximizing the chance this test
     actually overlaps the two decodes rather than merely running twice
     sequentially.
+
+    Its production caller (`_mixed_engine()`) was deleted in issue #400, so this
+    test is now the only reason the pymethod stays: it still pins the
+    concurrent-call safety of the shared filler.
     """
     f = pgen_snp_ins_del_multi
     contig_len = int(f.regions["chromEnd"][0])
@@ -273,20 +279,24 @@ def test_record_window_csr_replicates_across_regions(
     t_ends = np.ascontiguousarray(sds._regions[r_idx, 2], np.int32)
     row_starts = np.repeat(t_starts, n_s).astype(np.int32)
     row_ends = np.repeat(t_ends, n_s).astype(np.int32)
+    contig_idx = int(b._regions[r_idx[0], 0])
+    engine = b.build_engine(
+        [(contig_idx, t_starts.astype(np.uint32), t_ends.astype(np.uint32), 0, n_s)],
+        4,
+        -1,
+    )
     state, t_ends_ext = b.mixed_realign_window(
-        r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+        r_idx, s_idx, t_starts, t_ends, row_starts, row_ends, engine
     )
     assert state.geno_offsets.shape == (2, n_reg * n_s * P)
     assert state.diffs.shape == (n_reg * n_s, P)
     assert t_ends_ext.shape == (n_reg,)
     assert (t_ends_ext >= t_ends).all()
 
-    # Independent source of truth: query the engine directly for this exact
-    # (contig, t_starts/t_ends, sample sub-range) rather than trusting the
-    # mixed path's own replication of it.
-    contig_idx = int(b._regions[r_idx[0], 0])
-    engine = b._mixed_engine()
-    _, _, _, csr = engine.window_realign_inputs(
+    # Independent source of truth: a plan-less engine decodes this exact window in the
+    # caller's thread (`debug_fill`), with no producer and no slot involved.
+    oracle = b.build_engine([], 1, 1)
+    _, _, _, csr = oracle.window_realign_inputs(
         contig_idx,
         np.ascontiguousarray(t_starts, np.uint32).tolist(),
         np.ascontiguousarray(t_ends, np.uint32).tolist(),
@@ -680,3 +690,62 @@ def test_record_mixed_multi_contig_parity(
     assert seen == {
         (r, s) for r in range(written.shape[0]) for s in range(written.shape[1])
     }
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_mixed_record_realign_decodes_each_window_once(
+    streaming_record_tracks_fixture, backend
+):
+    """Issue #400 gate: with `realign_tracks=True` the mixed record path must NOT
+    decode the window a second time. The producer already decodes every window
+    (`fill`); before this change the track side ALSO decoded it synchronously via a
+    private plan-less engine (`_mixed_engine()`), roughly doubling every window's
+    decode.
+
+    Measured with the deterministic decode counters, never wall-clock: this tree
+    shares a noisy CI node. `transpose_word_reads` counts the genotype transpose
+    both `VcfWindowFiller` and `PgenWindowFiller` run (`fill_decoded_window`), and
+    `pgen_variants_decoded` additionally counts PGEN's decoded variants. Both are
+    process-wide atomics, reset immediately before each sweep and read immediately
+    after it is fully drained (so no decode is still in flight).
+    """
+    from genvarloader.genvarloader import (
+        pgen_variants_decoded,
+        pgen_variants_decoded_reset,
+        transpose_word_reads,
+        transpose_word_reads_reset,
+    )
+
+    f = streaming_record_tracks_fixture(backend)
+
+    def sweep(realign: bool) -> tuple[int, int]:
+        sds = (
+            gvl.StreamingDataset(
+                f.bed,
+                reference=f.reference_path,
+                variants=f.variants_path,
+                tracks=[f.table, f.bigwigs],
+            )
+            .with_seqs("haplotypes")
+            .with_settings(realign_tracks=realign)
+        )
+        transpose_word_reads_reset()
+        pgen_variants_decoded_reset()
+        for _ in sds.to_iter(batch_size=4):
+            pass
+        return transpose_word_reads(), pgen_variants_decoded()
+
+    words_without, decoded_without = sweep(False)
+    words_with, decoded_with = sweep(True)
+
+    assert words_without > 0, "counter is not wired (no window was decoded)"
+    assert words_with == words_without, (
+        f"realign_tracks=True made {words_with} transposed word reads vs "
+        f"{words_without} with realign_tracks=False; the window is being decoded "
+        "twice again (issue #400 regression)"
+    )
+    if backend == "pgen":
+        assert decoded_with == decoded_without, (
+            f"realign_tracks=True decoded {decoded_with} PGEN variants vs "
+            f"{decoded_without} with realign_tracks=False (issue #400 regression)"
+        )

@@ -493,12 +493,16 @@ class _MixedTracksBackend(Protocol):
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
+        engine: object | None = None,
     ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """Per-window realign state + deletion-extended track ends.
 
         See `_Svar1Backend.mixed_realign_window` for the full contract every
         conforming backend must satisfy (index spaces, row ordering, shapes,
         and the exact 2-tuple return order).
+
+        The `engine` argument is the drive's engine, for backends whose window
+        decode the engine owns (the record backends); SVAR1/SVAR2 ignore it.
         """
         ...
 
@@ -740,11 +744,20 @@ def _record_mixed_realign_window(
     t_ends: NDArray[np.int32],
     row_starts: NDArray[np.int32],
     row_ends: NDArray[np.int32],
+    engine: object | None = None,
 ) -> "tuple[_MixedRealign, NDArray[np.int32]]":
     """One record-stream window's fused-kernel realign state (issue #375, Track B).
 
     Shared by `_VcfBackend` and `_PgenBackend`: the two differ only in their
     Rust `WindowFiller`, so the Python side is one function, not two.
+
+    The variant tables and CSR come from the DRIVE's engine, which decoded
+    this window in its producer thread: `current_window_realign_inputs` reads
+    that already-filled slot and decodes nothing (issue #400 -- this used to
+    decode the window a second time through a private plan-less engine). It
+    also validates that the engine's current job is exactly this window, so a
+    drive/plan drift raises `ValueError` instead of silently pairing one
+    window's tracks with another's variants.
 
     Produces exactly the same `_RealignWindow` shape `_Svar1Backend` produces,
     with two differences the kernel cannot observe:
@@ -761,7 +774,7 @@ def _record_mixed_realign_window(
       wants per (region, sample, ploid) rows, so the CSR is replicated across
       the window's regions here.
 
-    The engine is queried with `t_starts`/`t_ends` -- the bounds the DRIVE
+    The engine call is validated against `t_starts`/`t_ends` -- the bounds the DRIVE
     actually used -- not with `backend._regions[r_idx, 1:3]`. Under jitter the
     two differ: the drive draws `region_offsets` once and translates the track
     bounds through `_jitter_region_bounds`, and the same translated bounds went
@@ -809,14 +822,22 @@ def _record_mixed_realign_window(
             f"contract narrowed by this record-backend implementation; got {s_idx!r}."
         )
 
-    engine = backend._mixed_engine()
-    v_starts, ilens, geno_v_idxs, csr = engine.window_realign_inputs(
+    if engine is None:
+        raise ValueError(
+            "_record_mixed_realign_window requires the drive's RecordStreamEngine: "
+            "the window's variant decode is read from the engine's current slot "
+            "(issue #400). Pass engine=<RecordStreamEngine>."
+        )
+    window_inputs = engine.current_window_realign_inputs(
         contig_idx,
         np.ascontiguousarray(t_starts, np.uint32).tolist(),
         np.ascontiguousarray(t_ends, np.uint32).tolist(),
         int(s_idx[0]),
         int(s_idx[-1]) + 1,
     )
+    if window_inputs is None:
+        raise RuntimeError("streaming engine exhausted before the plan did")
+    v_starts, ilens, geno_v_idxs, csr = window_inputs
     v_starts = np.ascontiguousarray(v_starts, np.int32)
     ilens = np.ascontiguousarray(ilens, np.int32)
     geno_v_idxs = np.ascontiguousarray(geno_v_idxs, np.int32)
@@ -1681,6 +1702,7 @@ class StreamingDataset:
         r_idx: NDArray[np.intp],
         s_idx_w: NDArray[np.intp],
         region_offsets: "NDArray[np.int64] | None",
+        engine: object | None = None,
     ) -> "_TrackWindow":
         """Read one window's tracks, plus its realign state when re-aligning.
 
@@ -1706,6 +1728,9 @@ class StreamingDataset:
                 `None` -- `_iter_batches` rejects jitter for SVAR2 before the
                 drive runs, so its bounds are always the raw `self._regions`
                 slice.
+            engine: The drive's engine, forwarded to
+                ``backend.mixed_realign_window``; required by the record
+                backends.
 
         Returns:
             The window's `_TrackWindow`; its `realign` is set only when
@@ -1762,6 +1787,7 @@ class StreamingDataset:
                 np.ascontiguousarray(t_ends, np.int32),
                 row_starts_w,
                 row_ends_w,
+                engine,
             )
         else:
             # Un-realigned tracks stay in reference coordinates -- no
@@ -2051,6 +2077,10 @@ class StreamingDataset:
             # boundary deletion and under-extend the track query. Fail fast rather
             # than silently under-size the track buffer, matching the tracks-only
             # branch's identical jitter guard just above in this file.
+            # Record backends no longer decode in the consumer thread at all
+            # (issue #400): their decode comes from the drive's engine, whose
+            # job bounds are the jitter-translated ones. This guard is kept for
+            # SVAR1's raw-bounds re-read (#383).
             if (
                 self._track_backend is not None
                 and self._jitter > 0
@@ -2280,6 +2310,7 @@ class StreamingDataset:
                             r_idx,
                             np.arange(s_lo, s_hi, dtype=np.intp),
                             region_offsets,
+                            engine,
                         )
                     else:
                         track_w = None
@@ -4025,6 +4056,7 @@ class _Svar1Backend:
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
+        engine: object | None = None,
     ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """One window's fused-kernel realign state + deletion-extended track ends.
 
@@ -4084,6 +4116,8 @@ class _Svar1Backend:
             row_ends: `(n_regions * n_samples,)` int32, same
                 region-major/sample-minor layout as `row_starts`, one row end
                 per (region, sample) pair.
+            engine: Accepted for protocol uniformity and ignored: SVAR1's state
+                comes from its on-disk CSR, not from a stream engine.
 
         Returns:
             A 2-tuple `(realign_window, t_ends_ext)`, in that exact order:
@@ -4578,6 +4612,7 @@ class _Svar2Backend:
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
+        engine: object | None = None,
     ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """One window's split-kernel realign state + deletion-extended track ends.
 
@@ -4599,6 +4634,9 @@ class _Svar2Backend:
         today. Relaxing that guard requires threading `row_starts`/`row_ends`
         into the gather here, mirroring how SVAR1's `get_diffs_sparse` call
         takes `q_starts=row_starts, q_ends=row_ends`.
+
+        `engine` is accepted for protocol uniformity and ignored: SVAR2's state
+        comes from its read-bound kernel, not from a stream engine.
         """
         from .._threads import should_parallelize
         from ..genvarloader import hap_diffs_from_svar2_readbound
@@ -4744,8 +4782,6 @@ class _VcfBackend:
             sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
         )
 
-        self._mixed_engine_obj = None
-
     @property
     def has_cached_af(self) -> bool:
         """Whether this VCF's ``INFO/AF`` is usable for AF filtering.
@@ -4813,24 +4849,6 @@ class _VcfBackend:
             return False
         return True
 
-    def _mixed_engine(self) -> object:
-        """A zero-job engine kept solely for `window_realign_inputs` calls.
-
-        `window_realign_inputs` decodes the window it is handed and never
-        touches the engine's own plan, so a plan-less engine is enough -- and
-        keeping it separate from the drive's engine means the mixed track read
-        cannot perturb the producer/consumer lockstep. Built lazily and cached
-        on the backend, paid once per `StreamingDataset`, not once per window.
-        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
-        #307 placeholder optimization makes this call allocate no reference
-        bytes at all -- without it, this would otherwise pull the whole
-        reference (and, for PGEN, a full second `.pvar` scan) into a second
-        Rust engine (issue #375 Track B final review, H1).
-        """
-        if self._mixed_engine_obj is None:
-            self._mixed_engine_obj = self.build_engine([], 1, 1)
-        return self._mixed_engine_obj
-
     def mixed_realign_window(
         self,
         r_idx: NDArray[np.intp],
@@ -4839,6 +4857,7 @@ class _VcfBackend:
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
+        engine: object | None = None,
     ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """See `_Svar1Backend.mixed_realign_window` for the full contract.
 
@@ -4847,7 +4866,7 @@ class _VcfBackend:
         `WindowFiller`, which the engine hides.
         """
         return _record_mixed_realign_window(
-            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends, engine
         )
 
     def build_engine(
@@ -4917,7 +4936,8 @@ class _VcfBackend:
         # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
         # Materializing every contig would pull the whole reference into
         # Python (and again into the Rust engine) on every `build_engine` call
-        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # -- including the plan-less engine the CSR test builds as its
+        # independent oracle (`build_engine([], 1, 1)`), where
         # `touched_contigs` is empty and this now allocates nothing at all.
         # Untouched contigs get an empty placeholder to keep the per-contig
         # arrays index-aligned (the engine requires equal per-contig lengths).
@@ -5059,8 +5079,6 @@ class _PgenBackend:
             sp.bed.sort(bed_df), ContigNormalizer(self._contigs)
         )
 
-        self._mixed_engine_obj = None
-
     @property
     def has_cached_af(self) -> bool:
         """PGEN record streams carry no INFO -> no AF (Wave B PR-B2, #319).
@@ -5068,24 +5086,6 @@ class _PgenBackend:
         AF filtering on PGEN is guarded upstream; always False.
         """
         return False
-
-    def _mixed_engine(self) -> object:
-        """A zero-job engine kept solely for `window_realign_inputs` calls.
-
-        `window_realign_inputs` decodes the window it is handed and never
-        touches the engine's own plan, so a plan-less engine is enough -- and
-        keeping it separate from the drive's engine means the mixed track read
-        cannot perturb the producer/consumer lockstep. Built lazily and cached
-        on the backend, paid once per `StreamingDataset`, not once per window.
-        `jobs=[]` means `touched_contigs` in `build_engine` is empty, so the
-        #307 placeholder optimization makes this call allocate no reference
-        bytes at all -- without it, this would otherwise pull the whole
-        reference (and, for PGEN, a full second `.pvar` scan) into a second
-        Rust engine (issue #375 Track B final review, H1).
-        """
-        if self._mixed_engine_obj is None:
-            self._mixed_engine_obj = self.build_engine([], 1, 1)
-        return self._mixed_engine_obj
 
     def mixed_realign_window(
         self,
@@ -5095,6 +5095,7 @@ class _PgenBackend:
         t_ends: NDArray[np.int32],
         row_starts: NDArray[np.int32],
         row_ends: NDArray[np.int32],
+        engine: object | None = None,
     ) -> tuple[_MixedRealign, NDArray[np.int32]]:
         """See `_Svar1Backend.mixed_realign_window` for the full contract.
 
@@ -5103,7 +5104,7 @@ class _PgenBackend:
         `WindowFiller`, which the engine hides.
         """
         return _record_mixed_realign_window(
-            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends
+            self, r_idx, s_idx, t_starts, t_ends, row_starts, row_ends, engine
         )
 
     def build_engine(
@@ -5159,7 +5160,8 @@ class _PgenBackend:
         # `contig_refs[job.contig_idx]`, so untouched contigs are never read.
         # Materializing every contig would pull the whole reference into
         # Python (and again into the Rust engine) on every `build_engine` call
-        # -- including `_mixed_engine()`'s `build_engine([], 1, 1)`, where
+        # -- including the plan-less engine the CSR test builds as its
+        # independent oracle (`build_engine([], 1, 1)`), where
         # `touched_contigs` is empty and this now allocates nothing at all.
         # Untouched contigs get an empty placeholder to keep the per-contig
         # arrays index-aligned (the engine requires equal per-contig lengths).
