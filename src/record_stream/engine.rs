@@ -142,6 +142,21 @@ impl RecordBackend {
         Ok(slot)
     }
 
+    /// Clone the filled window's realign inputs out of the producer's slot: the
+    /// window-local static table (`v_starts`/`ilens`), the per-hap CSR values
+    /// (`geno_v_idxs`) and its offsets (`geno_offsets`). Cloned, not moved: the slot stays
+    /// owned by the engine state so `generate` can still reconstruct this window's
+    /// batches (issue #400). Returns owned `Vec`s so the caller can convert to numpy
+    /// after releasing the engine lock.
+    fn realign_inputs(&self, slot: &DecodedWindow) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<i64>) {
+        (
+            slot.v_starts.clone(),
+            slot.ilens.clone(),
+            slot.geno_v_idxs.clone(),
+            slot.geno_offsets.clone(),
+        )
+    }
+
     /// The per-row CSR walk + region/AF keep shared by `generate_variants` and
     /// `generate_variant_windows` (Wave B PR-B4, #304) — factored out of what was
     /// previously `generate_variants`' own inline loop so BOTH output modes select and
@@ -1046,8 +1061,8 @@ impl RecordStreamEngine {
         ))
     }
 
-    /// Decode one window's genotype table + CSR for the Python mixed
-    /// variants+tracks path (issue #375, Track B).
+    /// Decode one window's genotype table + CSR (issue #375, Track B; the
+    /// test-only oracle since issue #400 -- see below).
     ///
     /// Returns `(v_starts, ilens, geno_v_idxs, geno_offsets)`, all WINDOW-LOCAL:
     /// `geno_v_idxs` holds column indices into `v_starts`/`ilens`, and
@@ -1057,30 +1072,11 @@ impl RecordStreamEngine {
     /// [`RecordBackend::kept_v_idxs`] assumes (`h = si * ploidy + p`). The
     /// caller replicates rows across regions.
     ///
-    /// Python needs these BEFORE the window's first batch, to size the
-    /// deletion-extended track query, so this cannot ride along on
-    /// `next_batch` (which is sub-window) and cannot read the producer's slot
-    /// (which the consumer owns). It therefore does its own synchronous decode
-    /// in the calling thread via `debug_fill`, the same path
-    /// `debug_decode_window` uses. That means a mixed VCF/PGEN stream decodes
-    /// each window TWICE: once here for the track sizing, once in the producer
-    /// for the haplotypes.
-    ///
-    /// As shipped, Python's `_mixed_engine()` gives this call its OWN engine
-    /// (a separate `PgenWindowFiller`/`reader_lock` or `VcfWindowFiller` from
-    /// the drive's), so in production this decode never actually contends
-    /// with the producer -- the two run against independent fillers with no
-    /// shared mutable state. `PgenWindowFiller`'s `reader_lock` (see its doc
-    /// comment) would still serialize this call against a producer sharing
-    /// the SAME filler, which is why it stays: `debug_fill` is a genuine
-    /// production entry point (not test-only), and the lock is what makes the
-    /// obvious future consolidation onto one engine safe. Today only
-    /// `test_window_realign_inputs_matches_before_and_during_producer`
-    /// exercises that pairing (final review, M1). VCF needs no lock either
-    /// way -- `VcfWindowFiller::fill` opens a fresh record source per call, so
-    /// there is no shared mutable reader to race. Net cost: roughly 2x decode
-    /// on the mixed path (one per engine); folding this into a single shared
-    /// engine is a tracked follow-up, not a v1 requirement.
+    /// TEST-ONLY since issue #400: the production consumer was deleted (the drive
+    /// now reads the producer's own slot via `current_window_realign_inputs`), so
+    /// this stays as the independent CSR oracle used by
+    /// `test_record_window_csr_replicates_across_regions` and
+    /// `test_window_realign_inputs_matches_before_and_during_producer`.
     #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
     #[allow(clippy::too_many_arguments)]
     fn window_realign_inputs<'py>(
@@ -1123,6 +1119,78 @@ impl RecordStreamEngine {
             Array1::from_vec(slot.geno_v_idxs).into_pyarray(py),
             Array1::from_vec(slot.geno_offsets).into_pyarray(py),
         ))
+    }
+
+    /// Read the CURRENT window's realign inputs from the producer's already-filled slot
+    /// (issue #400).
+    ///
+    /// Returns the same 4-tuple `window_realign_inputs` returns -- `(v_starts, ilens,
+    /// geno_v_idxs, geno_offsets)`, all window-local -- but decodes NOTHING: the window was
+    /// decoded once by the producer (`fill`) and this reads that slot. `None` means the
+    /// engine's plan is exhausted.
+    ///
+    /// The requested job (`contig_idx`, `region_starts`/`region_ends`, `s_lo`/`s_hi`) must
+    /// EQUAL the engine's current job: the Python drive derives the request from its own
+    /// plan, and if the two plans have drifted apart, pairing this window's track query
+    /// with another window's variants would be silently wrong. `ValueError` on mismatch --
+    /// loud, because the alternative is wrong bytes.
+    ///
+    /// Consumes no rows: the caller can size its track query and then pull the window's
+    /// batches as usual.
+    #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
+    #[allow(clippy::too_many_arguments)]
+    fn current_window_realign_inputs<'py>(
+        &self,
+        py: Python<'py>,
+        contig_idx: usize,
+        region_starts: Vec<u32>,
+        region_ends: Vec<u32>,
+        s_lo: usize,
+        s_hi: usize,
+    ) -> PyResult<Option<(
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i64>>,
+    )>> {
+        if region_starts.len() != region_ends.len() {
+            return Err(PyValueError::new_err(
+                "current_window_realign_inputs: region_starts and region_ends must have the same length",
+            ));
+        }
+        let regions: Vec<(u32, u32)> = region_starts.into_iter().zip(region_ends).collect();
+        let out = py.detach(|| {
+            self.core.with_current_window(|job_idx, slot| {
+                Ok((job_idx, self.core.backend().realign_inputs(slot)))
+            })
+        });
+        let Some(out) = out else {
+            return Ok(None);
+        };
+        let (job_idx, (v_starts, ilens, geno_v_idxs, geno_offsets)) =
+            out.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let backend = self.core.backend();
+        let job = &backend.jobs[job_idx];
+        if job.contig_idx != contig_idx
+            || job.regions != regions
+            || job.s_lo != s_lo
+            || job.s_hi != s_hi
+        {
+            return Err(PyValueError::new_err(format!(
+                "current_window_realign_inputs: the engine's current window is job {job_idx} \
+                 (contig {}, regions {:?}, samples {}..{}), which does not match the requested \
+                 contig {contig_idx}, regions {regions:?}, samples {s_lo}..{s_hi}; the drive and \
+                 the engine's plan have drifted apart",
+                job.contig_idx, job.regions, job.s_lo, job.s_hi
+            )));
+        }
+        Ok(Some((
+            Array1::from_vec(v_starts).into_pyarray(py),
+            Array1::from_vec(ilens).into_pyarray(py),
+            Array1::from_vec(geno_v_idxs).into_pyarray(py),
+            Array1::from_vec(geno_offsets).into_pyarray(py),
+        )))
     }
 }
 

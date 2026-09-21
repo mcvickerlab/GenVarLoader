@@ -231,21 +231,15 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// thread (if started) is concurrently doing the same against the same `Arc`-shared
     /// backend. Two callers:
     ///
-    /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) — test/debug-only,
-    ///   parity testing.
-    /// - `RecordStreamEngine::window_realign_inputs` (issue #375 Track B) — a genuine
-    ///   production path for mixed VCF/PGEN variants+tracks streams, called per window.
-    ///   As shipped, Python's `_mixed_engine()` calls it against a separate,
-    ///   plan-less engine (`jobs=[]`) built just for this, so in production
-    ///   there is no producer thread on that engine's `Arc`-shared backend to
-    ///   contend with -- the concurrent-with-a-live-producer case this doc
-    ///   describes is currently exercised only by
-    ///   `test_window_realign_inputs_matches_before_and_during_producer`,
-    ///   which deliberately drives one engine both ways. It stays a genuine
-    ///   safety property of this accessor regardless, since folding the mixed
-    ///   path onto the drive engine (removing the double decode) is the
-    ///   obvious next step and would make this the live case (final review,
-    ///   M1).
+    /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) and
+    ///   `RecordStreamEngine::window_realign_inputs` (issues #375/#391) -- now
+    ///   TEST-ONLY: they decode a window in the caller's thread for parity
+    ///   oracles. Issue #400 removed the production consumer (a private
+    ///   plan-less engine), so the concurrent-with-a-live-producer case is
+    ///   exercised only by
+    ///   `test_window_realign_inputs_matches_before_and_during_producer`. The
+    ///   safety property stands: both callers release the GIL, so both remain
+    ///   safe against a live producer.
     ///
     /// Both release the GIL (`py.detach`) around their call in here, so both are safe to
     /// call against a live producer — safety does not rest on a call-site convention like
@@ -316,43 +310,31 @@ impl<B: EngineBackend> StreamEngineCore<B> {
         Ok(())
     }
 
-    /// Advance the shared iteration state to the next generatable row slice, or to
-    /// exhaustion/error. Byte-identical control flow to the pre-refactor `next_batch_core`
-    /// loop (issue #276/#283): the only change is that the terminal action — generating
-    /// bytes from `[row_lo, row_hi)` — is left to the caller instead of being inlined here,
-    /// so both the haplotype and variants-output paths can reuse this same cursor walk.
-    fn advance(&self, state: &mut EngineState<B::Slot>) -> NextSlice {
+    /// Ensure `state.current` is a window with rows left, starting the producer,
+    /// recycling a spent window, and receiving the next one as needed.
+    ///
+    /// `Ok(true)` leaves `state.current` set and `state.current.next_row` UNTOUCHED --
+    /// the caller decides whether to consume rows (`advance`) or merely read the window
+    /// (`with_current_window`). `Ok(false)` is `NextSlice::Done` (`state.done` set), and
+    /// `Err(_)` is `NextSlice::Failed(_)` (`state.done` set); this never yields a row
+    /// slice.
+    fn ensure_current_window(&self, state: &mut EngineState<B::Slot>) -> anyhow::Result<bool> {
         if state.done {
-            return NextSlice::Done;
+            return Ok(false);
         }
         if let Err(e) = self.ensure_started(state) {
             state.done = true;
-            return NextSlice::Failed(e);
+            return Err(e);
         }
 
         loop {
-            // 1. If the current window has rows left, advance the cursor and yield the
-            //    next slice.
-            let has_rows = match state.current.as_ref() {
-                Some(cur) => cur.next_row < cur.n_batch_rows,
-                None => false,
-            };
-            if has_rows {
-                let cur = state
-                    .current
-                    .as_mut()
-                    .expect("has_rows implies a live current window");
-                let row_lo = cur.next_row;
-                let row_hi = (row_lo + self.batch_size).min(cur.n_batch_rows);
-                cur.next_row = row_hi;
-                return NextSlice::Ready {
-                    job_idx: cur.job_idx,
-                    row_lo,
-                    row_hi,
-                };
+            if let Some(cur) = state.current.as_ref() {
+                if cur.next_row < cur.n_batch_rows {
+                    return Ok(true);
+                }
             }
 
-            // 2. Current window is spent (or absent): recycle it, then fetch the next.
+            // Current window is spent (or absent): recycle it, then fetch the next.
             if let Some(spent) = state.current.take() {
                 if let Some(tx) = state.tx_free.as_ref() {
                     // Always recycle (Err only if the producer already exited) so the
@@ -377,24 +359,80 @@ impl<B: EngineBackend> StreamEngineCore<B> {
                         next_row: 0,
                         n_batch_rows,
                     });
-                    // Loop back to yield from the newly received window.
+                    // Loop back to check the newly received window.
                 }
                 Err(_) => {
-                    // Channel closed => producer finished. JOIN FIRST, classify AFTER —
+                    // Channel closed => producer finished. JOIN FIRST, classify AFTER --
                     // never return with the producer live and unjoined.
                     state.done = true;
                     if let Some(h) = state.producer.take() {
                         return match h.join() {
-                            Err(_) => NextSlice::Failed(anyhow::anyhow!(
+                            Err(_) => Err(anyhow::anyhow!(
                                 "streaming producer thread panicked"
                             )),
-                            Ok(Err(e)) => NextSlice::Failed(e),
-                            Ok(Ok(())) => NextSlice::Done,
+                            Ok(Err(e)) => Err(e),
+                            Ok(Ok(())) => Ok(false),
                         };
                     }
-                    return NextSlice::Done;
+                    return Ok(false);
                 }
             }
+        }
+    }
+
+    /// Run `f` against the job index and filled slot of the CURRENT window, ensuring one
+    /// exists (issue #400). Consumes nothing: a following `next_batch_core` still starts
+    /// at `state.current.next_row`.
+    ///
+    /// `None` = plan exhausted; `Some(Err(_))` = producer error/panic, joined and
+    /// classified exactly as `next_batch_core` does. `f` runs while the state lock is
+    /// held -- the slot it reads must not be recycled under it -- so it must not re-enter
+    /// the engine. Callers must release the GIL (`py.detach`) before calling in: this
+    /// can park in `recv` (and start the producer), which may itself need the GIL.
+    pub(crate) fn with_current_window<R>(
+        &self,
+        f: impl FnOnce(usize, &B::Slot) -> anyhow::Result<R>,
+    ) -> Option<anyhow::Result<R>> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match self.ensure_current_window(&mut state) {
+            Ok(true) => {
+                let cur = state
+                    .current
+                    .as_ref()
+                    .expect("Ok(true) implies a current window");
+                Some(f(cur.job_idx, &cur.filled))
+            }
+            Ok(false) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    /// Advance the shared iteration state to the next generatable row slice, or to
+    /// exhaustion/error. Byte-identical control flow to the pre-refactor `next_batch_core`
+    /// loop (issue #276/#283): the only change is that the terminal action — generating
+    /// bytes from `[row_lo, row_hi)` — is left to the caller instead of being inlined here,
+    /// so both the haplotype and variants-output paths can reuse this same cursor walk.
+    ///
+    /// The cursor walk itself now lives in `ensure_current_window`, split out so
+    /// `with_current_window` can read the current window without consuming its rows
+    /// (issue #400).
+    fn advance(&self, state: &mut EngineState<B::Slot>) -> NextSlice {
+        match self.ensure_current_window(state) {
+            Ok(true) => {}
+            Ok(false) => return NextSlice::Done,
+            Err(e) => return NextSlice::Failed(e),
+        }
+        let cur = state
+            .current
+            .as_mut()
+            .expect("ensure_current_window guarantees a current window");
+        let row_lo = cur.next_row;
+        let row_hi = (row_lo + self.batch_size).min(cur.n_batch_rows);
+        cur.next_row = row_hi;
+        NextSlice::Ready {
+            job_idx: cur.job_idx,
+            row_lo,
+            row_hi,
         }
     }
 
@@ -575,5 +613,123 @@ mod tests {
             .recv_timeout(Duration::from_secs(30))
             .expect("EngineState::drop deadlocked: it joined a GIL-needing producer without releasing the GIL (issue #399)");
         worker.join().expect("worker thread should not panic");
+    }
+
+    /// Backend with no filler internals, no GIL and no channels of its own: each filled
+    /// slot records the job index that produced it (so a test can tell WHICH window the
+    /// core is holding) and `generate` returns one byte per requested row (so a test can
+    /// tell which rows the cursor asked for).
+    struct MarkerBackend {
+        n_jobs: usize,
+        rows_per_job: usize,
+    }
+
+    impl EngineBackend for MarkerBackend {
+        type Slot = Vec<usize>;
+
+        fn n_jobs(&self) -> usize {
+            self.n_jobs
+        }
+
+        fn fill(&self, job_idx: usize, slot: &mut Vec<usize>) -> anyhow::Result<()> {
+            slot.clear();
+            slot.push(job_idx);
+            Ok(())
+        }
+
+        fn n_batch_rows(&self, _job_idx: usize, _slot: &Vec<usize>) -> usize {
+            self.rows_per_job
+        }
+
+        fn generate(
+            &self,
+            _job_idx: usize,
+            _slot: &Vec<usize>,
+            row_lo: usize,
+            row_hi: usize,
+        ) -> anyhow::Result<(
+            Array1<u8>,
+            Option<Array1<i32>>,
+            Option<Array1<i32>>,
+            Array1<i64>,
+        )> {
+            Ok((
+                Array1::from_vec(vec![0u8; row_hi - row_lo]),
+                None,
+                None,
+                Array1::from_vec(vec![0i64, (row_hi - row_lo) as i64]),
+            ))
+        }
+    }
+
+    /// Issue #400: `with_current_window` must hand back the window the producer has
+    /// already filled WITHOUT consuming any of its rows, and must only move on once that
+    /// window is spent. This is what lets the Python mixed record path size its track
+    /// query from the producer's decode instead of decoding the window a second time.
+    #[test]
+    fn with_current_window_exposes_the_current_window_without_consuming_rows() {
+        let core = StreamEngineCore::new(
+            Arc::new(MarkerBackend {
+                n_jobs: 3,
+                rows_per_job: 2,
+            }),
+            1,
+        );
+
+        // Starts the producer and receives window 0, consuming nothing.
+        let first = core
+            .with_current_window(|job_idx, slot| {
+                assert_eq!(
+                    slot.as_slice(),
+                    [job_idx],
+                    "slot must carry its own job marker"
+                );
+                Ok(job_idx)
+            })
+            .expect("a current window must be available")
+            .expect("no producer error");
+        assert_eq!(first, 0);
+
+        // Idempotent: window 0 still has all of its rows, so the same window comes back.
+        let again = core
+            .with_current_window(|job_idx, _slot| Ok(job_idx))
+            .expect("window 0 still has rows")
+            .expect("no producer error");
+        assert_eq!(again, 0, "the peek consumed rows instead of just reading");
+
+        // The row cursor was untouched: window 0 still yields BOTH of its rows.
+        let widths: Vec<usize> = (0..2)
+            .map(|_| {
+                core.next_batch_core()
+                    .expect("row slice")
+                    .expect("no error")
+                    .0
+                    .len()
+            })
+            .collect();
+        assert_eq!(widths, [1, 1], "peeked window lost rows");
+
+        // Only a SPENT window advances the core's idea of "current".
+        let second = core
+            .with_current_window(|job_idx, _slot| Ok(job_idx))
+            .expect("window 1 is now current")
+            .expect("no producer error");
+        assert_eq!(second, 1, "the core advanced before the window was spent");
+
+        // 3 jobs x 2 rows at batch_size 1: 6 batches total, 2 already taken.
+        let mut remaining = 0usize;
+        while let Some(batch) = core.next_batch_core() {
+            batch.expect("no producer error");
+            remaining += 1;
+        }
+        assert_eq!(
+            remaining, 4,
+            "peeking must not change how many rows the plan yields"
+        );
+
+        // Fully drained: the peek reports exhaustion rather than hanging or re-yielding.
+        assert!(core
+            .with_current_window(|job_idx, _slot| Ok(job_idx))
+            .is_none());
     }
 }
