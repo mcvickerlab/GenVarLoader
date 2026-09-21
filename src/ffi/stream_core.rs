@@ -387,7 +387,8 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// `None` = plan exhausted; `Some(Err(_))` = producer error/panic, joined and
     /// classified exactly as `next_batch_core` does. `f` runs while the state lock is
     /// held -- the slot it reads must not be recycled under it -- so it must not re-enter
-    /// the engine.
+    /// the engine. Callers must release the GIL (`py.detach`) before calling in: this
+    /// can park in `recv` (and start the producer), which may itself need the GIL.
     pub(crate) fn with_current_window<R>(
         &self,
         f: impl FnOnce(usize, &B::Slot) -> anyhow::Result<R>,

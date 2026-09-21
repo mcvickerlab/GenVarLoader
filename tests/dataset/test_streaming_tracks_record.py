@@ -361,11 +361,21 @@ def test_current_window_realign_inputs_reads_the_producers_window(
 
     engine = b.build_engine([(contig_idx, t_starts, t_ends, 0, n_s)], 4, -1)
 
-    # A window that is NOT the engine's current one must fail loudly.
-    with pytest.raises(ValueError, match="does not match"):
-        engine.current_window_realign_inputs(
-            contig_idx, t_starts.tolist(), (t_ends + 1).tolist(), 0, n_s
-        )
+    # A window that is NOT the engine's current one must fail loudly -- once per
+    # perturbed guard field, so dropping any one field from the Rust comparison
+    # cannot leave this suite green.
+    for field, bad in (
+        ("contig_idx", (contig_idx + 1, t_starts.tolist(), t_ends.tolist(), 0, n_s)),
+        (
+            "region_starts",
+            (contig_idx, (t_starts + 1).tolist(), t_ends.tolist(), 0, n_s),
+        ),
+        ("region_ends", (contig_idx, t_starts.tolist(), (t_ends + 1).tolist(), 0, n_s)),
+        ("s_lo", (contig_idx, t_starts.tolist(), t_ends.tolist(), 1, n_s)),
+        ("s_hi", (contig_idx, t_starts.tolist(), t_ends.tolist(), 0, n_s + 1)),
+    ):
+        with pytest.raises(ValueError, match="does not match"):
+            engine.current_window_realign_inputs(*bad)
 
     got = engine.current_window_realign_inputs(
         contig_idx, t_starts.tolist(), t_ends.tolist(), 0, n_s
@@ -744,6 +754,7 @@ def test_mixed_record_realign_decodes_each_window_once(
         "twice again (issue #400 regression)"
     )
     if backend == "pgen":
+        assert decoded_without > 0, "PGEN decode counter is not wired"
         assert decoded_with == decoded_without, (
             f"realign_tracks=True decoded {decoded_with} PGEN variants vs "
             f"{decoded_without} with realign_tracks=False (issue #400 regression)"
