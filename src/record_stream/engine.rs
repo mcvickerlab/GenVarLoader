@@ -1061,8 +1061,8 @@ impl RecordStreamEngine {
         ))
     }
 
-    /// Decode one window's genotype table + CSR for the Python mixed
-    /// variants+tracks path (issue #375, Track B).
+    /// Decode one window's genotype table + CSR (issue #375, Track B; the
+    /// test-only oracle since issue #400 -- see below).
     ///
     /// Returns `(v_starts, ilens, geno_v_idxs, geno_offsets)`, all WINDOW-LOCAL:
     /// `geno_v_idxs` holds column indices into `v_starts`/`ilens`, and

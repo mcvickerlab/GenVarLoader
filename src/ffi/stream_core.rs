@@ -231,13 +231,15 @@ impl<B: EngineBackend> StreamEngineCore<B> {
     /// thread (if started) is concurrently doing the same against the same `Arc`-shared
     /// backend. Two callers:
     ///
-    /// - `RecordStreamEngine::window_realign_inputs` and `debug_decode_window` (issues
-    ///   #375/#391) -- now TEST-ONLY: it decodes a window in the caller's thread for
-    ///   parity oracles. Issue #400 removed the production consumer (a private plan-less
-    ///   engine), so the concurrent-with-a-live-producer case is exercised only by
-    ///   `test_window_realign_inputs_matches_before_and_during_producer`. The safety
-    ///   property stands: both callers release the GIL, so both remain safe against a
-    ///   live producer.
+    /// - `RecordStreamEngine::debug_decode_window` (issue #276 task 7) and
+    ///   `RecordStreamEngine::window_realign_inputs` (issues #375/#391) -- now
+    ///   TEST-ONLY: they decode a window in the caller's thread for parity
+    ///   oracles. Issue #400 removed the production consumer (a private
+    ///   plan-less engine), so the concurrent-with-a-live-producer case is
+    ///   exercised only by
+    ///   `test_window_realign_inputs_matches_before_and_during_producer`. The
+    ///   safety property stands: both callers release the GIL, so both remain
+    ///   safe against a live producer.
     ///
     /// Both release the GIL (`py.detach`) around their call in here, so both are safe to
     /// call against a live producer — safety does not rest on a call-site convention like
