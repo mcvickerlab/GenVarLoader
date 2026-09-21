@@ -283,6 +283,7 @@ def test_readbound_haps_noncontiguous_input_raises():
     import numpy as np
     import pytest
     from genvarloader._dataset._svar2_store_py import build_readbound_haps  # noqa: F401
+
     # Build a minimal store + regions exactly as the existing haps parity test does,
     # then pass a strided (non-contiguous) view of one of the int64 range arrays.
     # (Reuse the fixture/store construction from test_readbound_haps_* above.)
@@ -372,7 +373,10 @@ def test_svar2_extend_to_length_false_raises(tmp_path, svar2_source_and_bed):
     must raise, not silently produce an extended dataset."""
     import pytest
     import genvarloader as gvl
-    svar2, bed = svar2_source_and_bed  # reuse the existing fixture used by the write tests
+
+    svar2, bed = (
+        svar2_source_and_bed  # reuse the existing fixture used by the write tests
+    )
     with pytest.raises(NotImplementedError, match="extend_to_length"):
         gvl.write(tmp_path / "ds", bed, variants=svar2, extend_to_length=False)
 ```
@@ -445,8 +449,11 @@ def test_svar2_region_max_ends_matches_reference(svar2_source_and_bed):
     including the pos-then-end tie-break and the empty-region default = chromEnd."""
     import numpy as np
     from genvarloader._dataset._write import _svar2_region_max_ends
+
     svar2, bed = svar2_source_and_bed
-    for (c,), df in bed.partition_by("chrom", as_dict=True, maintain_order=True).items():
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
         starts = df["chromStart"].to_numpy()
         ends = df["chromEnd"].to_numpy()
         samples = list(svar2.available_samples)
@@ -459,10 +466,13 @@ def test_svar2_region_max_ends_matches_reference(svar2_source_and_bed):
 def _reference_region_max_ends(svar2, contig, starts, ends, samples):
     """Byte-for-byte copy of the ORIGINAL triple-loop, kept in the test as the oracle."""
     import numpy as np
+
     R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
     sel = [svar2.available_samples.index(s) for s in samples]
     dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = dec.data["pos"]; ilen_arr = dec.data["ilen"]; off = np.asarray(dec.offsets)
+    pos_arr = dec.data["pos"]
+    ilen_arr = dec.data["ilen"]
+    off = np.asarray(dec.offsets)
     out = np.asarray(ends, np.int64).copy()
     for r in range(R):
         best_pos, best_end = -1, -1
@@ -470,10 +480,13 @@ def _reference_region_max_ends(svar2, contig, starts, ends, samples):
             for p in range(P):
                 h = (r * S_all + s) * P + p
                 a, b = int(off[h]), int(off[h + 1])
-                if a == b: continue
-                seg_pos = pos_arr[a:b]; seg_ilen = ilen_arr[a:b]
+                if a == b:
+                    continue
+                seg_pos = pos_arr[a:b]
+                seg_ilen = ilen_arr[a:b]
                 j = int(np.argmax(seg_pos))
-                p_pos = int(seg_pos[j]); p_end = (p_pos + 1) - min(int(seg_ilen[j]), 0)
+                p_pos = int(seg_pos[j])
+                p_end = (p_pos + 1) - min(int(seg_ilen[j]), 0)
                 if p_pos > best_pos or (p_pos == best_pos and p_end > best_end):
                     best_pos, best_end = p_pos, p_end
         if best_pos >= 0:
@@ -489,31 +502,38 @@ Expected: PASS.
 - [ ] **Step 3: Vectorize the function.** Replace the triple-loop body of `_svar2_region_max_ends` (keeping the docstring's semantics but dropping the "O(...) Python iteration ... vectorize as a follow-up" caveat) with a scatter-reduce. Key idea: for each variant, its haplotype maps to a region `r = h // (S_all * P)` but only SELECTED samples count; compute `end = (pos+1) - min(ilen,0)` per variant, form a sortable composite `key = (pos << 21) | end` (end fits well under 2^21 for realistic regions; assert it) so that a plain per-region max on `key` reproduces the pos-then-end tie-break, then unpack `end`:
 
 ```python
-    R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
-    sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
-    dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
-    pos_arr = np.asarray(dec.data["pos"], np.int64)
-    ilen_arr = np.asarray(dec.data["ilen"], np.int64)
-    off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
-    out = np.asarray(ends, np.int64).copy()  # default = chromEnd
-    if pos_arr.size:
-        n_hap = R * S_all * P
-        counts = np.diff(off)  # variants per hap
-        hap_of_var = np.repeat(np.arange(n_hap), counts)  # region-major hap index per variant
-        s_of_hap = (np.arange(n_hap) // P) % S_all
-        keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
-        region_of_var = hap_of_var // (S_all * P)
-        end_var = (pos_arr + 1) - np.minimum(ilen_arr, 0)  # 0-based -> 1-based, extend on DEL
-        SHIFT = 21
-        assert int(end_var.max(initial=0)) < (1 << SHIFT), "end exceeds tie-break packing width"
-        key = (pos_arr << SHIFT) | end_var
-        key_k = key[keep]; region_k = region_of_var[keep]
-        if key_k.size:
-            best = np.full(R, -1, np.int64)
-            np.maximum.at(best, region_k, key_k)  # per-region max composite key
-            has = best >= 0
-            out[has] = best[has] & ((1 << SHIFT) - 1)  # unpack end
-    return out.astype(np.int32)
+R, S_all, P = len(starts), svar2.n_samples, svar2.ploidy
+sel = np.asarray([svar2.available_samples.index(s) for s in samples], np.int64)
+dec = svar2.decode(contig, list(zip(starts.tolist(), ends.tolist())))
+pos_arr = np.asarray(dec.data["pos"], np.int64)
+ilen_arr = np.asarray(dec.data["ilen"], np.int64)
+off = np.asarray(dec.offsets, np.int64)  # length R*S_all*P + 1
+out = np.asarray(ends, np.int64).copy()  # default = chromEnd
+if pos_arr.size:
+    n_hap = R * S_all * P
+    counts = np.diff(off)  # variants per hap
+    hap_of_var = np.repeat(
+        np.arange(n_hap), counts
+    )  # region-major hap index per variant
+    s_of_hap = (np.arange(n_hap) // P) % S_all
+    keep = np.isin(s_of_hap[hap_of_var], sel)  # only selected samples
+    region_of_var = hap_of_var // (S_all * P)
+    end_var = (pos_arr + 1) - np.minimum(
+        ilen_arr, 0
+    )  # 0-based -> 1-based, extend on DEL
+    SHIFT = 21
+    assert int(end_var.max(initial=0)) < (1 << SHIFT), (
+        "end exceeds tie-break packing width"
+    )
+    key = (pos_arr << SHIFT) | end_var
+    key_k = key[keep]
+    region_k = region_of_var[keep]
+    if key_k.size:
+        best = np.full(R, -1, np.int64)
+        np.maximum.at(best, region_k, key_k)  # per-region max composite key
+        has = best >= 0
+        out[has] = best[has] & ((1 << SHIFT) - 1)  # unpack end
+return out.astype(np.int32)
 ```
 Update the docstring: drop the last paragraph ("O(R * len(samples) * ploidy) Python iteration ... follow-up") and replace with a one-line note that it is a vectorized per-region scatter-max preserving the pos-then-end tie-break.
 

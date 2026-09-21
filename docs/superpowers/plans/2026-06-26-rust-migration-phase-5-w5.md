@@ -61,6 +61,7 @@
 ```python
 # tests/parity/test_golden_infra.py
 """Self-tests for the golden snapshot/replay infrastructure."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -114,6 +115,7 @@ the numba oracle at generation time (see generate_goldens.py). Replay imports
 rust callables DIRECTLY — never via _dispatch — so these tests survive the
 numba/dispatch deletion in Stage B.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -217,12 +219,16 @@ def replay_tuple(name: str, cases: list) -> None:
         got = fn(*inputs)
         got = got if isinstance(got, tuple) else (got,)
         gold = golden if isinstance(golden, tuple) else (golden,)
-        assert len(got) == len(gold), f"{name}#{ci}: tuple len {len(got)} != {len(gold)}"
+        assert len(got) == len(gold), (
+            f"{name}#{ci}: tuple len {len(got)} != {len(gold)}"
+        )
         for j, (a, b) in enumerate(zip(got, gold)):
             _eq(f"{name}#{ci}", j, a, b)
 
 
-def replay_inplace(name: str, cases: list, out_factory: Callable, out_index: int) -> None:
+def replay_inplace(
+    name: str, cases: list, out_factory: Callable, out_index: int
+) -> None:
     fn = RUST_KERNELS[name]
     for ci, (inputs, golden) in enumerate(cases):
         out = out_factory(inputs)
@@ -238,9 +244,18 @@ def replay_dict(name: str, cases: list) -> None:
         got = fn(*inputs)
         assert set(got) == set(golden), f"{name}#{ci}: keys {set(got)} != {set(golden)}"
         for k in sorted(golden):
-            _eq(f"{name}#{ci}:{k}.data", 0, np.asarray(got[k][0]), np.asarray(golden[k][0]))
-            _eq(f"{name}#{ci}:{k}.off", 1,
-                np.asarray(got[k][1], np.int64), np.asarray(golden[k][1], np.int64))
+            _eq(
+                f"{name}#{ci}:{k}.data",
+                0,
+                np.asarray(got[k][0]),
+                np.asarray(golden[k][0]),
+            )
+            _eq(
+                f"{name}#{ci}:{k}.off",
+                1,
+                np.asarray(got[k][1], np.int64),
+                np.asarray(golden[k][1], np.int64),
+            )
 ```
 
 Note: `replay_inplace`'s `out_factory` takes `inputs` (so it can size the out buffer from `total_out` carried in the frozen case — the in-place strategies return `(total_out, inputs)`).
@@ -311,6 +326,7 @@ and assert the numba oracle agrees BEFORE saving. After numba deletion this
 script still regenerates from rust (the numba cross-check is skipped if the
 backend is gone).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -330,12 +346,27 @@ SPEC = [
 
 # in-place kernels: strategy yields (total_out, inputs); out inserted at index 0.
 INPLACE_SPEC = [
-    ("intervals_to_tracks", strategies.intervals_to_tracks_inputs(), 200,
-     lambda inp: np.zeros(int(inp[-1][-1]), np.float32), 7),  # out_index per existing test
-    ("shift_and_realign_tracks_sparse", strategies.shift_and_realign_tracks_inputs(), 200,
-     lambda total_out: np.zeros(total_out, np.float32), 0),
-    ("reconstruct_haplotypes_from_sparse", strategies.reconstruct_haplotypes_inputs(), 200,
-     lambda total_out: np.zeros(total_out, np.uint8), 0),
+    (
+        "intervals_to_tracks",
+        strategies.intervals_to_tracks_inputs(),
+        200,
+        lambda inp: np.zeros(int(inp[-1][-1]), np.float32),
+        7,
+    ),  # out_index per existing test
+    (
+        "shift_and_realign_tracks_sparse",
+        strategies.shift_and_realign_tracks_inputs(),
+        200,
+        lambda total_out: np.zeros(total_out, np.float32),
+        0,
+    ),
+    (
+        "reconstruct_haplotypes_from_sparse",
+        strategies.reconstruct_haplotypes_inputs(),
+        200,
+        lambda total_out: np.zeros(total_out, np.uint8),
+        0,
+    ),
 ]
 
 
@@ -357,8 +388,9 @@ def _assert_oracle(name, a, b):
         assert set(a) == set(b)
         for k in a:
             np.testing.assert_array_equal(a[k][0], b[k][0])
-            np.testing.assert_array_equal(np.asarray(a[k][1], np.int64),
-                                          np.asarray(b[k][1], np.int64))
+            np.testing.assert_array_equal(
+                np.asarray(a[k][1], np.int64), np.asarray(b[k][1], np.int64)
+            )
     else:
         np.testing.assert_array_equal(a, b, err_msg=f"{name} oracle mismatch")
 
@@ -402,10 +434,14 @@ def gen_inplace_kernels():
                 inputs = ex
                 of = out_factory
             out_r = of(inputs)
-            args = list(inputs); args.insert(out_index, out_r); rust(*args)
+            args = list(inputs)
+            args.insert(out_index, out_r)
+            rust(*args)
             if nb is not None:
                 out_n = of(inputs)
-                an = list(inputs); an.insert(out_index, out_n); nb(*an)
+                an = list(inputs)
+                an.insert(out_index, out_n)
+                nb(*an)
                 np.testing.assert_array_equal(out_n, out_r, err_msg=f"{name} oracle")
             cases.append((inputs, np.asarray(out_r)))
         _golden.save_golden(name, cases)
@@ -459,6 +495,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # tests/parity/test_get_diffs_sparse_parity.py
 """get_diffs_sparse: rust vs frozen golden (oracle frozen Phase 5 W5)."""
+
 from __future__ import annotations
 
 import pytest
@@ -525,13 +562,24 @@ def flatten_output(out):
     from genvarloader._ragged import RaggedAnnotatedHaps
 
     if isinstance(out, RaggedAnnotatedHaps):
-        return {"kind": "annot",
-                "haps": (np.asarray(out.haps.data), np.asarray(out.haps.offsets, np.int64)),
-                "var_idxs": (np.asarray(out.var_idxs.data), np.asarray(out.var_idxs.offsets, np.int64)),
-                "ref_coords": (np.asarray(out.ref_coords.data), np.asarray(out.ref_coords.offsets, np.int64))}
+        return {
+            "kind": "annot",
+            "haps": (np.asarray(out.haps.data), np.asarray(out.haps.offsets, np.int64)),
+            "var_idxs": (
+                np.asarray(out.var_idxs.data),
+                np.asarray(out.var_idxs.offsets, np.int64),
+            ),
+            "ref_coords": (
+                np.asarray(out.ref_coords.data),
+                np.asarray(out.ref_coords.offsets, np.int64),
+            ),
+        }
     if isinstance(out, Ragged):
-        return {"kind": "ragged",
-                "data": np.asarray(out.data), "offsets": np.asarray(out.offsets, np.int64)}
+        return {
+            "kind": "ragged",
+            "data": np.asarray(out.data),
+            "offsets": np.asarray(out.offsets, np.int64),
+        }
     if isinstance(out, tuple):
         return {"kind": "tuple", "items": [flatten_output(o) for o in out]}
     return {"kind": "array", "data": np.asarray(out)}
@@ -558,15 +606,19 @@ def test_haplotypes_mode_dataset_golden(phased_svar_gvl, reference, monkeypatch)
     # spy guard stays — proves the fused rust kernel fires
     orig = _haps_mod.reconstruct_haplotypes_fused
     calls = {"n": 0}
+
     def _spy(*a, **k):
         calls["n"] += 1
         return orig(*a, **k)
+
     monkeypatch.setattr(_haps_mod, "reconstruct_haplotypes_fused", _spy)
 
     out_rust = ds[:, :]
     assert calls["n"] > 0, "fused rust kernel never fired — vacuous"
     # non-triviality + golden compare
-    _golden.assert_output_matches_golden(out_rust, _golden.load_flat_golden("ds_haplotypes_mode"))
+    _golden.assert_output_matches_golden(
+        out_rust, _golden.load_flat_golden("ds_haplotypes_mode")
+    )
 ```
 
 (`load_flat_golden` = `load_golden` returning the single flattened dict; add a thin variant or store as a 1-element `cases` list.)
@@ -766,6 +818,7 @@ NOTE: `import genvarloader` may still pull numba transitively via seqpro
 this guard asserts genvarloader's own source is numba-free. See the seqpro
 follow-up issue for the transitive import and the W6 RSS impact.
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -825,6 +878,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 # tests/parity/test_rayon_equivalence.py
 """Serial vs parallel rust output must be byte-identical (and == golden)."""
+
 from __future__ import annotations
 import numpy as np
 import pytest
@@ -845,7 +899,9 @@ def test_reconstruct_haplotypes_serial_eq_parallel():
             fn(*args, parallel=parallel)  # signature gains keyword `parallel`
             outs[parallel] = out
         np.testing.assert_array_equal(outs[False], outs[True], err_msg=f"case {ci}")
-        np.testing.assert_array_equal(outs[True], golden, err_msg=f"case {ci} vs golden")
+        np.testing.assert_array_equal(
+            outs[True], golden, err_msg=f"case {ci} vs golden"
+        )
 ```
 
 (If the FFI signature passes `parallel` positionally, adjust the call. Decide the FFI arg convention and keep it consistent across kernels.)

@@ -111,7 +111,7 @@ chr1\t12\t.\tGTA\tG\t.\t.\t.\tGT\t1|1\t0|1\t0|0
 In the `svar2_store` fixture (`:53-71`), change the sample list argument to `run_conversion_pipeline`:
 
 ```python
-        ["S0", "S1", "S2"],
+(["S0", "S1", "S2"],)
 ```
 
 Leave `svar2_store_unsorted` (`:460-484`) at `["S1", "S0"]` — `run_conversion_pipeline` takes an explicit selection, so that fixture keeps exactly 2 samples and its `available_samples == ["S1", "S0"]` / `sample_cols == [1, 0]` assertions stay true.
@@ -1331,7 +1331,9 @@ def test_iter_entries_is_sorted_and_complete():
     dense = _random_dense(rng, R, S, P, fill=0.35)
     sparse = _sparse_from_dense(dense, R, S, P)
 
-    keys = np.concatenate([k for k, _ in sparse.iter_entries()] or [np.empty(0, np.int64)])
+    keys = np.concatenate(
+        [k for k, _ in sparse.iter_entries()] or [np.empty(0, np.int64)]
+    )
     ents = np.concatenate(
         [e for _, e in sparse.iter_entries()] or [np.empty(0, ENTRY_DTYPE)]
     )
@@ -1348,7 +1350,12 @@ def test_iter_entries_is_sorted_and_complete():
 def test_iter_entries_empty_table():
     R, S, P = 4, 3, 2
     sparse = _SparseRanges(
-        np.zeros(R + 1, np.int64), np.empty(0, np.int32), np.empty(0, ENTRY_DTYPE), R, S, P
+        np.zeros(R + 1, np.int64),
+        np.empty(0, np.int32),
+        np.empty(0, ENTRY_DTYPE),
+        R,
+        S,
+        P,
     )
     assert list(sparse.iter_entries()) == []
 ```
@@ -1980,24 +1987,22 @@ Add the import at the top of the file: `from ._svar2_ranges import _RangeLookup,
 (c) Replace the cache construction in `from_path` (`:420-441`) — delete the local `_mm` helper and the `R`/`S` lines:
 
 ```python
-        ranges = _ranges_reader(ranges_dir)
-        R, S, P = ranges.n_regions, ranges.n_samples, ranges.ploidy
-        if P != ploidy:
-            raise ValueError(f"svar2 cache ploidy ({P}) != dataset ploidy ({ploidy}).")
+ranges = _ranges_reader(ranges_dir)
+R, S, P = ranges.n_regions, ranges.n_samples, ranges.ploidy
+if P != ploidy:
+    raise ValueError(f"svar2 cache ploidy ({P}) != dataset ploidy ({ploidy}).")
 
-        def _mm(name: str, shape: list[int]) -> NDArray[np.int64]:
-            return np.memmap(
-                ranges_dir / name, dtype=np.int64, mode="r", shape=tuple(shape)
-            )
 
-        cache = _Svar2Cache(
-            ranges=ranges,
-            dense_snp_range=_mm("dense_snp_range.npy", meta["dense_snp_range"]["shape"]),
-            dense_indel_range=_mm(
-                "dense_indel_range.npy", meta["dense_indel_range"]["shape"]
-            ),
-            sample_cols=np.load(ranges_dir / "sample_cols.npy"),
-        )
+def _mm(name: str, shape: list[int]) -> NDArray[np.int64]:
+    return np.memmap(ranges_dir / name, dtype=np.int64, mode="r", shape=tuple(shape))
+
+
+cache = _Svar2Cache(
+    ranges=ranges,
+    dense_snp_range=_mm("dense_snp_range.npy", meta["dense_snp_range"]["shape"]),
+    dense_indel_range=_mm("dense_indel_range.npy", meta["dense_indel_range"]["shape"]),
+    sample_cols=np.load(ranges_dir / "sample_cols.npy"),
+)
 ```
 
 (d) Replace the two `vk_*` lines in `_gather_inputs` (`:1562-1567`):
@@ -3682,8 +3687,6 @@ Closes #355"
 Append to `tests/dataset/test_concat_svar2.py`:
 
 ```python
-
-
 def test_concat_svar2_emits_sparse_layout(svar2_shards_by_samples, tmp_path: Path):
     """The merged output must be sparse, whatever the inputs were."""
     import json
@@ -4676,7 +4679,9 @@ def main():
     print(f"\nresident dense baseline (128 MB, 8192 cells): {ms:.2f} ms")
 
     print(f"\nworst shuffled: {worst:.2f}% of a {BATCH_MS} ms batch (gate: {GATE:.0%})")
-    print("PASS" if worst <= GATE * 100 else "FAIL -- take the spec's flat-key fallback")
+    print(
+        "PASS" if worst <= GATE * 100 else "FAIL -- take the spec's flat-key fallback"
+    )
 
 
 if __name__ == "__main__":

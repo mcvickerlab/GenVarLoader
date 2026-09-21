@@ -732,8 +732,16 @@ def _assert_dicts_equal(a: dict, b: dict, keys):
 
 
 PAYLOAD_KEYS = [
-    "vk_pos", "vk_key", "vk_off", "dense_pos", "dense_key", "dense_range",
-    "dense_present", "dense_present_off", "lut_bytes", "lut_off",
+    "vk_pos",
+    "vk_key",
+    "vk_off",
+    "dense_pos",
+    "dense_key",
+    "dense_range",
+    "dense_present",
+    "dense_present_off",
+    "lut_bytes",
+    "lut_off",
 ]
 
 
@@ -765,8 +773,8 @@ def test_read_ranges_sample_subset(svar2_store):
         fh = 1 * ploidy + p
         sh = 0 * ploidy + p
         np.testing.assert_array_equal(
-            full["vk_pos"][full["vk_off"][fh]:full["vk_off"][fh + 1]],
-            sub["vk_pos"][sub["vk_off"][sh]:sub["vk_off"][sh + 1]],
+            full["vk_pos"][full["vk_off"][fh] : full["vk_off"][fh + 1]],
+            sub["vk_pos"][sub["vk_off"][sh] : sub["vk_off"][sh + 1]],
         )
 
 
@@ -774,8 +782,16 @@ def test_find_ranges_out_streaming(svar2_store):
     sv = SparseVar2(svar2_store)
     ranges = sv.find_ranges("chr1", [0], [40])
     # Pre-allocate matching-shape buffers and stream into them.
-    out = {k: np.empty_like(np.asarray(ranges[k])) for k in
-           ("dense_range", "region_starts", "sample_cols", "vk_snp_range", "vk_indel_range")}
+    out = {
+        k: np.empty_like(np.asarray(ranges[k]))
+        for k in (
+            "dense_range",
+            "region_starts",
+            "sample_cols",
+            "vk_snp_range",
+            "vk_indel_range",
+        )
+    }
     ranges2 = sv.find_ranges("chr1", [0], [40], out=out)
     for k in out:
         np.testing.assert_array_equal(np.asarray(ranges2[k]), np.asarray(ranges[k]))
@@ -793,40 +809,43 @@ Expected: FAIL — `SparseVar2` has no attribute `read_ranges`.
 Add to `_BatchQueryMixin` in `python/genoray/_svar2_batch.py`. Resolve `samples=` names → original integer indices via `self.samples.index(...)`; validate membership.
 
 ```python
-    def _sample_idxs(self, samples):
-        if samples is None:
-            return None
-        idxs = []
-        for s in np.atleast_1d(np.asarray(samples)).tolist():
-            if s not in self.samples:
-                raise ValueError(f"Sample {s!r} not found in the dataset.")
-            idxs.append(self.samples.index(s))
-        return idxs
+def _sample_idxs(self, samples):
+    if samples is None:
+        return None
+    idxs = []
+    for s in np.atleast_1d(np.asarray(samples)).tolist():
+        if s not in self.samples:
+            raise ValueError(f"Sample {s!r} not found in the dataset.")
+        idxs.append(self.samples.index(s))
+    return idxs
 
-    def read_ranges(self, contig, starts, ends, samples=None):
-        """Fused search+gather query (byte-identical to ``overlap_batch`` for
-        ``samples=None``). See ``overlap_batch`` for the returned dict contract."""
-        reg = self._regions(starts, ends)
-        return self._readers[contig].read_ranges(reg, self._sample_idxs(samples))
 
-    def find_ranges(self, contig, starts, ends, samples=None, out=None):
-        """Search-only step: returns the compact ranges bundle to be replayed by
-        ``gather_ranges``. When ``out`` is a dict of preallocated arrays keyed by
-        the bundle field names, the ranges are written into it in place."""
-        reg = self._regions(starts, ends)
-        d = self._readers[contig].find_ranges(reg, self._sample_idxs(samples))
-        if out is not None:
-            for k, buf in out.items():
-                np.asarray(buf)[...] = np.asarray(d[k])
-                d[k] = buf
-        return d
+def read_ranges(self, contig, starts, ends, samples=None):
+    """Fused search+gather query (byte-identical to ``overlap_batch`` for
+    ``samples=None``). See ``overlap_batch`` for the returned dict contract."""
+    reg = self._regions(starts, ends)
+    return self._readers[contig].read_ranges(reg, self._sample_idxs(samples))
 
-    def gather_ranges(self, contig, ranges, samples=None):
-        """Tree-free gather step: replay a ``find_ranges`` bundle into the full
-        ``overlap_batch`` payload dict. ``samples`` is accepted for symmetry but
-        the subset is already fixed by the bundle; passing a different subset is
-        a ValueError."""
-        return self._readers[contig].gather_ranges(ranges)
+
+def find_ranges(self, contig, starts, ends, samples=None, out=None):
+    """Search-only step: returns the compact ranges bundle to be replayed by
+    ``gather_ranges``. When ``out`` is a dict of preallocated arrays keyed by
+    the bundle field names, the ranges are written into it in place."""
+    reg = self._regions(starts, ends)
+    d = self._readers[contig].find_ranges(reg, self._sample_idxs(samples))
+    if out is not None:
+        for k, buf in out.items():
+            np.asarray(buf)[...] = np.asarray(d[k])
+            d[k] = buf
+    return d
+
+
+def gather_ranges(self, contig, ranges, samples=None):
+    """Tree-free gather step: replay a ``find_ranges`` bundle into the full
+    ``overlap_batch`` payload dict. ``samples`` is accepted for symmetry but
+    the subset is already fixed by the bundle; passing a different subset is
+    a ValueError."""
+    return self._readers[contig].gather_ranges(ranges)
 ```
 
 Add the `_regions` helper (shared with `overlap_batch`, which currently inlines `[(int(s), int(e)) for s, e in regions]`):
@@ -876,6 +895,7 @@ Extend `tests/test_svar2_ranges.py`. Mirror whatever reconstruction check `tests
 ```python
 def test_split_reconstructs_like_decode_oracle(svar2_store):
     from tests.test_svar2_decode import decode_from_payload  # reuse existing helper
+
     sv = SparseVar2(svar2_store)
     starts, ends = [0], [40]
     ob = sv.overlap_batch("chr1", list(zip(starts, ends)))

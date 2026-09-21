@@ -160,9 +160,7 @@ else:
             "MKL_NUM_THREADS": str(n_threads),
             "OPENBLAS_NUM_THREADS": str(n_threads),
         }
-        subprocess.run(
-            [sys.executable, __file__, "--child"], env=env, check=True
-        )
+        subprocess.run([sys.executable, __file__, "--child"], env=env, check=True)
 ```
 
 The parent writes the CSV header once and child runs append. Children only

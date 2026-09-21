@@ -50,9 +50,10 @@ Add two cases to the guard test, both using the **default track kind** (no
 ```python
 def test_tracks_ragged_no_awkward(monkeypatch, guard_dataset):
     calls = _install_ak_counters(monkeypatch)
-    ds = guard_dataset.with_seqs(None).with_tracks("5ss")   # ragged output
+    ds = guard_dataset.with_seqs(None).with_tracks("5ss")  # ragged output
     _ = ds[regions, samples]
     assert calls["n"] == 0
+
 
 def test_haps_tracks_ragged_no_awkward(monkeypatch, guard_dataset):
     calls = _install_ak_counters(monkeypatch)
@@ -121,18 +122,20 @@ elsewhere, for users who request raw intervals.
    ```python
    @dataclass(slots=True)
    class _FlatIntervals:
-       starts: _Flat   # int32
-       ends: _Flat     # int32
-       values: _Flat   # float32
+       starts: _Flat  # int32
+       ends: _Flat  # int32
+       values: _Flat  # float32
 
        @property
-       def shape(self): return self.starts.shape
-       def reshape(self, shape): ...   # delegate to each _Flat
+       def shape(self):
+           return self.starts.shape
+
+       def reshape(self, shape): ...  # delegate to each _Flat
        def squeeze(self, axis=None): ...
-       def to_ragged(self):            # boundary import RaggedIntervals
-           return RaggedIntervals(self.starts.to_ragged(),
-                                  self.ends.to_ragged(),
-                                  self.values.to_ragged())
+       def to_ragged(self):  # boundary import RaggedIntervals
+           return RaggedIntervals(
+               self.starts.to_ragged(), self.ends.to_ragged(), self.values.to_ragged()
+           )
    ```
    (Three component dtypes differ, so it cannot be a single `_Flat`. No
    `reverse_masked`/`to_fixed`/`to_padded` — intervals bypass RC and densify.)

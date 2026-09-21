@@ -230,7 +230,8 @@ def test_new_mode_cell_count_is_25_per_mode_output():
     for mode in C.MODES_NEW:
         for output in C.OUTPUTS:
             cells = [
-                c for c in C.enumerate_cells()
+                c
+                for c in C.enumerate_cells()
                 if c.mode == mode and c.with_seqs == output
             ]
             # 16 factorial + 9 fan (12 raw − 3 shared midpoints) = 25
@@ -240,8 +241,7 @@ def test_new_mode_cell_count_is_25_per_mode_output():
 def test_baseline_cell_count_is_15_per_output_and_has_no_buffer():
     for output in C.OUTPUTS:
         cells = [
-            c for c in C.enumerate_cells()
-            if c.mode is None and c.with_seqs == output
+            c for c in C.enumerate_cells() if c.mode is None and c.with_seqs == output
         ]
         # 8 factorial corners + 7 fan (9 raw − 2 shared midpoints) = 15
         assert len(cells) == 15, (output, len(cells))
@@ -260,9 +260,12 @@ def test_total_cell_count_is_195_and_all_unique():
 
 def test_baseline_fan_cells_sit_at_midpoints():
     # the threads fan for baseline pins region=MID, batch=MID
-    base = [c for c in C.enumerate_cells() if c.mode is None and c.with_seqs == "variants"]
+    base = [
+        c for c in C.enumerate_cells() if c.mode is None and c.with_seqs == "variants"
+    ]
     threads_fan = [
-        c for c in base
+        c
+        for c in base
         if c.region_length == C.REGION_MID and c.batch_size == C.BATCH_MID
     ]
     assert sorted(c.threads for c in threads_fan) == [2, 4, 16]
@@ -270,8 +273,10 @@ def test_baseline_fan_cells_sit_at_midpoints():
 
 def test_new_mode_buffer_fan_pins_other_axes_at_midpoint():
     buf_fan = [
-        c for c in C.enumerate_cells()
-        if c.mode == "buffered" and c.with_seqs == "haplotypes"
+        c
+        for c in C.enumerate_cells()
+        if c.mode == "buffered"
+        and c.with_seqs == "haplotypes"
         and c.threads == C.THREADS_MID
         and c.region_length == C.REGION_MID
         and c.batch_size == C.BATCH_MID
@@ -617,17 +622,26 @@ def test_measure_cell_returns_a_complete_row(tmp_path):
 
     paths = C.prepare_datasets([1_000], svar, regions, tmp_path)
     cell = C.Cell(
-        mode=None, with_seqs="variants",
-        threads=1, region_length=1_000, batch_size=16, buffer_bytes=None,
+        mode=None,
+        with_seqs="variants",
+        threads=1,
+        region_length=1_000,
+        batch_size=16,
+        buffer_bytes=None,
     )
     # tiny stop conditions so the test is fast
     row = C.measure_cell(
-        cell, paths[1_000], ref, min_epochs=1, min_seconds=0.0, hard_cap_s=10.0,
+        cell,
+        paths[1_000],
+        ref,
+        min_epochs=1,
+        min_seconds=0.0,
+        hard_cap_s=10.0,
     )
 
     for col in C.CSV_COLUMNS:
         assert col in row, col
-    assert row["mode"] == ""          # None serialized as empty
+    assert row["mode"] == ""  # None serialized as empty
     assert row["with_seqs"] == "variants"
     assert row["n_epochs"] >= 1
     assert row["instances"] == 100 * 5 * row["n_epochs"]
@@ -650,9 +664,23 @@ import resource
 import time
 
 CSV_COLUMNS = [
-    "mode", "with_seqs", "threads", "region_length", "batch_size", "buffer_bytes",
-    "n_epochs", "instances", "bytes", "wall_s", "instances_per_s", "MiB_per_s",
-    "peak_rss_MiB", "timed_out", "git_sha", "host", "started_at",
+    "mode",
+    "with_seqs",
+    "threads",
+    "region_length",
+    "batch_size",
+    "buffer_bytes",
+    "n_epochs",
+    "instances",
+    "bytes",
+    "wall_s",
+    "instances_per_s",
+    "MiB_per_s",
+    "peak_rss_MiB",
+    "timed_out",
+    "git_sha",
+    "host",
+    "started_at",
 ]
 
 
@@ -909,8 +937,7 @@ def run_child(n_threads: int) -> None:
 
     # dataset paths were written by the parent, keyed by region length
     ds_paths = {
-        length: tmp_dir / f"dataset_rL{length}.gvl"
-        for length in C.REGION_LENGTHS
+        length: tmp_dir / f"dataset_rL{length}.gvl" for length in C.REGION_LENGTHS
     }
 
     cells = C.cells_for_threads(n_threads)
@@ -918,8 +945,12 @@ def run_child(n_threads: int) -> None:
         ds_path = ds_paths[cell.region_length]
         try:
             row = C.measure_cell(
-                cell, ds_path, REF,
-                git_sha=git_sha, host=host, started_at=started_at,
+                cell,
+                ds_path,
+                REF,
+                git_sha=git_sha,
+                host=host,
+                started_at=started_at,
             )
         except Exception as e:  # noqa: BLE001 - one bad cell must not kill the run
             print(f"[threads={n_threads}] cell {i}/{len(cells)} FAILED: {cell} -> {e}")
@@ -1047,15 +1078,30 @@ OUT_PNG = HERE / "results_plot.png"
 
 # column axis -> (csv column, fan values, {pinned other axis: midpoint})
 AXES = {
-    "threads": ("threads", C.THREADS_FAN,
-                {"region_length": C.REGION_MID, "batch_size": C.BATCH_MID}),
-    "region_length": ("region_length", C.REGION_FAN,
-                      {"threads": C.THREADS_MID, "batch_size": C.BATCH_MID}),
-    "batch_size": ("batch_size", C.BATCH_FAN,
-                   {"threads": C.THREADS_MID, "region_length": C.REGION_MID}),
-    "buffer_bytes": ("buffer_bytes", C.BUFFER_FAN,
-                     {"threads": C.THREADS_MID, "region_length": C.REGION_MID,
-                      "batch_size": C.BATCH_MID}),
+    "threads": (
+        "threads",
+        C.THREADS_FAN,
+        {"region_length": C.REGION_MID, "batch_size": C.BATCH_MID},
+    ),
+    "region_length": (
+        "region_length",
+        C.REGION_FAN,
+        {"threads": C.THREADS_MID, "batch_size": C.BATCH_MID},
+    ),
+    "batch_size": (
+        "batch_size",
+        C.BATCH_FAN,
+        {"threads": C.THREADS_MID, "region_length": C.REGION_MID},
+    ),
+    "buffer_bytes": (
+        "buffer_bytes",
+        C.BUFFER_FAN,
+        {
+            "threads": C.THREADS_MID,
+            "region_length": C.REGION_MID,
+            "batch_size": C.BATCH_MID,
+        },
+    ),
 }
 
 MODE_STYLE = {
@@ -1092,9 +1138,11 @@ def main() -> None:
 
     axis_names = list(AXES)
     fig, axs = plt.subplots(
-        len(C.OUTPUTS), len(axis_names),
+        len(C.OUTPUTS),
+        len(axis_names),
         figsize=(4 * len(axis_names), 3 * len(C.OUTPUTS)),
-        constrained_layout=True, squeeze=False,
+        constrained_layout=True,
+        squeeze=False,
     )
 
     for r, output in enumerate(C.OUTPUTS):
@@ -1118,7 +1166,8 @@ def main() -> None:
     fig.suptitle(
         "DataLoader throughput: mode comparison across knobs "
         "(other axes pinned at midpoint)",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     fig.savefig(OUT_PNG, dpi=150)
     print(f"Saved {OUT_PNG}")

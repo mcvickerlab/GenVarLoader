@@ -1164,9 +1164,9 @@ def _write_track_table(
     # c_idxs maps via auto-normalization; regions whose contig is absent from the
     # Table must map to -1 (zero intervals). Detect via norm().
     norm = track._cnorm.norm(bed["chrom"].to_list())
-    chrom_codes = np.where(
-        np.array([n is None for n in norm]), -1, chrom_codes
-    ).astype(np.int32)
+    chrom_codes = np.where(np.array([n is None for n in norm]), -1, chrom_codes).astype(
+        np.int32
+    )
     starts = np.ascontiguousarray(bed["chromStart"].to_numpy(), dtype=np.int32)
     ends = np.ascontiguousarray(bed["chromEnd"].to_numpy(), dtype=np.int32)
     track._rust.write_track(
@@ -1261,9 +1261,7 @@ def _dense_table(n_intervals: int) -> Table:
 
 def test_write_track_table_raises_when_region_exceeds_max_mem(tmp_path):
     t = _dense_table(1000)
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [10_000]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [10_000]})
     # One region overlaps ~1000 intervals = ~12 KB; cap at 12 bytes -> must raise.
     with pytest.raises(RuntimeError, match="max_mem"):
         _write_track_table(tmp_path, bed, t, ["s0"], max_mem=12)
@@ -1271,9 +1269,7 @@ def test_write_track_table_raises_when_region_exceeds_max_mem(tmp_path):
 
 def test_write_track_table_succeeds_within_budget(tmp_path):
     t = _dense_table(1000)
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [10_000]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [10_000]})
     _write_track_table(tmp_path, bed, t, ["s0"], max_mem=1 << 20)
     assert (tmp_path / "intervals.npy").exists()
     assert (tmp_path / "offsets.npy").exists()
@@ -1501,9 +1497,7 @@ def test_count_and_intervals_match_oracle(
         np.testing.assert_array_equal(counts, exp_counts)
 
         offsets = lengths_to_offsets(counts.ravel())
-        itvs = t._intervals_from_offsets(
-            contig, starts, ends, offsets, sample=present
-        )
+        itvs = t._intervals_from_offsets(contig, starts, ends, offsets, sample=present)
         n_sel = len(present)
         for ri in range(n_regions):
             for sj in range(n_sel):
