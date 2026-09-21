@@ -72,8 +72,9 @@ def test_failing_assert_inside_mixed_loop_does_not_wedge(
     """The literal shape #399 describes: an assertion fires inside the loop.
 
     Reusing the SAME dataset object for the second drive matters -- the mixed
-    path caches a second engine on the backend (`_mixed_engine_obj`), so a
-    fresh `StreamingDataset` would sidestep exactly the state under suspicion.
+    path now shares the drive's engine (#400 deleted the cached second engine),
+    so a fresh `StreamingDataset` would sidestep exactly the engine state under
+    suspicion.
     """
     f = streaming_record_tracks_fixture(backend)
 

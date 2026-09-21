@@ -338,9 +338,8 @@ def test_current_window_realign_inputs_reads_the_producers_window(
     """Issue #400: the window the producer has ALREADY filled must be readable from
     the drive's own engine -- that is what removes the second decode the track side
     used to do. Checked against the independent `window_realign_inputs` decode of the
-    same window, which runs in the caller's thread (`debug_fill`) and becomes
-    test-only once this branch's fold (#400) deletes its `_mixed_engine()`
-    production caller).
+    same window, which runs in the caller's thread (`debug_fill`) and is now
+    test-only: issue #400 deleted its `_mixed_engine()` production caller.
 
     Also pins the identity guard: a request that does not describe the engine's
     current window must raise rather than silently pair one window's tracks with

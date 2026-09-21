@@ -417,16 +417,9 @@ pub struct PgenWindowFiller {
     /// concurrent `fill`s would let one thread's `change_sample_subset` land between the
     /// other's subset-set and read -- silently decoding the wrong sample columns.
     ///
-    /// As shipped, the mixed variants+tracks path (`_mixed_engine()` in
-    /// `_streaming.py`) builds its own separate engine/filler/reader rather than
-    /// sharing this one with the producer, so today the producer thread and a
-    /// consumer-thread caller of `RecordStreamEngine::window_realign_inputs`
-    /// never actually contend on this lock in production -- only
-    /// `test_window_realign_inputs_matches_before_and_during_producer` drives
-    /// one filler both ways. The lock stays regardless: it is what makes the
-    /// obvious future consolidation (one filler serving both callers) safe, so
-    /// removing it now would silently arm that race for whoever does the
-    /// consolidation later (final review, M1).
+    /// Since issue #400 the mixed path decodes only in the producer, so this lock
+    /// exists for the test-only decode accessors and for any future shared-engine
+    /// caller.
     ///
     /// LOCK ORDERING: take this lock BEFORE acquiring the GIL, never after. Callers holding
     /// the GIL must release it (`py.detach`) before entering `fill`, or the producer -- which

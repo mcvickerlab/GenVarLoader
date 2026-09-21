@@ -1072,30 +1072,11 @@ impl RecordStreamEngine {
     /// [`RecordBackend::kept_v_idxs`] assumes (`h = si * ploidy + p`). The
     /// caller replicates rows across regions.
     ///
-    /// Python needs these BEFORE the window's first batch, to size the
-    /// deletion-extended track query, so this cannot ride along on
-    /// `next_batch` (which is sub-window) and cannot read the producer's slot
-    /// (which the consumer owns). It therefore does its own synchronous decode
-    /// in the calling thread via `debug_fill`, the same path
-    /// `debug_decode_window` uses. That means a mixed VCF/PGEN stream decodes
-    /// each window TWICE: once here for the track sizing, once in the producer
-    /// for the haplotypes.
-    ///
-    /// As shipped, Python's `_mixed_engine()` gives this call its OWN engine
-    /// (a separate `PgenWindowFiller`/`reader_lock` or `VcfWindowFiller` from
-    /// the drive's), so in production this decode never actually contends
-    /// with the producer -- the two run against independent fillers with no
-    /// shared mutable state. `PgenWindowFiller`'s `reader_lock` (see its doc
-    /// comment) would still serialize this call against a producer sharing
-    /// the SAME filler, which is why it stays: `debug_fill` is a genuine
-    /// production entry point (not test-only), and the lock is what makes the
-    /// obvious future consolidation onto one engine safe. Today only
-    /// `test_window_realign_inputs_matches_before_and_during_producer`
-    /// exercises that pairing (final review, M1). VCF needs no lock either
-    /// way -- `VcfWindowFiller::fill` opens a fresh record source per call, so
-    /// there is no shared mutable reader to race. Net cost: roughly 2x decode
-    /// on the mixed path (one per engine); folding this into a single shared
-    /// engine is a tracked follow-up, not a v1 requirement.
+    /// TEST-ONLY since issue #400: the production consumer was deleted (the drive
+    /// now reads the producer's own slot via `current_window_realign_inputs`), so
+    /// this stays as the independent CSR oracle used by
+    /// `test_record_window_csr_replicates_across_regions` and
+    /// `test_window_realign_inputs_matches_before_and_during_producer`.
     #[pyo3(signature = (contig_idx, region_starts, region_ends, s_lo, s_hi))]
     #[allow(clippy::too_many_arguments)]
     fn window_realign_inputs<'py>(
