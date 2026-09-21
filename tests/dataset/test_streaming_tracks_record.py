@@ -321,6 +321,63 @@ def test_record_window_csr_replicates_across_regions(
                 )
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_current_window_realign_inputs_reads_the_producers_window(
+    streaming_record_tracks_fixture, backend
+):
+    """Issue #400: the window the producer has ALREADY filled must be readable from
+    the drive's own engine -- that is what removes the second decode the track side
+    used to do. Checked against the independent `window_realign_inputs` decode of the
+    same window, which runs in the caller's thread (`debug_fill`) and is now
+    test-only (its `_mixed_engine()` production caller was deleted).
+
+    Also pins the identity guard: a request that does not describe the engine's
+    current window must raise rather than silently pair one window's tracks with
+    another's variants.
+    """
+    f = streaming_record_tracks_fixture(backend)
+    sds = gvl.StreamingDataset(
+        f.bed,
+        reference=f.reference_path,
+        variants=f.variants_path,
+        tracks=[f.table, f.bigwigs],
+    ).with_seqs("haplotypes")
+    b = sds._backend
+    n_s = sds.n_samples
+    r_idx = np.arange(len(sds._regions), dtype=np.intp)
+    contig_idx = int(b._regions[r_idx[0], 0])
+    t_starts = np.ascontiguousarray(b._regions[r_idx, 1], np.uint32)
+    t_ends = np.ascontiguousarray(b._regions[r_idx, 2], np.uint32)
+
+    engine = b.build_engine([(contig_idx, t_starts, t_ends, 0, n_s)], 4, -1)
+
+    # A window that is NOT the engine's current one must fail loudly.
+    with pytest.raises(ValueError, match="does not match"):
+        engine.current_window_realign_inputs(
+            contig_idx, t_starts.tolist(), (t_ends + 1).tolist(), 0, n_s
+        )
+
+    got = engine.current_window_realign_inputs(
+        contig_idx, t_starts.tolist(), t_ends.tolist(), 0, n_s
+    )
+    assert got is not None, "the first window must be available after the peek"
+
+    # Independent source of truth: a plan-less engine decodes this exact window in the
+    # caller's thread, with no producer and no slot involved.
+    oracle = b.build_engine([], 1, 1)
+    expected = oracle.window_realign_inputs(
+        contig_idx, t_starts.tolist(), t_ends.tolist(), 0, n_s
+    )
+    for name, a, e in zip(
+        ("v_starts", "ilens", "geno_v_idxs", "geno_offsets"), got, expected
+    ):
+        e = np.ascontiguousarray(e)
+        assert a.dtype == e.dtype, f"{name} dtype drifted"
+        np.testing.assert_array_equal(
+            a, e, err_msg=f"{name} drifted from the window's own decode"
+        )
+
+
 # --- Issue #375 Track B, Task 8: VCF/PGEN mixed parity, edge cases, docs ---
 
 
