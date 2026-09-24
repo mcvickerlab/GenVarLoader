@@ -38,9 +38,9 @@ def to_dataloader(
     self,
     *,
     mode: Literal["buffered", "double_buffered"] | None = None,
-    buffer_bytes: int = 2 * 1024**3,        # 2 GiB default; total footprint across all slots
-    copy: bool = True,                       # zero-copy opt-out; see §4
-    heartbeat_seconds: float = 60.0,         # double_buffered only; see §5
+    buffer_bytes: int = 2 * 1024**3,  # 2 GiB default; total footprint across all slots
+    copy: bool = True,  # zero-copy opt-out; see §4
+    heartbeat_seconds: float = 60.0,  # double_buffered only; see §5
     # ... existing args (batch_size, shuffle, sampler, ...) ...
 ) -> torch.utils.data.DataLoader: ...
 ```

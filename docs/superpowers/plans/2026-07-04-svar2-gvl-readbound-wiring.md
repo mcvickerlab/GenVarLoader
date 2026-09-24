@@ -66,15 +66,21 @@ Create `tests/unit/dataset/test_svar2_link.py`:
 from pathlib import Path
 import pytest
 from genvarloader._dataset._svar2_link import (
-    Svar2Link, Svar2Fingerprint, _resolve_svar2, _verify_svar2_fingerprint,
+    Svar2Link,
+    Svar2Fingerprint,
+    _resolve_svar2,
+    _verify_svar2_fingerprint,
 )
 
 
 def test_resolve_prefers_override(tmp_path: Path):
     real = tmp_path / "cohort.svar2"
     real.mkdir()
-    link = Svar2Link(relative_path="nope.svar2", absolute_path="/nope.svar2",
-                     fingerprint=Svar2Fingerprint(n_variants=1, store_bytes=1))
+    link = Svar2Link(
+        relative_path="nope.svar2",
+        absolute_path="/nope.svar2",
+        fingerprint=Svar2Fingerprint(n_variants=1, store_bytes=1),
+    )
     assert _resolve_svar2(tmp_path, link, real) == real
 
 
@@ -103,6 +109,7 @@ Mirrors _svar_link.py; the fingerprint keys on the .svar2 store's stable identit
 (variant count + a canonical store-file byte count) rather than SVAR1's
 variant_idxs.npy, which .svar2 does not have.
 """
+
 from __future__ import annotations
 
 import os
@@ -134,6 +141,7 @@ def _svar2_store_bytes(svar2_path: Path) -> int:
 
 def _svar2_n_variants(svar2_path: Path) -> int:
     import polars as pl
+
     # .svar2 index; confirm filename against a real store (SparseVar2().index).
     return pl.scan_ipc(svar2_path / "index.arrow").select(pl.len()).collect().item()
 
@@ -176,7 +184,9 @@ def _verify_svar2_fingerprint(svar2_path: Path, link: "Svar2Link | None") -> Non
     if n_obs != exp.n_variants:
         mismatches.append(f"n_variants: expected {exp.n_variants}, observed {n_obs}")
     if bytes_obs != exp.store_bytes:
-        mismatches.append(f"store_bytes: expected {exp.store_bytes}, observed {bytes_obs}")
+        mismatches.append(
+            f"store_bytes: expected {exp.store_bytes}, observed {bytes_obs}"
+        )
     if mismatches:
         raise ValueError(
             f"svar2 fingerprint mismatch at {svar2_path}: " + "; ".join(mismatches)
@@ -186,7 +196,9 @@ def _verify_svar2_fingerprint(svar2_path: Path, link: "Svar2Link | None") -> Non
 def make_svar2_link(gvl_path: Path, svar2_path: Path) -> Svar2Link:
     svar2_resolved = svar2_path.resolve()
     return Svar2Link(
-        relative_path=os.path.relpath(svar2_resolved, start=gvl_path).replace(os.sep, "/"),
+        relative_path=os.path.relpath(svar2_resolved, start=gvl_path).replace(
+            os.sep, "/"
+        ),
         absolute_path=str(svar2_resolved),
         fingerprint=Svar2Fingerprint(
             n_variants=_svar2_n_variants(svar2_resolved),
@@ -261,20 +273,27 @@ SVAR2_FIXTURE = ...  # Path to a small .svar2 store (reuse existing test fixture
 
 def test_write_svar2_emits_cache(tmp_path: Path):
     from genoray import SparseVar2
+
     svar2 = SparseVar2(SVAR2_FIXTURE)
-    bed = pl.DataFrame({
-        "chrom": ["chr1", "chr1"],
-        "chromStart": [0, 250],
-        "chromEnd": [1000, 400],
-    })
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr1", "chr1"],
+            "chromStart": [0, 250],
+            "chromEnd": [1000, 400],
+        }
+    )
     out = tmp_path / "ds.gvl"
     gvl.write(out, bed, variants=svar2, samples=None, overwrite=True)
 
     rd = out / "genotypes" / "svar2_ranges"
     meta = json.loads((rd / "svar2_meta.json").read_text())
     assert set(meta) >= {
-        "vk_snp_range", "vk_indel_range", "dense_snp_range",
-        "dense_indel_range", "region_starts", "sample_cols",
+        "vk_snp_range",
+        "vk_indel_range",
+        "dense_snp_range",
+        "dense_indel_range",
+        "region_starts",
+        "sample_cols",
     }
     # metadata.json carries the link + ploidy.
     md = json.loads((out / "metadata.json").read_text())
@@ -336,9 +355,13 @@ def _write_from_svar2(
 
     R, S, P = bed.height, len(samples), svar2.ploidy
     vk_snp = np.memmap(out_dir / "vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
-    vk_indel = np.memmap(out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2))
+    vk_indel = np.memmap(
+        out_dir / "vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
+    )
     dense_snp = np.memmap(out_dir / "dense_snp_range.npy", np.int64, "w+", shape=(R, 2))
-    dense_indel = np.memmap(out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2))
+    dense_indel = np.memmap(
+        out_dir / "dense_indel_range.npy", np.int64, "w+", shape=(R, 2)
+    )
     region_starts = np.memmap(out_dir / "region_starts.npy", np.int64, "w+", shape=(R,))
     # sample_cols: selected slot -> original sample index (same for every contig).
     sample_cols_full = np.asarray(
@@ -366,14 +389,18 @@ def _write_from_svar2(
     max_ends = np.empty(R, np.int32)
     contig_offset = 0
     pbar = tqdm(total=R, unit=" region")
-    for (c,), df in bed.partition_by("chrom", as_dict=True, maintain_order=True).items():
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
         c = cast(str, c)
         pbar.set_description(f"Processing svar2 ranges for {df.height} regions on {c}")
         lo, hi = contig_offset, contig_offset + df.height
         d = svar2.find_ranges(
             c,
             df["chromStart"].to_numpy(),
-            df["chromEnd"].to_numpy() if not extend_to_length else df["chromEnd"].to_numpy(),
+            df["chromEnd"].to_numpy()
+            if not extend_to_length
+            else df["chromEnd"].to_numpy(),
             samples=samples,
         )
         rc = df.height
@@ -397,6 +424,7 @@ def _write_from_svar2(
         mm.flush()
 
     from ._svar2_link import make_svar2_link
+
     svar2_link = make_svar2_link(path, svar2.path)
     return bed.with_columns(
         chromEnd=pl.max_horizontal(pl.Series(max_ends), pl.col("chromEnd"))
@@ -680,13 +708,16 @@ Create `tests/dataset/test_svar2_readbound_haps.py`. The oracle is the existing 
 ```python
 import numpy as np
 from genvarloader._dataset._svar2_source import SparseVar2Source
-from genvarloader._dataset._svar2_store_py import build_readbound_haps  # thin py wrapper (Task 7)
+from genvarloader._dataset._svar2_store_py import (
+    build_readbound_haps,
+)  # thin py wrapper (Task 7)
 
 SVAR2_FIXTURE = ...  # same fixture
 
 
 def test_readbound_haps_match_union_oracle():
     from genoray import SparseVar2
+
     svar2 = SparseVar2(SVAR2_FIXTURE)
     contig = "chr1"
     regions = [(0, 1000), (250, 400), (150, 250)]
@@ -695,8 +726,10 @@ def test_readbound_haps_match_union_oracle():
     union = SparseVar2Source(svar2).reconstruct(
         contig, regions, ref, ref_offsets, pad, shifts=None, output_length=-1
     )
-    readbound = build_readbound_haps(  # opens Svar2Store, slices no cache (direct find_ranges),
-        svar2, contig, regions, ref, ref_offsets, pad, shifts=None, output_length=-1
+    readbound = (
+        build_readbound_haps(  # opens Svar2Store, slices no cache (direct find_ranges),
+            svar2, contig, regions, ref, ref_offsets, pad, shifts=None, output_length=-1
+        )
     )
     # Ragged equality: same offsets + same bytes.
     assert np.array_equal(np.asarray(union.offsets), np.asarray(readbound.offsets))
@@ -743,14 +776,18 @@ Create `tests/dataset/test_svar2_readbound_tracks.py`, oracle = `SparseVar2Sourc
 ```python
 def test_readbound_tracks_match_union_oracle():
     from genoray import SparseVar2
+
     svar2 = SparseVar2(SVAR2_FIXTURE)
     contig, regions = "chr1", [(0, 1000), (250, 400)]
     tracks, toff, params, strat, seed = _synthetic_track_inputs(regions)
     union = SparseVar2Source(svar2).realign_tracks(
-        contig, regions, tracks, toff, params, strat, seed, shifts=None)
+        contig, regions, tracks, toff, params, strat, seed, shifts=None
+    )
     rb = build_readbound_tracks(
-        svar2, contig, regions, tracks, toff, params, strat, seed, shifts=None)
+        svar2, contig, regions, tracks, toff, params, strat, seed, shifts=None
+    )
     import numpy as np
+
     assert np.array_equal(np.asarray(union.offsets), np.asarray(rb.offsets))
     assert np.allclose(union.data, rb.data, equal_nan=True)
 ```
@@ -826,7 +863,9 @@ import genvarloader as gvl
 
 def _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref):
     from genoray import SparseVar, SparseVar2
-    d1 = tmp_path / "d1.gvl"; d2 = tmp_path / "d2.gvl"
+
+    d1 = tmp_path / "d1.gvl"
+    d2 = tmp_path / "d2.gvl"
     gvl.write(d1, bed, variants=SparseVar(svar_fixture), overwrite=True)
     gvl.write(d2, bed, variants=SparseVar2(svar2_fixture), overwrite=True)
     return gvl.Dataset.open(d1, reference=ref), gvl.Dataset.open(d2, reference=ref)
@@ -840,7 +879,9 @@ def test_svar2_haplotypes_match_svar1(tmp_path, bed, svar_fixture, svar2_fixture
     assert np.array_equal(a.data.view("u1"), b.data.view("u1"))
 
 
-def test_svar2_tracks_match_svar1(tmp_path, bed, svar_fixture, svar2_fixture, ref, bigwig):
+def test_svar2_tracks_match_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, ref, bigwig
+):
     ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
     a = ds1.with_tracks(bigwig)[:, :]
     b = ds2.with_tracks(bigwig)[:, :]

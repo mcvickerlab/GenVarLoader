@@ -220,22 +220,18 @@ Replace the body of `fetch` that currently reads (lines 133-143):
 with:
 
 ```python
-        seqs = np.empty(offsets[-1], np.uint8)
-        kernel = (
-            _fetch_impl_par
-            if should_parallelize(int(offsets[-1]))
-            else _fetch_impl_ser
-        )
-        kernel(
-            c_idxs,
-            starts,
-            ends,
-            self.reference,
-            self.offsets,
-            self.pad_char,
-            seqs,
-            offsets,
-        )
+seqs = np.empty(offsets[-1], np.uint8)
+kernel = _fetch_impl_par if should_parallelize(int(offsets[-1])) else _fetch_impl_ser
+kernel(
+    c_idxs,
+    starts,
+    ends,
+    self.reference,
+    self.offsets,
+    self.pad_char,
+    seqs,
+    offsets,
+)
 ```
 
 Replace the existing `_fetch_impl` definition (lines 150-165):
@@ -263,7 +259,9 @@ with a shared inner row kernel plus serial and parallel wrappers:
 
 ```python
 @nb.njit(nogil=True, cache=True, inline="always")
-def _fetch_row(i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets):
+def _fetch_row(
+    i, c_idxs, starts, ends, reference, ref_offsets, pad_char, out, out_offsets
+):
     r_s, r_e = ref_offsets[c_idxs[i]], ref_offsets[c_idxs[i] + 1]
     o_s, o_e = out_offsets[i], out_offsets[i + 1]
     padded_slice(reference[r_s:r_e], starts[i], ends[i], pad_char, out[o_s:o_e])
@@ -387,14 +385,18 @@ def _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char
 @nb.njit(parallel=True, nogil=True, cache=True)
 def _get_reference_par(regions, out_offsets, reference, ref_offsets, pad_char, out):
     for i in nb.prange(len(regions)):
-        _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out)
+        _get_reference_row(
+            i, regions, out_offsets, reference, ref_offsets, pad_char, out
+        )
     return out
 
 
 @nb.njit(nogil=True, cache=True)
 def _get_reference_ser(regions, out_offsets, reference, ref_offsets, pad_char, out):
     for i in range(len(regions)):
-        _get_reference_row(i, regions, out_offsets, reference, ref_offsets, pad_char, out)
+        _get_reference_row(
+            i, regions, out_offsets, reference, ref_offsets, pad_char, out
+        )
     return out
 
 

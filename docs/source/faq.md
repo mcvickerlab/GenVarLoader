@@ -76,7 +76,7 @@ GVL's read path (haplotype reconstruction and track re-alignment) is parallelize
 Environment variables configure a whole process, which means a script's parallelism can't be determined by reading the script — a value in a shell profile, a Dockerfile, or a SLURM template changes how it runs. To state the policy where a reader can see it, set it on the dataset:
 
 ```python
-ds = ds.with_settings(parallel=False)   # True | False | "auto"
+ds = ds.with_settings(parallel=False)  # True | False | "auto"
 ```
 
 - `True` — always hand batches to rayon, whatever their size.

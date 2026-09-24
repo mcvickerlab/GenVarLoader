@@ -250,8 +250,11 @@ def _allele_batch(draw):
     lens = [draw(st.integers(0, 5)) for _ in range(n_alleles)]
     seq_offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
     total = int(seq_offsets[-1])
-    data = _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))] \
-        if total else np.zeros(0, np.uint8)
+    data = (
+        _ACGTN[draw(st.lists(st.integers(0, 4), min_size=total, max_size=total))]
+        if total
+        else np.zeros(0, np.uint8)
+    )
     data = np.ascontiguousarray(data, np.uint8)
     mask = np.array([draw(st.booleans()) for _ in range(n_rows)], np.bool_)
     return data, seq_offsets, var_offsets, mask
@@ -596,7 +599,9 @@ def test_neg_strand_variants_rc_parity_and_kernel_invoked(
 
     ds_dir = build_strand_mixed_dataset(tmp_path, synthetic_case.svar_path)
     ref = gvl.Reference.from_path(synthetic_case.ref_path, in_memory=False)
-    ds = gvl.Dataset.open(ds_dir, reference=ref).with_tracks(False).with_seqs("variants")
+    ds = (
+        gvl.Dataset.open(ds_dir, reference=ref).with_tracks(False).with_seqs("variants")
+    )
 
     # Non-vacuity: fixture must carry −strand regions (rc_neg defaults True).
     assert np.any(ds._full_regions[:, 3] == -1), "fixture has no −strand regions"

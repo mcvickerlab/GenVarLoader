@@ -111,6 +111,7 @@ import json, subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass(frozen=True)
 class CohortResult:
     bcf: Path
@@ -119,19 +120,47 @@ class CohortResult:
     n_samples: int
     sample_names: tuple[str, ...]
 
-def gen_cohort(samples, records, *, contig="chr1", seed=42,
-               profile="germline-1kgp", payload="gt-only",
-               vcfixture_bin, out_dir):
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+def gen_cohort(
+    samples,
+    records,
+    *,
+    contig="chr1",
+    seed=42,
+    profile="germline-1kgp",
+    payload="gt-only",
+    vcfixture_bin,
+    out_dir,
+):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     raw = out_dir / f"cohort_s{samples}_r{records}_seed{seed}.raw.bcf"
-    subprocess.run([str(vcfixture_bin), "bulk", "--profile", profile,
-                    "--samples", str(samples), "--contigs", contig,
-                    "--records", str(records), "--payload", payload,
-                    "--seed", str(seed), "-o", str(raw)], check=True)
+    subprocess.run(
+        [
+            str(vcfixture_bin),
+            "bulk",
+            "--profile",
+            profile,
+            "--samples",
+            str(samples),
+            "--contigs",
+            contig,
+            "--records",
+            str(records),
+            "--payload",
+            payload,
+            "--seed",
+            str(seed),
+            "-o",
+            str(raw),
+        ],
+        check=True,
+    )
     # gvl requires bi-allelic, left-aligned, atomized (docs: bcftools norm).
     norm = out_dir / f"cohort_s{samples}_r{records}_seed{seed}.bcf"
-    subprocess.run(["bcftools", "norm", "-m-", "-Ob", "-o", str(norm), str(raw)],
-                   check=True)
+    subprocess.run(
+        ["bcftools", "norm", "-m-", "-Ob", "-o", str(norm), str(raw)], check=True
+    )
     subprocess.run(["bcftools", "index", "-f", str(norm)], check=True)
     summary = json.loads((raw.with_suffix(".summary.json")).read_text())
     # populated span = declared contig length (vcfixture sets length = last POS).
@@ -176,6 +205,7 @@ git commit -m "bench(svar2): cohort generator wrapping vcfixture bulk"
 import numpy as np, polars as pl, subprocess
 from pathlib import Path
 
+
 def _write_reference(path: Path, contig: str, length: int, seed=0):
     rng = np.random.default_rng(seed)
     seq = rng.choice(np.frombuffer(b"ACGT", "S1"), size=length).tobytes().decode()
@@ -201,8 +231,18 @@ def _splice_bed(contig, span, n_transcripts, exons_per_tx, exon_len):
             if start >= end:
                 continue
             rows.append((contig, start, end, strand, f"T{t}", e + 1))
-    return pl.DataFrame(rows, schema=["chrom","chromStart","chromEnd","strand",
-                                      "transcript_id","exon_number"], orient="row")
+    return pl.DataFrame(
+        rows,
+        schema=[
+            "chrom",
+            "chromStart",
+            "chromEnd",
+            "strand",
+            "transcript_id",
+            "exon_number",
+        ],
+        orient="row",
+    )
 ```
 
 - [ ] **Step 3: Write `build_fixture`** — reference + splice BED, then the verbatim
@@ -211,6 +251,7 @@ def _splice_bed(contig, span, n_transcripts, exons_per_tx, exon_len):
 ```python
 import genvarloader as gvl
 from genoray import _core, SparseVar2
+
 
 def build_fixture(cohort, *, n_transcripts, exons_per_tx=3, exon_len=200, cache_dir):
     key = f"s{cohort.n_samples}_r_{n_transcripts}tx_{exons_per_tx}x{exon_len}"
@@ -223,9 +264,17 @@ def build_fixture(cohort, *, n_transcripts, exons_per_tx=3, exon_len=200, cache_
     root.mkdir(parents=True, exist_ok=True)
     _write_reference(ref, cohort.contig, cohort.span + exon_len)
     svar2 = root / "store.svar2"
-    _core.run_conversion_pipeline(str(cohort.bcf), str(ref), [cohort.contig],
-                                  str(svar2), list(cohort.sample_names),
-                                  25_000, 2, 1, 8 * 1024 * 1024)
+    _core.run_conversion_pipeline(
+        str(cohort.bcf),
+        str(ref),
+        [cohort.contig],
+        str(svar2),
+        list(cohort.sample_names),
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
+    )
     gvl.write(gvl_path, bed, variants=SparseVar2(svar2), samples=None, overwrite=True)
     return Fixture(gvl_path, ref, bed, n_transcripts)
 ```
@@ -239,10 +288,12 @@ def build_fixture(cohort, *, n_transcripts, exons_per_tx=3, exon_len=200, cache_
 # scratch, run manually:
 c = gen_cohort(50, 2000, vcfixture_bin=BIN, out_dir=TMP)
 f = build_fixture(c, n_transcripts=8, cache_dir=TMP)
-ds = gvl.Dataset.open(f.gvl_path, reference=f.reference).with_settings(
-    splice_info=("transcript_id","exon_number"), var_filter="exonic"
-).with_seqs("variants")
-out = ds[:, :]   # must return a RaggedVariants without error
+ds = (
+    gvl.Dataset.open(f.gvl_path, reference=f.reference)
+    .with_settings(splice_info=("transcript_id", "exon_number"), var_filter="exonic")
+    .with_seqs("variants")
+)
+out = ds[:, :]  # must return a RaggedVariants without error
 print(type(out), out.alt.shape)
 ```
 
@@ -275,13 +326,15 @@ git commit -m "bench(svar2): fixture builder (reference + splice bed + svar2 wri
 
 ```python
 import numpy as np
+
+
 def freeze(out):
     frozen = {}
-    for name in out.fields:                       # alt/start/ref/ilen/dosage/...
+    for name in out.fields:  # alt/start/ref/ilen/dosage/...
         f = out[name]
-        frozen[name] = (np.asarray(f.data).copy(),
-                        np.asarray(f.offsets).copy())
+        frozen[name] = (np.asarray(f.data).copy(), np.asarray(f.offsets).copy())
     return frozen
+
 
 def assert_equal(frozen, out):
     got = set(out.fields)
@@ -302,25 +355,42 @@ Task 2's smoke prints the object (read it; don't guess).
 import os, time, statistics as st
 from dataclasses import dataclass, asdict
 
+
 @dataclass
 class BenchRow:
-    n_samples: int; n_transcripts: int; parallel: bool
-    median_ms: float; min_ms: float; spread_ms: float
+    n_samples: int
+    n_transcripts: int
+    parallel: bool
+    median_ms: float
+    min_ms: float
+    spread_ms: float
+
 
 def _time_once(ds, rows, samples):
-    t0 = time.perf_counter(); ds[rows, samples]; return (time.perf_counter()-t0)*1e3
+    t0 = time.perf_counter()
+    ds[rows, samples]
+    return (time.perf_counter() - t0) * 1e3
+
 
 def bench(fixture, *, n_query_rows, n_samples, reps=7, warmup=2, parallel=False):
     import genvarloader as gvl
+
     os.environ["GVL_FORCE_PARALLEL"] = "1" if parallel else "0"
-    ds = gvl.Dataset.open(fixture.gvl_path, reference=fixture.reference).with_settings(
-        splice_info=("transcript_id","exon_number"), var_filter="exonic"
-    ).with_seqs("variants")
-    rows = slice(0, n_query_rows); samples = slice(0, n_samples)
-    for _ in range(warmup): ds[rows, samples]
+    ds = (
+        gvl.Dataset.open(fixture.gvl_path, reference=fixture.reference)
+        .with_settings(
+            splice_info=("transcript_id", "exon_number"), var_filter="exonic"
+        )
+        .with_seqs("variants")
+    )
+    rows = slice(0, n_query_rows)
+    samples = slice(0, n_samples)
+    for _ in range(warmup):
+        ds[rows, samples]
     ts = [_time_once(ds, rows, samples) for _ in range(reps)]
-    return BenchRow(n_samples, n_query_rows, parallel,
-                    st.median(ts), min(ts), max(ts)-min(ts))
+    return BenchRow(
+        n_samples, n_query_rows, parallel, st.median(ts), min(ts), max(ts) - min(ts)
+    )
 ```
 
 - [ ] **Step 3: Write the sweep `main`** — sweep `n_samples ∈ {500, 3202, 25000,

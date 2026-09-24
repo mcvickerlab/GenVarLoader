@@ -142,25 +142,25 @@ alongside the existing `_find_ranges`:
 ```python
 @dataclass(frozen=True)
 class RangesChunk:
-    sample_start: int                    # into the SELECTED sample axis
+    sample_start: int  # into the SELECTED sample axis
     n_samples: int
-    vk_snp_range: NDArray[np.int64]      # (n_samples, ploidy, R, 2), hap-major
+    vk_snp_range: NDArray[np.int64]  # (n_samples, ploidy, R, 2), hap-major
     vk_indel_range: NDArray[np.int64]
-    max_end_keys: NDArray[np.int64]      # (R,), packed key; 0 = no variant
+    max_end_keys: NDArray[np.int64]  # (R,), packed key; 0 = no variant
 
 
 @dataclass(frozen=True)
 class RangesStream:
     n_regions: int
-    n_samples: int                       # progress denominator
+    n_samples: int  # progress denominator
     ploidy: int
-    samples_per_chunk: int               # derived; exposed for observability
-    region_starts: NDArray[np.int32]     # eager, R-sized
-    dense_range: NDArray[np.int32]       # (R, 2)
-    dense_snp_range: NDArray[np.int32]   # (R, 2)
-    dense_indel_range: NDArray[np.int32] # (R, 2)
-    sample_cols: NDArray[np.int64]       # (S,)
-    dense_max_end_keys: NDArray[np.int64] # (R,), dense-channel contribution
+    samples_per_chunk: int  # derived; exposed for observability
+    region_starts: NDArray[np.int32]  # eager, R-sized
+    dense_range: NDArray[np.int32]  # (R, 2)
+    dense_snp_range: NDArray[np.int32]  # (R, 2)
+    dense_indel_range: NDArray[np.int32]  # (R, 2)
+    sample_cols: NDArray[np.int64]  # (S,)
+    dense_max_end_keys: NDArray[np.int64]  # (R,), dense-channel contribution
     chunks: Iterator[RangesChunk]
 
 
@@ -268,7 +268,7 @@ the parity test.
 Before creating any memmap:
 
 ```python
-cache_bytes = 2 * R * S * P * 2 * 8   # both vk channels
+cache_bytes = 2 * R * S * P * 2 * 8  # both vk channels
 ```
 
 Log it through the writer's logger and compare against
@@ -293,7 +293,7 @@ for ch in stream.chunks:
     pbar.update(rc * ch.n_samples / S)
 mask = (1 << 21) - 1
 region_ends = np.asarray(ends, np.int64).copy()
-has = keys > 0                       # 0 = no variant; keep the original chromEnd
+has = keys > 0  # 0 = no variant; keep the original chromEnd
 region_ends[has] = (keys[has] >> 21) + (keys[has] & mask)
 max_ends[lo:hi] = region_ends.astype(np.int32)
 ```

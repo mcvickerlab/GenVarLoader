@@ -56,9 +56,9 @@ def _resolve_num_threads() -> int:
     if env:
         return int(env)
     try:
-        real = len(os.sched_getaffinity(0))   # respects cgroup cpuset (Linux)
+        real = len(os.sched_getaffinity(0))  # respects cgroup cpuset (Linux)
     except AttributeError:
-        real = os.cpu_count() or 1            # non-Linux fallback
+        real = os.cpu_count() or 1  # non-Linux fallback
     return min(numba.get_num_threads(), real)
 ```
 

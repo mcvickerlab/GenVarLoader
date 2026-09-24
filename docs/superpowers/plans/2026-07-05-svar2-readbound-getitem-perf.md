@@ -28,10 +28,17 @@
   ```python
   import genvarloader as gvl
   from genoray import SparseVar2
-  gvl.write(ds_path, bed, variants=SparseVar2(f"{prefix}.svar2"), samples=None,
-            max_jitter=0, overwrite=True)          # ONCE, before the profiled loop
+
+  gvl.write(
+      ds_path,
+      bed,
+      variants=SparseVar2(f"{prefix}.svar2"),
+      samples=None,
+      max_jitter=0,
+      overwrite=True,
+  )  # ONCE, before the profiled loop
   ds = gvl.Dataset.open(ds_path, reference=REF)
-  ds.with_seqs("haplotypes")[:, :]                  # or with_seqs("variants")
+  ds.with_seqs("haplotypes")[:, :]  # or with_seqs("variants")
   ```
 
 ---
@@ -80,6 +87,7 @@ attribute cleanly.
 gvl.write + Dataset.open run ONCE (we profile the READ, not the write). Prints
 per_call_s over K warm calls. Tracks mode is out of scope; variant-windows is
 guarded NotImplementedError in Svar2Haps and cannot be profiled yet."""
+
 import sys
 import time
 from pathlib import Path
@@ -94,11 +102,13 @@ WORK = Path("tmp/svar2_mvp/prof_out/readbound")
 
 
 def _bed():
-    return pl.DataFrame({
-        "chrom": [CHROM] * len(REGIONS),
-        "chromStart": [s for s, _ in REGIONS],
-        "chromEnd": [e for _, e in REGIONS],
-    })
+    return pl.DataFrame(
+        {
+            "chrom": [CHROM] * len(REGIONS),
+            "chromStart": [s for s, _ in REGIONS],
+            "chromEnd": [e for _, e in REGIONS],
+        }
+    )
 
 
 def make_call(mode, cohort):
@@ -111,10 +121,16 @@ def make_call(mode, cohort):
     ds_path = WORK / f"{cohort}_{mode}.gvl"
     WORK.mkdir(parents=True, exist_ok=True)
 
-    gvl.write(ds_path, _bed(), variants=SparseVar2(f"{prefix}.svar2"),
-              samples=None, max_jitter=0, overwrite=True)
+    gvl.write(
+        ds_path,
+        _bed(),
+        variants=SparseVar2(f"{prefix}.svar2"),
+        samples=None,
+        max_jitter=0,
+        overwrite=True,
+    )
     ds = gvl.Dataset.open(ds_path, reference=REF)
-    view = ds.with_seqs(mode)   # "haplotypes" or "variants"
+    view = ds.with_seqs(mode)  # "haplotypes" or "variants"
 
     R = len(REGIONS)
 
@@ -179,6 +195,7 @@ Create `tmp/svar2_mvp/prof_python.py`:
 cProfile ranks Python functions by cumulative time; pyinstrument gives a
 low-overhead statistical wall-clock call tree as a cross-check (cProfile's own
 per-call overhead can distort tiny hot loops)."""
+
 import cProfile
 import io
 import pstats
@@ -202,6 +219,7 @@ def main(mode, cohort, K):
     print("```\n" + s.getvalue() + "```\n")
 
     from pyinstrument import Profiler
+
     p = Profiler(interval=0.0005)
     p.start()
     for _ in range(K):
@@ -353,16 +371,18 @@ def test_deterministic_haps_read_skips_pre_reconstruct_diffs(monkeypatch):
 
     calls = {"diffs": 0}
     real = m.hap_diffs_from_svar2_readbound
+
     def counting(*a, **k):
         calls["diffs"] += 1
         return real(*a, **k)
+
     monkeypatch.setattr(m, "hap_diffs_from_svar2_readbound", counting)
 
     # Build the same small live svar2 dataset the module parity tests use, then:
     #   ds.with_seqs("haplotypes")[:, :]
     # (reuse this file's existing fixture that yields a ds2 Svar2Haps-backed view;
     #  if none is exposed, lift the _open_pair helper from test_svar2_dataset.py.)
-    ds2 = _svar2_haps_dataset()          # existing/lifted fixture -> haplotypes view
+    ds2 = _svar2_haps_dataset()  # existing/lifted fixture -> haplotypes view
     ds2[:, :]
     assert calls["diffs"] == 0
 ```
@@ -379,38 +399,44 @@ Expected: FAIL with `assert 1 == 0` (the diffs kernel is currently called uncond
 In `python/genvarloader/_dataset/_svar2_haps.py`, add `need_hap_lengths: bool = False` to `get_haps_and_shifts`'s signature, and replace the unconditional diffs block + shifts block (currently ~lines 352-384) with:
 
 ```python
-        groups = self._contig_groups(contig_ids)
+groups = self._contig_groups(contig_ids)
 
-        # diffs are needed pre-reconstruct ONLY to (a) bound randomized jitter
-        # shifts, or (b) return hap_lengths/diffs to a caller that uses them
-        # (the tracks path). A deterministic/ragged haplotypes read needs
-        # neither: reconstruct sizes itself internally. Avoid the redundant
-        # gather+split+diffs in that (common warm-read) case.
-        randomized = not (deterministic or isinstance(output_length, str))
-        need_diffs = randomized or need_hap_lengths
+# diffs are needed pre-reconstruct ONLY to (a) bound randomized jitter
+# shifts, or (b) return hap_lengths/diffs to a caller that uses them
+# (the tracks path). A deterministic/ragged haplotypes read needs
+# neither: reconstruct sizes itself internally. Avoid the redundant
+# gather+split+diffs in that (common warm-read) case.
+randomized = not (deterministic or isinstance(output_length, str))
+need_diffs = randomized or need_hap_lengths
 
-        if need_diffs:
-            diffs = np.empty((b, P), np.int32)
-            for ci, qsel in groups:
-                gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-                d = hap_diffs_from_svar2_readbound(
-                    self.store, self.ds_contigs[ci],
-                    gi[0], gi[1], gi[2], gi[3], gi[4], gi[5], gi[6], P,
-                )
-                diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), P)
-            hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
-        else:
-            diffs = np.zeros((b, P), np.int32)      # placeholder (unused downstream)
-            hap_lengths = np.broadcast_to(
-                lengths[:, None].astype(np.int32), (b, P)
-            ).copy()
+if need_diffs:
+    diffs = np.empty((b, P), np.int32)
+    for ci, qsel in groups:
+        gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
+        d = hap_diffs_from_svar2_readbound(
+            self.store,
+            self.ds_contigs[ci],
+            gi[0],
+            gi[1],
+            gi[2],
+            gi[3],
+            gi[4],
+            gi[5],
+            gi[6],
+            P,
+        )
+        diffs[qsel] = np.asarray(d, np.int32).reshape(len(qsel), P)
+    hap_lengths = (lengths[:, None] + diffs).astype(np.int32)
+else:
+    diffs = np.zeros((b, P), np.int32)  # placeholder (unused downstream)
+    hap_lengths = np.broadcast_to(lengths[:, None].astype(np.int32), (b, P)).copy()
 
-        if randomized:
-            max_shift = diffs.clip(min=0)
-            max_shift = max_shift + (lengths - output_length).clip(min=0)[:, None]
-            shifts = rng.integers(0, max_shift + 1, dtype=np.int32)
-        else:
-            shifts = np.zeros((b, P), np.int32)
+if randomized:
+    max_shift = diffs.clip(min=0)
+    max_shift = max_shift + (lengths - output_length).clip(min=0)[:, None]
+    shifts = rng.integers(0, max_shift + 1, dtype=np.int32)
+else:
+    shifts = np.zeros((b, P), np.int32)
 ```
 
 Then have the tracks caller pass `need_hap_lengths=True`. Find the caller: `grep -n "get_haps_and_shifts" python/genvarloader/_dataset/*.py` — it is invoked from `HapsTracks` dispatch (the tracks path) and from `Svar2Haps.__call__` (haplotypes). Update the tracks call site to `get_haps_and_shifts(..., need_hap_lengths=True)`; leave the haplotypes call site at the `False` default.
