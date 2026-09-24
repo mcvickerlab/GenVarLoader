@@ -28,16 +28,87 @@ class Svar2Link(BaseModel):
     fingerprint: Svar2Fingerprint
 
 
+#: Per-contig subtrees whose bytes a dataset actually reads. Anything else in
+#: a contig directory belongs to some other pipeline and is none of this
+#: fingerprint's business -- see `_svar2_payload_files`.
+_PAYLOAD_SUBTREES: tuple[str, ...] = ("dense", "fields", "indel", "var_key")
+
+#: Per-contig payload files that sit directly in the contig directory.
+_PAYLOAD_FILES: tuple[str, ...] = ("max_del.npy",)
+
+_PAYLOAD_SUFFIXES = frozenset({".bin", ".npy"})
+
+
+def _svar2_payload_files(svar2_path: Path) -> list[Path]:
+    """The ``.bin``/``.npy`` files under the payload subtrees, sorted.
+
+    Deliberately NOT a walk of the whole store. A ``.svar2`` store is written
+    by one pipeline and read by many, so it accumulates sibling layers --
+    per-contig annotations, scratch indices -- that no dataset opens. Counting
+    those makes an unrelated pipeline's write break every reader of the store
+    (issue #419), and it does so in the direction that matters least: the
+    variant data is byte-for-byte unchanged while every consumer goes down.
+
+    Scoping to the read payload keeps the documented contract exactly -- the
+    fingerprint still changes iff the data the dataset reads changes -- while
+    additive siblings become invisible, which is the correct behavior.
+    """
+    files: list[Path] = []
+    for contig in sorted(p for p in svar2_path.iterdir() if p.is_dir()):
+        for name in _PAYLOAD_FILES:
+            f = contig / name
+            if f.is_file() and f.suffix in _PAYLOAD_SUFFIXES:
+                files.append(f)
+        for sub in _PAYLOAD_SUBTREES:
+            d = contig / sub
+            if not d.is_dir():
+                continue
+            files.extend(
+                p for p in d.rglob("*") if p.is_file() and p.suffix in _PAYLOAD_SUFFIXES
+            )
+    return sorted(files)
+
+
+def _svar2_ignored_files(svar2_path: Path) -> list[Path]:
+    """``.bin``/``.npy`` files in the store that the payload scope excludes.
+
+    Used only to explain a mismatch. A large ignored set is the signature of
+    a sibling annotation layer, and saying so turns issue #419's manual scope
+    bisection into a line of the error message.
+    """
+    payload = set(_svar2_payload_files(svar2_path))
+    return sorted(
+        p
+        for p in svar2_path.rglob("*")
+        if p.is_file() and p.suffix in _PAYLOAD_SUFFIXES and p not in payload
+    )
+
+
+def _svar2_legacy_store_fingerprint(svar2_path: Path) -> tuple[int, int]:
+    """The pre-scoping fingerprint: every ``.bin``/``.npy`` in the store.
+
+    Kept solely to honor links recorded before the scope was narrowed. Those
+    records counted sibling layers, so re-scoping would invalidate every one
+    of them -- a check that starts rejecting stores it accepted yesterday is
+    worse than the bug being fixed.
+    """
+    files = [
+        p
+        for p in svar2_path.rglob("*")
+        if p.is_file() and p.suffix in _PAYLOAD_SUFFIXES
+    ]
+    return len(files), sum(p.stat().st_size for p in files)
+
+
 def _svar2_store_fingerprint(svar2_path: Path) -> tuple[int, int]:
     """Deterministic (file count, total bytes) over the .svar2 store's data files.
 
-    Walks the store for ``.bin``/``.npy`` files (dense + var_key + long-allele
-    payloads across all contigs). Changes iff the store's data files change --
-    that is this fingerprint's only contract.
+    Covers the payload subtrees only (dense + fields + var_key + long-allele
+    across all contigs, plus each contig's ``max_del.npy``). Changes iff the
+    store's data files change -- that is this fingerprint's only contract, and
+    scoping the walk is what makes the implementation match it.
     """
-    files = sorted(
-        p for p in svar2_path.rglob("*") if p.is_file() and p.suffix in {".bin", ".npy"}
-    )
+    files = _svar2_payload_files(svar2_path)
     return len(files), sum(p.stat().st_size for p in files)
 
 
@@ -88,9 +159,19 @@ def _verify_svar2_fingerprint(svar2_path: Path, link: Svar2Link | None) -> None:
     if link is None:
         return
 
-    n_files_observed, bytes_observed = _svar2_store_fingerprint(svar2_path)
-
     exp = link.fingerprint
+
+    n_files_observed, bytes_observed = _svar2_store_fingerprint(svar2_path)
+    if (n_files_observed, bytes_observed) == (exp.n_files, exp.store_bytes):
+        return
+
+    # A link recorded before the fingerprint was scoped counted every
+    # .bin/.npy in the store, sibling layers included. Accept that shape too:
+    # narrowing the scope fixes issue #419 for stores that GAIN a layer, and
+    # it must not break the datasets that verify cleanly today.
+    if _svar2_legacy_store_fingerprint(svar2_path) == (exp.n_files, exp.store_bytes):
+        return
+
     mismatches: list[str] = []
     if n_files_observed != exp.n_files:
         mismatches.append(
@@ -102,8 +183,67 @@ def _verify_svar2_fingerprint(svar2_path: Path, link: Svar2Link | None) -> None:
         )
     if mismatches:
         raise ValueError(
-            f"svar2 fingerprint mismatch at {svar2_path}: " + "; ".join(mismatches)
+            f"svar2 fingerprint mismatch at {svar2_path}: "
+            + "; ".join(mismatches)
+            + _mismatch_diagnosis(svar2_path, exp)
         )
+
+
+def _mismatch_diagnosis(svar2_path: Path, exp: Svar2Fingerprint) -> str:
+    """Context appended to a mismatch, so the message is actionable on its own.
+
+    The person who has to diagnose this is whoever's job broke, not whoever
+    changed the store, and they get one traceback to work from. Byte counts
+    alone forced a manual scope bisection (issue #419), so state the scope
+    that was used, what it covered, and -- the part that actually identifies
+    a sibling-layer situation -- what it ignored.
+    """
+    try:
+        payload = _svar2_payload_files(svar2_path)
+        ignored = _svar2_ignored_files(svar2_path)
+    except OSError as exc:  # unreadable store: say so rather than masking it
+        return f"\n  (could not scan the store to explain this: {exc})"
+
+    lines = [
+        "",
+        f"  scope: payload only -- each contig's {list(_PAYLOAD_FILES)} plus "
+        f"{list(_PAYLOAD_SUBTREES)}",
+        f"  payload files counted: {len(payload)} "
+        f"({sum(p.stat().st_size for p in payload)} bytes)",
+    ]
+    if ignored:
+        example = ignored[0].relative_to(svar2_path)
+        lines.append(
+            f"  non-payload files ignored: {len(ignored)} "
+            f"({sum(p.stat().st_size for p in ignored)} bytes), e.g. {example}"
+        )
+        lines.append(
+            "  a sibling layer like that does NOT affect this fingerprint; if "
+            "the recorded value was written before the fingerprint was scoped "
+            "to the payload, it counted those files and must be re-recorded."
+        )
+    elif exp.n_files > len(payload) and exp.store_bytes > sum(
+        q.stat().st_size for q in payload
+    ):
+        # A record written under the old unscoped walk counted a SUPERSET of
+        # the payload, so it is larger on both axes. A store that has since
+        # lost the sibling layer has nothing left to point at, which is how
+        # this looks from the consumer's side -- and calling that corruption
+        # would send someone hunting for damage that is not there.
+        lines.append(
+            "  the recorded value is larger than the payload on both counts "
+            "and no sibling layer remains to account for it. That is what a "
+            "record written before the fingerprint was scoped looks like once "
+            "the layer is gone; it is also what real truncation looks like. "
+            "Compare against a replica that still carries the layer before "
+            "deciding, then either restore the store or re-record the link."
+        )
+    else:
+        lines.append(
+            "  no non-payload files present, so this mismatch is in the data "
+            "the dataset actually reads -- treat the store as modified."
+        )
+    return "\n".join(lines)
 
 
 def make_svar2_link(gvl_path: Path, svar2_path: Path) -> Svar2Link:
