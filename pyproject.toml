@@ -10,14 +10,16 @@ readme = "README.md"
 license = { file = "LICENSE.txt" }
 requires-python = ">=3.10,<3.14" # >= 3.14 blocked by pyarrow/genoray
 dependencies = [
-    "seqpro>=0.22",
+    "seqpro>=0.23",
     # >=5 carries SparseVar2._find_ranges_chunked_sparse, the sparse chunked
     # range API _write_from_svar2 consumes (gvl#405), and the keyword-only,
     # struct-grouped _core pipeline entry points the test fixtures call
     # (d-laub/genoray#153, #200). 5.0.0's breaking changes -- the GENORAY_*
     # environment variables, SparseVar2.from_vcf(reader_workers=) and
-    # resolve_log_level -- are all on APIs GVL never calls.
-    "genoray>=5,<6",
+    # resolve_log_level -- are all on APIs GVL never calls. 6.0.0's only
+    # breaking change drops the dense find_ranges_chunk path GVL no longer
+    # uses; >=6.0.1 is the first genoray that allows seqpro 0.23.
+    "genoray>=6.0.1,<7",
     "numpy",
     "loguru",
     "natsort",

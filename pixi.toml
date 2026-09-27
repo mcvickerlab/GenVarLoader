@@ -101,14 +101,14 @@ numba = "==0.59.1"
 [feature.py310.pypi-dependencies]
 pyarrow = ">=21"
 hirola = "==0.3"
-seqpro = "==0.22.0"
-# genoray >=5 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
+seqpro = "==0.23.0"
+# genoray >=6 as the prebuilt abi3 wheel from PyPI — one cp310-abi3 wheel covers
 # py310-313 on both platforms. 5.0.0 carries
 # SparseVar2._find_ranges_chunked_sparse, the sparse chunked range API
 # _write_from_svar2 consumes (gvl#405), and the keyword-only, struct-grouped
 # _core pipeline entry points the test fixtures call (d-laub/genoray#153, #200).
-# Mirrors the pyproject range.
-genoray = ">=5,<6"
+# 6.0.1 is the first release that allows seqpro 0.23. Mirrors the pyproject range.
+genoray = ">=6.0.1,<7"
 polars = "==1.37.1"
 loguru = "*"
 natsort = "*"
