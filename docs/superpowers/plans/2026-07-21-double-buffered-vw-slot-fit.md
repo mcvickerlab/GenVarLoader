@@ -87,6 +87,7 @@ git commit -m "docs(spec): #315 Phase 0 findings — pinned slot under-count on 
 # tests/unit/test_slot_overhead.py
 """slot_overhead_bytes must upper-bound the real per-chunk serialization overhead
 (offset-array +1 terminators + _align padding) that _output_bytes_per_instance omits."""
+
 import numpy as np
 import seqpro as sp
 import genvarloader as gvl
@@ -95,11 +96,19 @@ from genvarloader._shm_layout import write_chunk, HEADER_RESERVED
 
 
 def _vw(ds, L=8):
-    opt = gvl.VarWindowOpt(flank_length=L, token_alphabet=sp.alphabets.DNA,
-                           unknown_token=len(sp.alphabets.DNA), ref="window", alt="allele")
-    return (ds.with_tracks(False).with_output_format("flat")
-              .with_seqs("variant-windows", opt)
-              .with_settings(unphased_union=True, jitter=0))
+    opt = gvl.VarWindowOpt(
+        flank_length=L,
+        token_alphabet=sp.alphabets.DNA,
+        unknown_token=len(sp.alphabets.DNA),
+        ref="window",
+        alt="allele",
+    )
+    return (
+        ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs("variant-windows", opt)
+        .with_settings(unphased_union=True, jitter=0)
+    )
 
 
 def test_overhead_covers_real_minus_estimate():
@@ -111,9 +120,11 @@ def test_overhead_covers_real_minus_estimate():
     arrays = list(chunk) if isinstance(chunk, tuple) else [chunk]
     buf = memoryview(bytearray(64 * 1024 * 1024))
     real = write_chunk(buf, arrays, n_instances=len(r)) - HEADER_RESERVED
-    est = int(np.asarray(ds._output_bytes_per_instance(r, s, include_offsets=True)).sum())
+    est = int(
+        np.asarray(ds._output_bytes_per_instance(r, s, include_offsets=True)).sum()
+    )
     overhead = slot_overhead_bytes(ds)
-    assert real - est <= overhead, f"real-est={real-est} exceeds overhead={overhead}"
+    assert real - est <= overhead, f"real-est={real - est} exceeds overhead={overhead}"
     assert overhead >= 4096  # floor
 ```
 
@@ -135,6 +146,7 @@ every serialized array. Those are per-chunk constants (independent of instance c
 that must be covered by the slot's fixed slack. This module derives a true upper
 bound on them from the schema, replacing the historical magic 4096.
 """
+
 from __future__ import annotations
 
 _OFF = 8  # int64 offset entry / terminator
@@ -155,7 +167,9 @@ def _array_counts(dataset) -> tuple[int, int]:
     if seq == "variant-windows":
         n_scalar = len(scalars)
         n_window_slots = 2  # exactly one ref-derived + one alt-derived slot
-        n_off += n_scalar * 1 + n_window_slots * 2  # scalars: outer; windows: outer+inner
+        n_off += (
+            n_scalar * 1 + n_window_slots * 2
+        )  # scalars: outer; windows: outer+inner
         n_arr += n_scalar * 2 + n_window_slots * 3  # +1 data array each
     elif seq == "variants":
         n_scalar = len(scalars)
@@ -367,6 +381,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 schema-derived slot overhead must upper-bound the real serialized payload for every
 chunk. This is the invariant #315 violated; it must hold across record types and
 storage backends."""
+
 import numpy as np
 import pytest
 import seqpro as sp
@@ -382,11 +397,19 @@ def _views(ds):
             continue
         for uu in (True, False):
             for L in (8, 128):
-                opt = gvl.VarWindowOpt(flank_length=L, token_alphabet=DNA,
-                                       unknown_token=len(DNA), ref=ref, alt=alt)
-                yield (ds.with_tracks(False).with_output_format("flat")
-                         .with_seqs("variant-windows", opt)
-                         .with_settings(unphased_union=uu, jitter=0))
+                opt = gvl.VarWindowOpt(
+                    flank_length=L,
+                    token_alphabet=DNA,
+                    unknown_token=len(DNA),
+                    ref=ref,
+                    alt=alt,
+                )
+                yield (
+                    ds.with_tracks(False)
+                    .with_output_format("flat")
+                    .with_seqs("variant-windows", opt)
+                    .with_settings(unphased_union=uu, jitter=0)
+                )
 
 
 def _assert_upper_bound(view):
@@ -397,9 +420,12 @@ def _assert_upper_bound(view):
     arrays = list(chunk) if isinstance(chunk, tuple) else [chunk]
     buf = memoryview(bytearray(64 * 1024 * 1024))
     real = write_chunk(buf, arrays, n_instances=len(r)) - HEADER_RESERVED
-    est = int(np.asarray(view._output_bytes_per_instance(r, s, include_offsets=True)).sum())
+    est = int(
+        np.asarray(view._output_bytes_per_instance(r, s, include_offsets=True)).sum()
+    )
     assert est + slot_overhead_bytes(view) >= real, (
-        f"slot under-sized: est={est} overhead={slot_overhead_bytes(view)} real={real}")
+        f"slot under-sized: est={est} overhead={slot_overhead_bytes(view)} real={real}"
+    )
 
 
 def test_slot_fit_dummy_backend():

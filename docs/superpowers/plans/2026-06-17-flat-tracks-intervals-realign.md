@@ -150,9 +150,9 @@ from ._ragged import FlatIntervals, RaggedAnnotatedHaps, RaggedIntervals
 Add `"FlatIntervals"` to `__all__` (keep alphabetical order — place after `"FlatAnnotatedHaps"`, line 51):
 
 ```python
-    "FlatAnnotatedHaps",
-    "FlatIntervals",
-    "FlatRagged",
+("FlatAnnotatedHaps",)
+("FlatIntervals",)
+("FlatRagged",)
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -283,13 +283,9 @@ def build_flat_intervals(
         tb_ends.append(np.asarray(itv.ends.data)[src])
         tb_values.append(np.asarray(itv.values.data)[src])
 
-    data_starts = (
-        np.concatenate(tb_starts) if tb_starts else np.empty(0, np.int32)
-    )
+    data_starts = np.concatenate(tb_starts) if tb_starts else np.empty(0, np.int32)
     data_ends = np.concatenate(tb_ends) if tb_ends else np.empty(0, np.int32)
-    data_values = (
-        np.concatenate(tb_values) if tb_values else np.empty(0, np.float32)
-    )
+    data_values = np.concatenate(tb_values) if tb_values else np.empty(0, np.float32)
     offsets_tb = lengths_to_offsets(lengths_tb.ravel())  # (T*B + 1)
 
     # Pass 2: reorder groups (t, b) -> (b, t). For output group (b, t) the
@@ -298,9 +294,8 @@ def build_flat_intervals(
     final_lengths = lengths_tb.ravel()[perm]
     final_offsets = lengths_to_offsets(final_lengths)
     total = int(final_offsets[-1])
-    src = (
-        np.repeat(offsets_tb[perm] - final_offsets[:-1], final_lengths)
-        + np.arange(total, dtype=np.int64)
+    src = np.repeat(offsets_tb[perm] - final_offsets[:-1], final_lengths) + np.arange(
+        total, dtype=np.int64
     )
 
     shape = (B, T, None)
@@ -592,8 +587,10 @@ def test_default_haps_tracks_realigns():
 
 def test_realign_false_haps_tracks_uses_seqstracks_and_is_reference_coord():
     ds = gvl.get_dummy_dataset()
-    asis = ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_settings(
-        realign_tracks=False
+    asis = (
+        ds.with_seqs("haplotypes")
+        .with_tracks(["read-depth"])
+        .with_settings(realign_tracks=False)
     )
     assert type(asis._recon) is SeqsTracks
 
@@ -612,10 +609,9 @@ def test_intervals_plus_haplotypes_requires_realign_false():
 
 def test_intervals_plus_haplotypes_ok_when_realign_false():
     ds = gvl.get_dummy_dataset()
-    out = (
-        ds.with_settings(realign_tracks=False)
-        .with_tracks(["read-depth"], kind="intervals")[[0], [0]]
-    )
+    out = ds.with_settings(realign_tracks=False).with_tracks(
+        ["read-depth"], kind="intervals"
+    )[[0], [0]]
     seqs, itvs = out
     assert isinstance(itvs, gvl.RaggedIntervals)
 
@@ -710,9 +706,7 @@ Update each `_build_reconstructor(...)` call to pass `self.realign_tracks`:
 - `with_seqs` (line 717):
 
 ```python
-        new_recon = _build_reconstructor(
-            new_seqs, self._tracks, kind, self.realign_tracks
-        )
+new_recon = _build_reconstructor(new_seqs, self._tracks, kind, self.realign_tracks)
 ```
 
 - `with_tracks` (line 769):
@@ -775,18 +769,14 @@ In the body, after the `unphased_union` block (lines 423-429), add:
 Update the recon-rebuild guard (lines 432-437) to also rebuild when `realign_tracks` changes and pass it through:
 
 ```python
-        # If any source state changed, rebuild _recon via the factory.
-        if (
-            "_seqs" in to_evolve
-            or "_tracks" in to_evolve
-            or "realign_tracks" in to_evolve
-        ):
-            new_seqs = to_evolve.get("_seqs", self._seqs)
-            new_tracks = to_evolve.get("_tracks", self._tracks)
-            new_realign = to_evolve.get("realign_tracks", self.realign_tracks)
-            to_evolve["_recon"] = _build_reconstructor(
-                new_seqs, new_tracks, self._seqs_kind, new_realign
-            )
+# If any source state changed, rebuild _recon via the factory.
+if "_seqs" in to_evolve or "_tracks" in to_evolve or "realign_tracks" in to_evolve:
+    new_seqs = to_evolve.get("_seqs", self._seqs)
+    new_tracks = to_evolve.get("_tracks", self._tracks)
+    new_realign = to_evolve.get("realign_tracks", self.realign_tracks)
+    to_evolve["_recon"] = _build_reconstructor(
+        new_seqs, new_tracks, self._seqs_kind, new_realign
+    )
 ```
 
 - [ ] **Step 8: Forward `realign_tracks` (and `output_format`) through `with_len`**
@@ -921,7 +911,9 @@ def test_flat_float_tracks_only_returns_flatragged():
 def test_flat_haps_plus_tracks_returns_flat_pair():
     ds = gvl.get_dummy_dataset()
     flat = (
-        ds.with_seqs("haplotypes").with_tracks(["read-depth"]).with_output_format("flat")
+        ds.with_seqs("haplotypes")
+        .with_tracks(["read-depth"])
+        .with_output_format("flat")
     )
     seqs, tracks = flat[[0, 1], [0, 1]]
     assert type(seqs).__name__ == "_Flat"

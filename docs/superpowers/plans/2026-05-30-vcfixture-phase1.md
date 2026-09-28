@@ -166,9 +166,10 @@ LOCI = [
 def test_reference_has_expected_bases_at_loci(tmp_path: Path):
     ref = write_synthetic_reference(tmp_path / "synthetic.fa.bgz", seed=0)
     assert ref.exists()
-    assert ref.with_suffix(ref.suffix + ".fai").exists() or (
-        ref.parent / (ref.name + ".fai")
-    ).exists()
+    assert (
+        ref.with_suffix(ref.suffix + ".fai").exists()
+        or (ref.parent / (ref.name + ".fai")).exists()
+    )
     with pysam.FastaFile(str(ref)) as fa:
         for contig, pos, expected in LOCI:
             got = fa.fetch(contig, pos - 1, pos - 1 + len(expected)).upper()
@@ -406,20 +407,45 @@ def build_source_vcf(reference_path: str | Path) -> "object":
 
     # chr20 block — carries INFO (test_sitesonly) and IDs/FILTERs.
     b.record(
-        "chr20", 14370, ref="N", alt=["A"], ids=["rs6054257"], qual=29.0, filter=(),
-        gt=["0|0", "1|0", "1/1"], info={"NS": 3, "DP": 14, "AF": [0.5], "DB": True, "H2": True},
+        "chr20",
+        14370,
+        ref="N",
+        alt=["A"],
+        ids=["rs6054257"],
+        qual=29.0,
+        filter=(),
+        gt=["0|0", "1|0", "1/1"],
+        info={"NS": 3, "DP": 14, "AF": [0.5], "DB": True, "H2": True},
     )
     b.record(
-        "chr20", 17330, ref="N", alt=["A"], qual=3.0, filter=["q10"],
-        gt=["0|0", "0|1", "0/0"], info={"NS": 3, "DP": 11, "AF": [0.017]},
+        "chr20",
+        17330,
+        ref="N",
+        alt=["A"],
+        qual=3.0,
+        filter=["q10"],
+        gt=["0|0", "0|1", "0/0"],
+        info={"NS": 3, "DP": 11, "AF": [0.017]},
     )
     b.record(
-        "chr20", 1110696, ref="G", alt=["A", "T"], ids=["rs6040355"], qual=67.0, filter=(),
+        "chr20",
+        1110696,
+        ref="G",
+        alt=["A", "T"],
+        ids=["rs6040355"],
+        qual=67.0,
+        filter=(),
         gt=["1|2", "2|1", "2/2"],
         info={"NS": 2, "DP": 10, "AF": [0.333, 0.667], "AA": "T", "DB": True},
     )
     b.record(
-        "chr20", 1234567, ref="A", alt=["GA", "AC"], ids=["microsat1"], qual=50.0, filter=(),
+        "chr20",
+        1234567,
+        ref="A",
+        alt=["GA", "AC"],
+        ids=["microsat1"],
+        qual=50.0,
+        filter=(),
         gt=["0/1", "0/2", "./."],
         info={"NS": 3, "DP": 9, "AA": "G", "AN": 6, "AC": [3, 1]},
     )
