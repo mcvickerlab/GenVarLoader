@@ -158,18 +158,16 @@ def _reconstruct_variant_windows(
 
     for ci, qsel in groups:
         gi = self._gather_inputs(r_q[qsel], si_q[qsel], regions[qsel], P)
-        pos, ilen, alt_bytes, str_off, var_off = (
-            decode_variants_from_svar2_readbound(
-                self.store,
-                self.ds_contigs[ci],
-                gi[0],
-                gi[1],
-                gi[2],
-                gi[3],
-                gi[4],
-                gi[5],
-                P,
-            )
+        pos, ilen, alt_bytes, str_off, var_off = decode_variants_from_svar2_readbound(
+            self.store,
+            self.ds_contigs[ci],
+            gi[0],
+            gi[1],
+            gi[2],
+            gi[3],
+            gi[4],
+            gi[5],
+            P,
         )
         pos = np.asarray(pos, np.int32)
         ilen = np.asarray(ilen, np.int32)
@@ -333,7 +331,11 @@ def test_svar2_variant_windows_alt_window_decomposition(
     L = _WIN_OPT.flank_length
     w_win = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
     alt_opt = VarWindowOpt(
-        flank_length=L, token_alphabet=b"ACGT", unknown_token=4, ref="window", alt="allele"
+        flank_length=L,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="allele",
     )
     w_alt = ds2.with_output_format("flat").with_seqs("variant-windows", alt_opt)[:, :]
 
@@ -375,7 +377,11 @@ def test_svar2_variant_windows_bare_alt_tokenizes_variants_alt(
     _, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
     L = _WIN_OPT.flank_length
     alt_opt = VarWindowOpt(
-        flank_length=L, token_alphabet=b"ACGT", unknown_token=4, ref="window", alt="allele"
+        flank_length=L,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="window",
+        alt="allele",
     )
     w_alt = ds2.with_output_format("flat").with_seqs("variant-windows", alt_opt)[:, :]
     v = ds2.with_seqs("variants")[:, :]  # RaggedVariants (validated)
@@ -401,7 +407,9 @@ def test_svar2_variant_windows_bare_alt_tokenizes_variants_alt(
 - [ ] **Step 9: Add multi-contig parity test**
 
 ```python
-def test_svar2_variant_windows_multicontig(tmp_path, svar_fixture2, svar2_fixture2, _src2):
+def test_svar2_variant_windows_multicontig(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
     """ref_window byte-identical to SVAR1 across an interleaved 2-contig bed
     (single-contig fast path bypassed -> exercises the group-stitch reorder)."""
     from genoray import SparseVar, SparseVar2
@@ -417,7 +425,9 @@ def test_svar2_variant_windows_multicontig(tmp_path, svar_fixture2, svar2_fixtur
     d1 = tmp_path / "vw_mc1.gvl"
     d2 = tmp_path / "vw_mc2.gvl"
     gvl.write(d1, bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True)
-    gvl.write(d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True)
+    gvl.write(
+        d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True
+    )
     ds1 = gvl.Dataset.open(d1, reference=ref)
     ds2 = gvl.Dataset.open(d2, reference=ref)
     w1 = ds1.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
@@ -471,7 +481,11 @@ def test_svar2_variant_windows_ref_allele_guard(tmp_path, bed, svar2_fixture, _s
     gvl.write(d, bed, variants=SparseVar2(svar2_fixture), samples=None, overwrite=True)
     ds = gvl.Dataset.open(d, reference=ref).with_output_format("flat")
     bad = VarWindowOpt(
-        flank_length=3, token_alphabet=b"ACGT", unknown_token=4, ref="allele", alt="window"
+        flank_length=3,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        ref="allele",
+        alt="window",
     )
     with pytest.raises(ValueError, match="REF"):
         ds.with_seqs("variant-windows", bad)
@@ -485,7 +499,12 @@ def test_svar2_variant_windows_jitter_guard(tmp_path, svar2_fixture, _src):
     jbed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [5], "chromEnd": [20]})
     d = tmp_path / "d.gvl"
     gvl.write(
-        d, jbed, variants=SparseVar2(svar2_fixture), samples=None, max_jitter=2, overwrite=True
+        d,
+        jbed,
+        variants=SparseVar2(svar2_fixture),
+        samples=None,
+        max_jitter=2,
+        overwrite=True,
     )
     ds = gvl.Dataset.open(d, reference=ref).with_output_format("flat")
     with pytest.raises(NotImplementedError, match="right-clip"):
@@ -553,10 +572,8 @@ Expected: FAIL with `NotImplementedError: unphased_union is not supported for sv
 In `Svar2Haps._guard_unsupported`, delete:
 
 ```python
-        if self.unphased_union:
-            raise NotImplementedError(
-                "unphased_union is not supported for svar2 datasets yet."
-            )
+if self.unphased_union:
+    raise NotImplementedError("unphased_union is not supported for svar2 datasets yet.")
 ```
 
 (Haplotypes/annotated + union is still blocked at `with_seqs` in `_impl.py`, so the haplotypes/tracks paths can never reach here with the flag set.)
@@ -636,7 +653,9 @@ def test_svar2_variant_windows_unphased_union(
     _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window")
     # Union row count == sum over haplotypes: compare to the non-union var counts.
     nu = np.asarray(w2.ref_window.var_offsets)
-    w2_diploid = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[:, :]
+    w2_diploid = ds2.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)[
+        :, :
+    ]
     nd = np.asarray(w2_diploid.ref_window.var_offsets)
     P = int(ds2._seqs.genotypes.shape[-2])
     # Folded per-row counts == sum of the P per-hap counts (rows q*P+p are contiguous).
@@ -687,15 +706,25 @@ def test_svar2_variant_windows_union_multicontig(
     d1 = tmp_path / "vwu_mc1.gvl"
     d2 = tmp_path / "vwu_mc2.gvl"
     gvl.write(d1, bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True)
-    gvl.write(d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True)
+    gvl.write(
+        d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True
+    )
     ds1 = gvl.Dataset.open(d1, reference=ref)
     ds2 = gvl.Dataset.open(d2, reference=ref)
-    w1 = (ds1.with_output_format("flat").with_settings(unphased_union=True)
-          .with_seqs("variant-windows", _WIN_OPT)[:, :])
-    w2 = (ds2.with_output_format("flat").with_settings(unphased_union=True)
-          .with_seqs("variant-windows", _WIN_OPT)[:, :])
+    w1 = (
+        ds1.with_output_format("flat")
+        .with_settings(unphased_union=True)
+        .with_seqs("variant-windows", _WIN_OPT)[:, :]
+    )
+    w2 = (
+        ds2.with_output_format("flat")
+        .with_settings(unphased_union=True)
+        .with_seqs("variant-windows", _WIN_OPT)[:, :]
+    )
     assert w2.ref_window.shape[-3] == 1  # window ploidy axis
-    _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window (union, multicontig)")
+    _assert_window_equal(
+        w2.ref_window, w1.ref_window, "ref_window (union, multicontig)"
+    )
     w2.alt_window.to_ragged()
 ```
 

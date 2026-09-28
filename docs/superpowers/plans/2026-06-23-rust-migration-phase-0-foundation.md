@@ -165,9 +165,7 @@ def get(name: str) -> Callable:
     if backend is None:
         backend = entry["default"]  # type: ignore[assignment]
     elif backend not in ("numba", "rust"):
-        raise ValueError(
-            f"GVL_BACKEND must be 'numba' or 'rust', got {backend!r}"
-        )
+        raise ValueError(f"GVL_BACKEND must be 'numba' or 'rust', got {backend!r}")
     return entry[backend]  # type: ignore[return-value]
 
 
@@ -392,9 +390,7 @@ register(
 )
 
 
-def splits_sum_le_value(
-    arr: NDArray[np.number], max_value: float
-) -> NDArray[np.intp]:
+def splits_sum_le_value(arr: NDArray[np.number], max_value: float) -> NDArray[np.intp]:
     """Greedy split offsets for groups summing to no more than ``max_value``.
 
     Dispatches to the numba or Rust backend via :mod:`genvarloader._dispatch`.
@@ -522,7 +518,13 @@ Add a throwaway sanity test, run it, then delete it:
 def test_harness_detects_mismatch():
     import numpy as np
     from genvarloader import _dispatch
-    _dispatch.register("bad", numba=lambda a: np.array([1]), rust=lambda a: np.array([2]), default="numba")
+
+    _dispatch.register(
+        "bad",
+        numba=lambda a: np.array([1]),
+        rust=lambda a: np.array([2]),
+        default="numba",
+    )
     with pytest.raises(AssertionError):
         assert_kernel_parity("bad", np.array([0]))
 ```
@@ -727,8 +729,8 @@ def main() -> None:
     # reuse those exact inputs (see tests/data/generate_1kg_ground_truth.py).
     from tests.data import generate_1kg_ground_truth as g1k
 
-    bcf = g1k.ONE_KG_DIR / "filtered.bcf"   # confirm the actual filename in g1k
-    bed = g1k.ONE_KG_DIR / "regions.bed"    # confirm the actual filename in g1k
+    bcf = g1k.ONE_KG_DIR / "filtered.bcf"  # confirm the actual filename in g1k
+    bed = g1k.ONE_KG_DIR / "regions.bed"  # confirm the actual filename in g1k
     if not bcf.exists():
         raise SystemExit("Run `pixi run -e dev gen-1kg` first to build 1kg inputs.")
 

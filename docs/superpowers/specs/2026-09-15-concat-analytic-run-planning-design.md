@@ -11,8 +11,8 @@ source slot it comes from. Today it does that by materializing the whole mapping
 and then compressing it:
 
 ```python
-prov = provenance(axis, shapes, ploidy, order=order)   # (n_slots, 2) int64
-runs = coalesce(prov)                                  # list[Run]
+prov = provenance(axis, shapes, ploidy, order=order)  # (n_slots, 2) int64
+runs = coalesce(prov)  # list[Run]
 ```
 
 Both intermediates are sized by the `(R, S[, P])` grid, which is exactly the
@@ -98,7 +98,9 @@ re-iterable object in `_concat_plan.py`:
 class RunPlan:
     def __init__(self, axis, shape_per_ds, ploidy, *, order=None): ...
     def __iter__(self) -> Iterator[Run]: ...
-    def slot_batches(self) -> Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]: ...
+    def slot_batches(
+        self,
+    ) -> Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]: ...
     @property
     def n_slots(self) -> int: ...
 ```

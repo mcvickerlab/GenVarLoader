@@ -44,6 +44,7 @@ Deliverable: `ds.to_dataloader(mode="buffered")` works for Config A and Config B
 ```python
 # tests/unit/test_output_bytes_variant_windows.py
 """Byte-accounting must handle variant-windows and variants+flank_tokens."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -57,13 +58,19 @@ def _vw_ds(ref="window", alt="window"):
         .with_seqs(
             "variant-windows",
             gvl.VarWindowOpt(
-                flank_length=3, token_alphabet=b"ACGT", unknown_token=4, ref=ref, alt=alt
+                flank_length=3,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref,
+                alt=alt,
             ),
         )
     )
 
 
-@pytest.mark.parametrize("ref,alt", [("window", "window"), ("window", "allele"), ("allele", "allele")])
+@pytest.mark.parametrize(
+    "ref,alt", [("window", "window"), ("window", "allele"), ("allele", "allele")]
+)
 def test_variant_windows_bytes_positive(ref, alt):
     ds = _vw_ds(ref, alt)
     bpi = ds._output_bytes_per_instance(None, None)
@@ -76,9 +83,14 @@ def test_variant_windows_bytes_positive(ref, alt):
 
 def test_flank_tokens_adds_bytes():
     base = (
-        gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False).with_output_format("flat")
+        gvl.get_dummy_dataset()
+        .with_seqs("variants")
+        .with_tracks(False)
+        .with_output_format("flat")
     )
-    with_flank = base.with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=0)
+    with_flank = base.with_settings(
+        flank_length=3, token_alphabet=b"ACGT", unknown_token=0
+    )
     b0 = base._output_bytes_per_instance(None, None).sum()
     b1 = with_flank._output_bytes_per_instance(None, None).sum()
     assert b1 > b0  # flank tokens are extra payload
@@ -180,6 +192,7 @@ rtk git commit -m "feat(dataloader): byte accounting for variant-windows and var
 ```python
 # tests/unit/test_flat_window_slicing.py
 """Instance-axis slicing of flat window / flank types matches per-item output."""
+
 import numpy as np
 import genvarloader as gvl
 
@@ -199,14 +212,19 @@ def test_flat_variant_windows_slice_matches_per_item():
         .with_output_format("flat")
         .with_seqs(
             "variant-windows",
-            gvl.VarWindowOpt(flank_length=2, token_alphabet=b"ACGT", unknown_token=4,
-                             ref="window", alt="allele"),
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref="window",
+                alt="allele",
+            ),
         )
     )
     r = np.array([0, 0, 1], np.intp)
     s = np.array([0, 1, 0], np.intp)
-    batch = ds[r, s]                      # one _FlatVariantWindows over 3 instances
-    sliced = batch[1:3]                   # instances 1,2
+    batch = ds[r, s]  # one _FlatVariantWindows over 3 instances
+    sliced = batch[1:3]  # instances 1,2
     expected = ds[r[1:3], s[1:3]]
     _win_eq(sliced, expected)
 
@@ -223,7 +241,7 @@ def test_flat_variants_flank_tokens_slice_carries_tokens():
     s = np.array([0, 1, 0], np.intp)
     batch = ds[r, s]
     assert batch.flank_tokens is not None
-    sliced = batch[1:3]                   # must NOT raise, must keep flank_tokens
+    sliced = batch[1:3]  # must NOT raise, must keep flank_tokens
     assert sliced.flank_tokens is not None
     exp = ds[r[1:3], s[1:3]]
     np.testing.assert_array_equal(
@@ -323,7 +341,9 @@ def _iter_mode_none(ds, batch_size):
         yield ds[r[i : i + batch_size], s[i : i + batch_size]]
 
 
-@pytest.mark.parametrize("ref,alt", [("window", "window"), ("window", "allele"), ("allele", "allele")])
+@pytest.mark.parametrize(
+    "ref,alt", [("window", "window"), ("window", "allele"), ("allele", "allele")]
+)
 def test_buffered_variant_windows_matches_per_item(ref, alt):
     ds = (
         gvl.get_dummy_dataset()
@@ -331,12 +351,25 @@ def test_buffered_variant_windows_matches_per_item(ref, alt):
         .with_output_format("flat")
         .with_seqs(
             "variant-windows",
-            gvl.VarWindowOpt(flank_length=2, token_alphabet=b"ACGT", unknown_token=4, ref=ref, alt=alt),
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref,
+                alt=alt,
+            ),
         )
     )
     bs = 2
-    got = list(ds.to_dataloader(mode="buffered", batch_size=bs, shuffle=False,
-                                drop_last=True, buffer_bytes=10 * 1024 * 1024))
+    got = list(
+        ds.to_dataloader(
+            mode="buffered",
+            batch_size=bs,
+            shuffle=False,
+            drop_last=True,
+            buffer_bytes=10 * 1024 * 1024,
+        )
+    )
     exp = list(_iter_mode_none(ds, bs))
     assert len(got) == len(exp)
     for g, e in zip(got, exp):
@@ -345,13 +378,22 @@ def test_buffered_variant_windows_matches_per_item(ref, alt):
 
 def test_buffered_variants_flank_tokens_matches_per_item():
     ds = (
-        gvl.get_dummy_dataset().with_seqs("variants").with_tracks(False)
+        gvl.get_dummy_dataset()
+        .with_seqs("variants")
+        .with_tracks(False)
         .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
         .with_output_format("flat")
     )
     bs = 2
-    got = list(ds.to_dataloader(mode="buffered", batch_size=bs, shuffle=False,
-                                drop_last=True, buffer_bytes=10 * 1024 * 1024))
+    got = list(
+        ds.to_dataloader(
+            mode="buffered",
+            batch_size=bs,
+            shuffle=False,
+            drop_last=True,
+            buffer_bytes=10 * 1024 * 1024,
+        )
+    )
     exp = list(_iter_mode_none(ds, bs))
     assert len(got) == len(exp)
     for g, e in zip(got, exp):
@@ -378,38 +420,45 @@ Expected: FAIL — `ValueError: mode='buffered' does not support 'variant-window
 - [ ] **Step 3b: Narrow both guards** in `_torch.py:get_dataloader` from unconditional to `mode == "double_buffered"` only. Replace the two `if` blocks (`:164-192`):
 
 ```python
-    # 'variant-windows' and flat variants+flank_tokens cannot yet ride the
-    # double_buffered transport (the producer schema / shm format do not carry
-    # the VarWindowOpt or the flank tokens). buffered runs in-process and does.
-    if mode == "double_buffered" and getattr(dataset, "sequence_type", None) == "variant-windows":
-        raise ValueError(
-            "mode='double_buffered' does not support 'variant-windows' output yet: the "
-            "producer schema/shared-memory format cannot carry the VarWindowOpt. Use "
-            "mode='buffered' (in-process) or mode=None."
-        )
+# 'variant-windows' and flat variants+flank_tokens cannot yet ride the
+# double_buffered transport (the producer schema / shm format do not carry
+# the VarWindowOpt or the flank tokens). buffered runs in-process and does.
+if (
+    mode == "double_buffered"
+    and getattr(dataset, "sequence_type", None) == "variant-windows"
+):
+    raise ValueError(
+        "mode='double_buffered' does not support 'variant-windows' output yet: the "
+        "producer schema/shared-memory format cannot carry the VarWindowOpt. Use "
+        "mode='buffered' (in-process) or mode=None."
+    )
+if (
+    mode == "double_buffered"
+    and getattr(dataset, "output_format", "ragged") == "flat"
+    and getattr(dataset, "sequence_type", None) == "variants"
+):
+    _seqs = getattr(dataset, "_seqs", None)
     if (
-        mode == "double_buffered"
-        and getattr(dataset, "output_format", "ragged") == "flat"
-        and getattr(dataset, "sequence_type", None) == "variants"
+        getattr(_seqs, "flank_length", None)
+        and getattr(_seqs, "token_lut", None) is not None
     ):
-        _seqs = getattr(dataset, "_seqs", None)
-        if getattr(_seqs, "flank_length", None) and getattr(_seqs, "token_lut", None) is not None:
-            raise ValueError(
-                "mode='double_buffered' with output_format='flat' does not support variants "
-                "output carrying ride-along flank tokens yet; use mode='buffered' or mode=None."
-            )
+        raise ValueError(
+            "mode='double_buffered' with output_format='flat' does not support variants "
+            "output carrying ride-along flank tokens yet; use mode='buffered' or mode=None."
+        )
 ```
 
 - [ ] **Step 3c: Flip the two buffered rejection tests.** In `tests/unit/test_buffered_loader.py`, change `test_flat_buffered_rejects_variant_windows` and `test_flat_buffered_rejects_variants_flank_tokens` so the `mode="buffered"` parametrization asserts success, and only `mode="double_buffered"` still asserts the `ValueError`. Simplest: change the parametrize to `["double_buffered"]` (buffered no longer rejects) and add a note that PR 2 removes the double_buffered arm. Keep `test_flat_buffered_plain_variants_still_works` unchanged.
 
 ```python
-@pytest.mark.parametrize("mode", ["double_buffered"])  # buffered now supports both (PR1); PR2 drops these
-def test_flat_buffered_rejects_variants_flank_tokens(mode):
-    ...  # body unchanged
+@pytest.mark.parametrize(
+    "mode", ["double_buffered"]
+)  # buffered now supports both (PR1); PR2 drops these
+def test_flat_buffered_rejects_variants_flank_tokens(mode): ...  # body unchanged
+
 
 @pytest.mark.parametrize("mode", ["double_buffered"])
-def test_flat_buffered_rejects_variant_windows(mode):
-    ...  # body unchanged
+def test_flat_buffered_rejects_variant_windows(mode): ...  # body unchanged
 ```
 
 - [ ] **Step 4: Run the buffered suite**
@@ -476,6 +525,7 @@ Deliverable: `ds.to_dataloader(mode="double_buffered")` works for Config A and C
 ```python
 # tests/unit/test_producer_schema.py
 """_apply_schema reconstructs variant-windows and flank configs in the child."""
+
 import genvarloader as gvl
 from genvarloader._producer import _apply_schema
 
@@ -485,8 +535,13 @@ def test_apply_schema_rebuilds_variant_windows():
     schema = {
         "with_seqs": "variant-windows",
         "output_format": "flat",
-        "window_opt": {"flank_length": 3, "token_alphabet": b"ACGT",
-                       "unknown_token": 4, "ref": "window", "alt": "allele"},
+        "window_opt": {
+            "flank_length": 3,
+            "token_alphabet": b"ACGT",
+            "unknown_token": 4,
+            "ref": "window",
+            "alt": "allele",
+        },
     }
     ds = _apply_schema(dummy, schema)
     assert ds.sequence_type == "variant-windows"
@@ -499,7 +554,9 @@ def test_apply_schema_rebuilds_flank_tokens():
     schema = {
         "with_seqs": "variants",
         "output_format": "flat",
-        "flank_length": 2, "token_alphabet": b"ACGT", "unknown_token": 0,
+        "flank_length": 2,
+        "token_alphabet": b"ACGT",
+        "unknown_token": 0,
     }
     ds = _apply_schema(dummy, schema)
     assert ds._seqs.flank_length == 2 and ds._seqs.token_lut is not None
@@ -513,20 +570,22 @@ Expected: FAIL — `with_seqs('variant-windows') requires a VarWindowOpt` (schem
 - [ ] **Step 3a: Emit the config in `_spawn_producer`.** After the existing `if isinstance(seqs, Haps):` block (`_double_buffered_loader.py:208-217`), add:
 
 ```python
-            window_opt = getattr(seqs, "window_opt", None)
-            if window_opt is not None:
-                schema["window_opt"] = {
-                    "flank_length": window_opt.flank_length,
-                    "token_alphabet": window_opt.token_alphabet,
-                    "unknown_token": window_opt.unknown_token,
-                    "ref": window_opt.ref,
-                    "alt": window_opt.alt,
-                }
-            elif getattr(seqs, "flank_length", None) and getattr(seqs, "token_lut", None) is not None:
-                # plain-variants ride-along flank tokens (Config B)
-                schema["flank_length"] = seqs.flank_length
-                schema["token_alphabet"] = seqs.token_alphabet
-                schema["unknown_token"] = seqs.unknown_token
+window_opt = getattr(seqs, "window_opt", None)
+if window_opt is not None:
+    schema["window_opt"] = {
+        "flank_length": window_opt.flank_length,
+        "token_alphabet": window_opt.token_alphabet,
+        "unknown_token": window_opt.unknown_token,
+        "ref": window_opt.ref,
+        "alt": window_opt.alt,
+    }
+elif (
+    getattr(seqs, "flank_length", None) and getattr(seqs, "token_lut", None) is not None
+):
+    # plain-variants ride-along flank tokens (Config B)
+    schema["flank_length"] = seqs.flank_length
+    schema["token_alphabet"] = seqs.token_alphabet
+    schema["unknown_token"] = seqs.unknown_token
 ```
 
 (Verify the attribute names `token_alphabet`/`unknown_token` exist on the `Haps` for the flank path; if the flank config lives under different attribute names, read them from `with_settings`'s stored fields. Test `test_apply_schema_rebuilds_flank_tokens` pins the round-trip.)
@@ -534,18 +593,19 @@ Expected: FAIL — `with_seqs('variant-windows') requires a VarWindowOpt` (schem
 - [ ] **Step 3b: Reconstruct in `_apply_schema`.** Replace the `with_seqs` replay line and extend the settings block:
 
 ```python
-    if schema.get("with_seqs", "UNSET") != "UNSET":
-        if schema.get("window_opt") is not None:
-            from ._dataset._flat_variants import VarWindowOpt
-            ds = ds.with_seqs(schema["with_seqs"], VarWindowOpt(**schema["window_opt"]))
-        else:
-            ds = ds.with_seqs(schema["with_seqs"])
-    ...
-    # inside the settings_kwargs block, add:
-    if schema.get("flank_length") is not None:
-        settings_kwargs["flank_length"] = schema["flank_length"]
-        settings_kwargs["token_alphabet"] = schema["token_alphabet"]
-        settings_kwargs["unknown_token"] = schema["unknown_token"]
+if schema.get("with_seqs", "UNSET") != "UNSET":
+    if schema.get("window_opt") is not None:
+        from ._dataset._flat_variants import VarWindowOpt
+
+        ds = ds.with_seqs(schema["with_seqs"], VarWindowOpt(**schema["window_opt"]))
+    else:
+        ds = ds.with_seqs(schema["with_seqs"])
+...
+# inside the settings_kwargs block, add:
+if schema.get("flank_length") is not None:
+    settings_kwargs["flank_length"] = schema["flank_length"]
+    settings_kwargs["token_alphabet"] = schema["token_alphabet"]
+    settings_kwargs["unknown_token"] = schema["unknown_token"]
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -580,6 +640,7 @@ rtk git commit -m "feat(dataloader): replay VarWindowOpt and flank config in the
 ```python
 # tests/unit/test_shm_variant_windows.py
 """kind=4 round-trip for _FlatVariantWindows over the shm layout."""
+
 import numpy as np
 from genvarloader._shm_layout import write_chunk, read_chunk, HEADER_RESERVED
 from genvarloader._flat import _Flat
@@ -588,12 +649,14 @@ from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindow
 
 def _make_fvw():
     # 2 instances, ploidy 1. start scalar field + ref_window + alt (bare) slots.
-    start = _Flat(np.array([10, 20, 30], np.int32), np.array([0, 2, 3], np.int64), (2, 1, None))
+    start = _Flat(
+        np.array([10, 20, 30], np.int32), np.array([0, 2, 3], np.int64), (2, 1, None)
+    )
     # ref_window: b*p=2 rows; var_offsets len 3; per-variant token runs via seq_offsets.
     rw = _FlatWindow(
         data=np.array([1, 2, 3, 4, 1, 2], np.uint8),
-        seq_offsets=np.array([0, 3, 4, 6], np.int64),   # 3 variants
-        var_offsets=np.array([0, 2, 3], np.int64),       # 2 rows -> 2,1 variants
+        seq_offsets=np.array([0, 3, 4, 6], np.int64),  # 3 variants
+        var_offsets=np.array([0, 2, 3], np.int64),  # 2 rows -> 2,1 variants
         shape=(2, 1, None, None),
     )
     al = _FlatWindow(
@@ -647,51 +710,79 @@ def _write_flat_variant_windows(buf: memoryview, fvw, cursor: int) -> tuple[dict
         outer = np.ascontiguousarray(var_off, np.int64)
         inner = np.ascontiguousarray(seq_off, np.int64)
         leaf = np.ascontiguousarray(data)
-        cursor = _align(cursor); outer_off = cursor
+        cursor = _align(cursor)
+        outer_off = cursor
         np.frombuffer(buf, np.int64, outer.size, outer_off)[...] = outer
         cursor += outer.nbytes
-        cursor = _align(cursor); inner_off = cursor
+        cursor = _align(cursor)
+        inner_off = cursor
         np.frombuffer(buf, np.int64, inner.size, inner_off)[...] = inner
         cursor += inner.nbytes
-        cursor = _align(cursor); data_off = cursor
+        cursor = _align(cursor)
+        data_off = cursor
         np.frombuffer(buf, leaf.dtype, leaf.size, data_off)[...] = leaf.ravel()
         cursor += leaf.nbytes
-        field_descs.append({
-            "field_kind": 1, "dtype_str": _dtype_to_bytes(leaf.dtype),
-            "outer_offsets_offset": outer_off, "outer_offsets_nbytes": outer.nbytes,
-            "inner_offsets_offset": inner_off, "inner_offsets_nbytes": inner.nbytes,
-            "data_offset": data_off, "data_nbytes": leaf.nbytes,
-            "regular_size": regular_size, "name": name.encode("utf-8"),
-        })
+        field_descs.append(
+            {
+                "field_kind": 1,
+                "dtype_str": _dtype_to_bytes(leaf.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer.nbytes,
+                "inner_offsets_offset": inner_off,
+                "inner_offsets_nbytes": inner.nbytes,
+                "data_offset": data_off,
+                "data_nbytes": leaf.nbytes,
+                "regular_size": regular_size,
+                "name": name.encode("utf-8"),
+            }
+        )
 
     # scalar .fields first (numeric, field_kind=0) — mirror _write_flat_variants
     for name, f in fvw.fields.items():
         outer = np.ascontiguousarray(f.offsets, np.int64)
         leaf = np.ascontiguousarray(f.data)
-        cursor = _align(cursor); outer_off = cursor
+        cursor = _align(cursor)
+        outer_off = cursor
         np.frombuffer(buf, np.int64, outer.size, outer_off)[...] = outer
         cursor += outer.nbytes
-        cursor = _align(cursor); data_off = cursor
+        cursor = _align(cursor)
+        data_off = cursor
         np.frombuffer(buf, leaf.dtype, leaf.size, data_off)[...] = leaf.ravel()
         cursor += leaf.nbytes
-        field_descs.append({
-            "field_kind": 0, "dtype_str": _dtype_to_bytes(leaf.dtype),
-            "outer_offsets_offset": outer_off, "outer_offsets_nbytes": outer.nbytes,
-            "inner_offsets_offset": 0, "inner_offsets_nbytes": 0,
-            "data_offset": data_off, "data_nbytes": leaf.nbytes,
-            "regular_size": _flat_ploidy(f.shape), "name": name.encode("utf-8"),
-        })
+        field_descs.append(
+            {
+                "field_kind": 0,
+                "dtype_str": _dtype_to_bytes(leaf.dtype),
+                "outer_offsets_offset": outer_off,
+                "outer_offsets_nbytes": outer.nbytes,
+                "inner_offsets_offset": 0,
+                "inner_offsets_nbytes": 0,
+                "data_offset": data_off,
+                "data_nbytes": leaf.nbytes,
+                "regular_size": _flat_ploidy(f.shape),
+                "name": name.encode("utf-8"),
+            }
+        )
 
     # present window slots (two-level, field_kind=1)
     for slot in _WINDOW_FIELD_NAMES:
         w = getattr(fvw, slot)
         if w is not None:
-            _emit_two_level(slot, w.data, w.seq_offsets, w.var_offsets, _flat_ploidy(w.shape))
+            _emit_two_level(
+                slot, w.data, w.seq_offsets, w.var_offsets, _flat_ploidy(w.shape)
+            )
 
     return {
-        "kind": 4, "dtype_str": b"\x00" * 4, "shape": [len(field_descs)],
-        "data_offset": 0, "data_nbytes": 0, "offsets_offset": 0, "offsets_nbytes": 0,
-        "inner_offsets_offset": 0, "inner_offsets_nbytes": 0, "name": b"",
+        "kind": 4,
+        "dtype_str": b"\x00" * 4,
+        "shape": [len(field_descs)],
+        "data_offset": 0,
+        "data_nbytes": 0,
+        "offsets_offset": 0,
+        "offsets_nbytes": 0,
+        "inner_offsets_offset": 0,
+        "inner_offsets_nbytes": 0,
+        "name": b"",
         "_field_descs": field_descs,
     }, cursor
 ```
@@ -703,7 +794,11 @@ def _write_flat_variant_windows(buf: memoryview, fvw, cursor: int) -> tuple[dict
 ```python
 def _read_flat_variant_windows(buf: memoryview, d: dict, copy: bool = True):
     from ._flat import _Flat
-    from ._dataset._flat_variants import _FlatWindow, _FlatVariantWindows, _WINDOW_FIELD_NAMES
+    from ._dataset._flat_variants import (
+        _FlatWindow,
+        _FlatVariantWindows,
+        _WINDOW_FIELD_NAMES,
+    )
 
     fields: dict = {}
     windows: dict = {}
@@ -713,7 +808,9 @@ def _read_flat_variant_windows(buf: memoryview, d: dict, copy: bool = True):
         rs = fd["regular_size"]
         n_outer = fd["outer_offsets_nbytes"] // 8
         var_off = np.frombuffer(buf, np.int64, n_outer, fd["outer_offsets_offset"])
-        leaf = np.frombuffer(buf, leaf_dtype, fd["data_nbytes"] // leaf_dtype.itemsize, fd["data_offset"])
+        leaf = np.frombuffer(
+            buf, leaf_dtype, fd["data_nbytes"] // leaf_dtype.itemsize, fd["data_offset"]
+        )
         if copy:
             var_off, leaf = var_off.copy(), leaf.copy()
         n_bp = len(var_off) - 1
@@ -767,6 +864,7 @@ rtk git commit -m "feat(dataloader): shm kind=4 serialization for _FlatVariantWi
 ```python
 # tests/unit/test_shm_flank_tokens.py
 """kind=2 flank_tokens round-trip over the shm layout."""
+
 import numpy as np
 from genvarloader._shm_layout import write_chunk, read_chunk, HEADER_RESERVED
 from genvarloader._flat import _Flat
@@ -775,10 +873,12 @@ from genvarloader._dataset._flat_variants import _FlatVariants
 
 def test_kind2_flank_tokens_roundtrip():
     # 2 instances, ploidy 1, 2L=4. start scalar + flank_tokens (b,p,None,2L).
-    start = _Flat(np.array([1, 2, 3], np.int32), np.array([0, 2, 3], np.int64), (2, 1, None))
+    start = _Flat(
+        np.array([1, 2, 3], np.int32), np.array([0, 2, 3], np.int64), (2, 1, None)
+    )
     ft = _Flat(
-        np.arange(3 * 4, dtype=np.uint8),               # 3 variants * 2L(=4) tokens
-        np.array([0, 4, 8, 12], np.int64),              # n_rows = b*p*2L? verify vs builder
+        np.arange(3 * 4, dtype=np.uint8),  # 3 variants * 2L(=4) tokens
+        np.array([0, 4, 8, 12], np.int64),  # n_rows = b*p*2L? verify vs builder
         (2, 1, None, 4),
     )
     fv = _FlatVariants({"start": start})
@@ -789,8 +889,12 @@ def test_kind2_flank_tokens_roundtrip():
     out = views[0]
     assert out.flank_tokens is not None
     assert out.flank_tokens.shape == (2, 1, None, 4)
-    np.testing.assert_array_equal(np.asarray(out.flank_tokens.data), np.asarray(ft.data))
-    np.testing.assert_array_equal(np.asarray(out.flank_tokens.offsets), np.asarray(ft.offsets))
+    np.testing.assert_array_equal(
+        np.asarray(out.flank_tokens.data), np.asarray(ft.data)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(out.flank_tokens.offsets), np.asarray(ft.offsets)
+    )
 ```
 
 (If the real `flank_tokens.offsets` length differs from this synthetic one, adjust the fixture to match a `_FlatVariants` produced by `ds[r,s]` on a dummy variants+flank dataset — the round-trip must equal whatever the constructor produces; the shape/offset preservation is what matters.)
@@ -803,24 +907,29 @@ Expected: FAIL — `out.flank_tokens is None` (dropped by the current kind=2 wri
 - [ ] **Step 3a: Writers.** In `_write_flat_variants`, after the field loop and before the `return`, serialize flank_tokens if present and attach a `_flank` descriptor; else `_flank=None`:
 
 ```python
-    flank = None
-    if fv.flank_tokens is not None:
-        ft = fv.flank_tokens
-        data = np.ascontiguousarray(ft.data)
-        off = np.ascontiguousarray(ft.offsets, np.int64)
-        cursor = _align(cursor); data_off = cursor
-        np.frombuffer(buf, data.dtype, data.size, data_off)[...] = data.ravel()
-        cursor += data.nbytes
-        cursor = _align(cursor); off_off = cursor
-        np.frombuffer(buf, np.int64, off.size, off_off)[...] = off
-        cursor += off.nbytes
-        flank = {
-            "shape": list(ft.shape), "dtype_str": _dtype_to_bytes(data.dtype),
-            "data_offset": data_off, "data_nbytes": data.nbytes,
-            "offsets_offset": off_off, "offsets_nbytes": off.nbytes,
-        }
-    # add to the returned dict:
-    #   "_flank": flank,
+flank = None
+if fv.flank_tokens is not None:
+    ft = fv.flank_tokens
+    data = np.ascontiguousarray(ft.data)
+    off = np.ascontiguousarray(ft.offsets, np.int64)
+    cursor = _align(cursor)
+    data_off = cursor
+    np.frombuffer(buf, data.dtype, data.size, data_off)[...] = data.ravel()
+    cursor += data.nbytes
+    cursor = _align(cursor)
+    off_off = cursor
+    np.frombuffer(buf, np.int64, off.size, off_off)[...] = off
+    cursor += off.nbytes
+    flank = {
+        "shape": list(ft.shape),
+        "dtype_str": _dtype_to_bytes(data.dtype),
+        "data_offset": data_off,
+        "data_nbytes": data.nbytes,
+        "offsets_offset": off_off,
+        "offsets_nbytes": off.nbytes,
+    }
+# add to the returned dict:
+#   "_flank": flank,
 ```
 
 In `_write_rag_variants`'s returned dict add `"_flank": None`.
@@ -828,14 +937,20 @@ In `_write_rag_variants`'s returned dict add `"_flank": None`.
 - [ ] **Step 3b: pack/unpack.** In `_pack_descriptor`'s `if kind == 2:` block, after the field loop, append:
 
 ```python
-        flank = d.get("_flank")
-        out += struct.pack("<B", 1 if flank else 0)
-        if flank:
-            out += struct.pack("<B", len(flank["shape"]))
-            for dim in flank["shape"]:
-                out += struct.pack("<Q", (2**64 - 1) if dim is None else int(dim))
-            out += struct.pack("<4s4Q", flank["dtype_str"], flank["data_offset"],
-                               flank["data_nbytes"], flank["offsets_offset"], flank["offsets_nbytes"])
+flank = d.get("_flank")
+out += struct.pack("<B", 1 if flank else 0)
+if flank:
+    out += struct.pack("<B", len(flank["shape"]))
+    for dim in flank["shape"]:
+        out += struct.pack("<Q", (2**64 - 1) if dim is None else int(dim))
+    out += struct.pack(
+        "<4s4Q",
+        flank["dtype_str"],
+        flank["data_offset"],
+        flank["data_nbytes"],
+        flank["offsets_offset"],
+        flank["offsets_nbytes"],
+    )
 ```
 
 In `_unpack_one_descriptor`'s `if kind == 2:` block, after the field loop, append the symmetric read (advancing `cursor` identically), storing `d["_flank"]` (mapping `2**64-1 → None` in the shape).
@@ -843,16 +958,23 @@ In `_unpack_one_descriptor`'s `if kind == 2:` block, after the field loop, appen
 - [ ] **Step 3c: Reader.** In `_read_flat_variants`, before `return _FlatVariants(fields)`:
 
 ```python
-    fv = _FlatVariants(fields)
-    flank = d.get("_flank")
-    if flank:
-        leaf_dtype = _dtype_from_bytes(flank["dtype_str"])
-        data = np.frombuffer(buf, leaf_dtype, flank["data_nbytes"] // leaf_dtype.itemsize, flank["data_offset"])
-        off = np.frombuffer(buf, np.int64, flank["offsets_nbytes"] // 8, flank["offsets_offset"])
-        if copy:
-            data, off = data.copy(), off.copy()
-        fv.flank_tokens = _Flat(data, off, tuple(flank["shape"]))
-    return fv
+fv = _FlatVariants(fields)
+flank = d.get("_flank")
+if flank:
+    leaf_dtype = _dtype_from_bytes(flank["dtype_str"])
+    data = np.frombuffer(
+        buf,
+        leaf_dtype,
+        flank["data_nbytes"] // leaf_dtype.itemsize,
+        flank["data_offset"],
+    )
+    off = np.frombuffer(
+        buf, np.int64, flank["offsets_nbytes"] // 8, flank["offsets_offset"]
+    )
+    if copy:
+        data, off = data.copy(), off.copy()
+    fv.flank_tokens = _Flat(data, off, tuple(flank["shape"]))
+return fv
 ```
 
 (`_read_rag_variants` ignores `_flank`; `has_flank` is always 0 for RaggedVariants.)
@@ -891,9 +1013,15 @@ def test_reshape_ragged_for_chunk_passes_variant_windows():
     from genvarloader._dataset._flat_variants import _FlatWindow, _FlatVariantWindows
     from genvarloader._double_buffered_loader import _reshape_ragged_for_chunk
 
-    start = _Flat(np.array([1, 2], np.int32), np.array([0, 1, 2], np.int64), (2, 1, None))
-    rw = _FlatWindow(np.arange(4, dtype=np.uint8), np.array([0, 2, 4], np.int64),
-                     np.array([0, 1, 2], np.int64), (2, 1, None, None))
+    start = _Flat(
+        np.array([1, 2], np.int32), np.array([0, 1, 2], np.int64), (2, 1, None)
+    )
+    rw = _FlatWindow(
+        np.arange(4, dtype=np.uint8),
+        np.array([0, 2, 4], np.int64),
+        np.array([0, 1, 2], np.int64),
+        (2, 1, None, None),
+    )
     fvw = _FlatVariantWindows({"start": start}, ref_window=rw)
     out = _reshape_ragged_for_chunk([fvw], n_instances=2)[0]
     assert isinstance(out, _FlatVariantWindows)
@@ -908,14 +1036,15 @@ Expected: FAIL if `_reshape_one` mangles `_FlatVariantWindows` (it falls through
 - [ ] **Step 3: Add a `_FlatVariantWindows` passthrough** in `_reshape_ragged_for_chunk`'s per-array loop (before the generic branches), since the shm reader already produced correct `(b, rs, None, None)` shapes:
 
 ```python
-    from ._dataset._flat_variants import _FlatVariantWindows
-    ...
-    for arr in views:
-        if isinstance(arr, _FlatVariantWindows):
-            result.append(arr)          # ploidy axis already correct from the reader
-            continue
-        if isinstance(arr, RaggedAnnotatedHaps):
-            ...
+from ._dataset._flat_variants import _FlatVariantWindows
+
+...
+for arr in views:
+    if isinstance(arr, _FlatVariantWindows):
+        result.append(arr)  # ploidy axis already correct from the reader
+        continue
+    if isinstance(arr, RaggedAnnotatedHaps):
+        ...
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -950,12 +1079,22 @@ rtk git commit -m "feat(dataloader): pass _FlatVariantWindows through the double
 @pytest.mark.parametrize("ref,alt", [("window", "window"), ("window", "allele")])
 def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, alt):
     ds = (
-        file_backed_ds.with_tracks(False).with_output_format("flat")
-        .with_seqs("variant-windows",
-                   gvl.VarWindowOpt(flank_length=2, token_alphabet=b"ACGT", unknown_token=4,
-                                    ref=ref, alt=alt))
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(
+                flank_length=2,
+                token_alphabet=b"ACGT",
+                unknown_token=4,
+                ref=ref,
+                alt=alt,
+            ),
+        )
     )
-    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
     buf = list(ds.to_dataloader(mode="buffered", **common))
     db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
     assert len(db) == len(buf)
@@ -969,11 +1108,14 @@ def test_double_buffered_variant_windows_matches_buffered(file_backed_ds, ref, a
 @pytest.mark.slow
 def test_double_buffered_variants_flank_tokens_matches_buffered(file_backed_ds):
     ds = (
-        file_backed_ds.with_seqs("variants").with_tracks(False)
+        file_backed_ds.with_seqs("variants")
+        .with_tracks(False)
         .with_settings(flank_length=2, token_alphabet=b"ACGT", unknown_token=0)
         .with_output_format("flat")
     )
-    common = dict(batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024)
+    common = dict(
+        batch_size=2, shuffle=False, drop_last=True, buffer_bytes=4 * 1024 * 1024
+    )
     buf = list(ds.to_dataloader(mode="buffered", **common))
     db = list(ds.to_dataloader(mode="double_buffered", copy=True, **common))
     assert len(db) == len(buf)
@@ -1022,9 +1164,12 @@ rtk git commit -m "feat(dataloader): support variant-windows and flank tokens in
 @pytest.mark.slow
 def test_double_buffered_variant_windows_slot_fits(file_backed_ds):
     ds = (
-        file_backed_ds.with_tracks(False).with_output_format("flat")
-        .with_seqs("variant-windows",
-                   gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4))
+        file_backed_ds.with_tracks(False)
+        .with_output_format("flat")
+        .with_seqs(
+            "variant-windows",
+            gvl.VarWindowOpt(flank_length=4, token_alphabet=b"ACGT", unknown_token=4),
+        )
     )
     common = dict(batch_size=4, shuffle=False, drop_last=True, buffer_bytes=1 << 20)
     # Must not raise ProducerError (buffer too small) — byte accounting must not undersize.

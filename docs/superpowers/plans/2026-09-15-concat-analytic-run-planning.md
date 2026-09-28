@@ -219,9 +219,7 @@ class RunPlan:
         self.shape_per_ds = [(int(r), int(s)) for r, s in shape_per_ds]
         n_ds = len(self.shape_per_ds)
         if order is None:
-            counts = [
-                r if axis == "regions" else s for r, s in self.shape_per_ds
-            ]
+            counts = [r if axis == "regions" else s for r, s in self.shape_per_ds]
             self.order = _default_order(n_ds, counts)
         else:
             self.order = np.asarray(order, dtype=np.int64).reshape(-1, 2)
@@ -448,57 +446,58 @@ avoid. The samples axis is naturally bounded at `n_merged * ploidy` instead.
 Add to `RunPlan`:
 
 ```python
-    @property
-    def n_slots(self) -> int:
-        """Total merged flat slots this plan covers, computed arithmetically."""
-        if not self.shape_per_ds:
-            return 0
-        if self.axis == "regions":
-            return len(self.order) * self.shape_per_ds[0][1] * self.ploidy
-        return self.shape_per_ds[0][0] * len(self.order) * self.ploidy
+@property
+def n_slots(self) -> int:
+    """Total merged flat slots this plan covers, computed arithmetically."""
+    if not self.shape_per_ds:
+        return 0
+    if self.axis == "regions":
+        return len(self.order) * self.shape_per_ds[0][1] * self.ploidy
+    return self.shape_per_ds[0][0] * len(self.order) * self.ploidy
 
-    def slot_batches(
-        self,
-    ) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
-        """Yield ``(dst_start, src_ds, src_slots)`` batches in destination order.
 
-        Each batch describes a destination-contiguous span: ``src_ds[i]`` and
-        ``src_slots[i]`` are the origin of merged slot ``dst_start + i``.
-        Concatenating every batch in order rebuilds :func:`provenance`'s output
-        exactly, which is what pins this method.
+def slot_batches(
+    self,
+) -> "Iterator[tuple[int, NDArray[np.int64], NDArray[np.int64]]]":
+    """Yield ``(dst_start, src_ds, src_slots)`` batches in destination order.
 
-        Yields:
-            ``(dst_start, src_ds, src_slots)``, where the two arrays are int64
-            and equal in length.
-        """
-        if self.axis == "regions":
-            for run in self:
-                pos, dst = run.src_start, run.dst_start
-                while pos < run.src_stop:
-                    n = min(_SLOT_BATCH_SLOTS, run.src_stop - pos)
-                    yield (
-                        dst,
-                        np.full(n, run.src, np.int64),
-                        np.arange(pos, pos + n, dtype=np.int64),
-                    )
-                    pos += n
-                    dst += n
-            return
+    Each batch describes a destination-contiguous span: ``src_ds[i]`` and
+    ``src_slots[i]`` are the origin of merged slot ``dst_start + i``.
+    Concatenating every batch in order rebuilds :func:`provenance`'s output
+    exactly, which is what pins this method.
 
-        n_regions = self.shape_per_ds[0][0] if self.shape_per_ds else 0
-        n_merged = len(self.order)
-        if n_regions == 0 or n_merged == 0 or self.ploidy == 0:
-            return
-        per_ds_samples = np.asarray([s for _, s in self.shape_per_ds], np.int64)
-        ds, w = self.order[:, 0], self.order[:, 1]
-        s_d = per_ds_samples[ds]
-        p = np.arange(self.ploidy, dtype=np.int64)
-        # `order` is per merged SAMPLE; each contributes `ploidy` adjacent slots.
-        ds_vec = np.repeat(ds, self.ploidy)
-        for r in range(n_regions):
-            base = (r * s_d + w) * self.ploidy
-            slots = (base[:, None] + p[None, :]).reshape(-1)
-            yield (r * n_merged * self.ploidy, ds_vec, slots)
+    Yields:
+        ``(dst_start, src_ds, src_slots)``, where the two arrays are int64
+        and equal in length.
+    """
+    if self.axis == "regions":
+        for run in self:
+            pos, dst = run.src_start, run.dst_start
+            while pos < run.src_stop:
+                n = min(_SLOT_BATCH_SLOTS, run.src_stop - pos)
+                yield (
+                    dst,
+                    np.full(n, run.src, np.int64),
+                    np.arange(pos, pos + n, dtype=np.int64),
+                )
+                pos += n
+                dst += n
+        return
+
+    n_regions = self.shape_per_ds[0][0] if self.shape_per_ds else 0
+    n_merged = len(self.order)
+    if n_regions == 0 or n_merged == 0 or self.ploidy == 0:
+        return
+    per_ds_samples = np.asarray([s for _, s in self.shape_per_ds], np.int64)
+    ds, w = self.order[:, 0], self.order[:, 1]
+    s_d = per_ds_samples[ds]
+    p = np.arange(self.ploidy, dtype=np.int64)
+    # `order` is per merged SAMPLE; each contributes `ploidy` adjacent slots.
+    ds_vec = np.repeat(ds, self.ploidy)
+    for r in range(n_regions):
+        base = (r * s_d + w) * self.ploidy
+        slots = (base[:, None] + p[None, :]).reshape(-1)
+        yield (r * n_merged * self.ploidy, ds_vec, slots)
 ```
 
 Then append the adapter and the normalizer:
@@ -538,7 +537,9 @@ class ExplicitRunPlan:
             )
 
 
-def as_plan(runs: "RunPlan | ExplicitRunPlan | Sequence[Run]") -> "RunPlan | ExplicitRunPlan":
+def as_plan(
+    runs: "RunPlan | ExplicitRunPlan | Sequence[Run]",
+) -> "RunPlan | ExplicitRunPlan":
     """Normalize a run source so the IO layer has one consuming path.
 
     Args:
@@ -837,9 +838,7 @@ def test_gather_svar_offsets_from_a_run_plan_is_byte_identical(tmp_path):
     out_plan.mkdir()
     out_list.mkdir()
 
-    _gather_svar_offsets(
-        paths, out_plan, RunPlan(axis, shapes, ploidy), shapes, ploidy
-    )
+    _gather_svar_offsets(paths, out_plan, RunPlan(axis, shapes, ploidy), shapes, ploidy)
     _gather_svar_offsets(
         paths,
         out_list,
@@ -915,18 +914,14 @@ Keep `t_runs` hoisted above `for name in ref.tracks:` — it is built once regar
 Replace
 
 ```python
-                    a_prov = provenance(
-                        "regions", [(r, 1) for r, _ in shapes], 1, order=order
-                    )
-                    a_runs = coalesce(a_prov)
+a_prov = provenance("regions", [(r, 1) for r, _ in shapes], 1, order=order)
+a_runs = coalesce(a_prov)
 ```
 
 with
 
 ```python
-                    a_runs = RunPlan(
-                        "regions", [(r, 1) for r, _ in shapes], 1, order=order
-                    )
+a_runs = RunPlan("regions", [(r, 1) for r, _ in shapes], 1, order=order)
 ```
 
 - [ ] **Step 7: Correct the two comments this change makes false**
@@ -1138,8 +1133,15 @@ def _build_svar2(vcf_text: str, samples: list[str], d: Path, name: str) -> Path:
 
     out = d / name
     _core.run_conversion_pipeline(
-        str(bcf), str(ref), ["chr1"], str(out), samples,
-        25_000, 2, 1, 8 * 1024 * 1024,
+        str(bcf),
+        str(ref),
+        ["chr1"],
+        str(out),
+        samples,
+        25_000,
+        2,
+        1,
+        8 * 1024 * 1024,
     )
     assert (out / "meta.json").exists(), "conversion did not finish"
     return out
@@ -1256,75 +1258,77 @@ Expected: FAIL — at minimum `test_fixture_has_empty_cells`, which pins the old
 Replace the body of the fixture guard at `tests/dataset/test_write_svar2.py:624-690` (the test asserting `sorted_samples == ["S0", "S1", "S2"]`, reshaping `nonempty` to `(3, S, P)`, and pinning `grid[0, S0, 0]`) with:
 
 ```python
-    svar2 = SparseVar2(svar2_store)
-    sorted_samples = sorted(svar2.available_samples)
-    assert sorted_samples == ["S0", "S1", "S2"], "fixture lost its third sample"
+svar2 = SparseVar2(svar2_store)
+sorted_samples = sorted(svar2.available_samples)
+assert sorted_samples == ["S0", "S1", "S2"], "fixture lost its third sample"
 
-    d = svar2._find_ranges(
-        "chr1",
-        np.array([0, 5, 25]),
-        np.array([20, 15, 40]),
-        samples=sorted_samples,
-    )
-    snp = np.asarray(d["vk_snp_range"], np.int64)  # (R*S*P, 2)
-    indel = np.asarray(d["vk_indel_range"], np.int64)
-    w_snp = (snp[:, 1] - snp[:, 0]).reshape(3, len(sorted_samples), svar2.ploidy)
-    w_indel = (indel[:, 1] - indel[:, 0]).reshape(w_snp.shape)
-    occ = (w_snp > 0) | (w_indel > 0)
+d = svar2._find_ranges(
+    "chr1",
+    np.array([0, 5, 25]),
+    np.array([20, 15, 40]),
+    samples=sorted_samples,
+)
+snp = np.asarray(d["vk_snp_range"], np.int64)  # (R*S*P, 2)
+indel = np.asarray(d["vk_indel_range"], np.int64)
+w_snp = (snp[:, 1] - snp[:, 0]).reshape(3, len(sorted_samples), svar2.ploidy)
+w_indel = (indel[:, 1] - indel[:, 0]).reshape(w_snp.shape)
+occ = (w_snp > 0) | (w_indel > 0)
 
-    s0, s1, s2 = (sorted_samples.index(s) for s in ("S0", "S1", "S2"))
+s0, s1, s2 = (sorted_samples.index(s) for s in ("S0", "S1", "S2"))
 
-    # Row-major (R, S, P) -- pinned by the layout oracle in
-    # test_write_svar2_emits_cache, which asserts this same reshape against the
-    # cache memmaps. Assert each structure SEPARATELY: a single `not occ.all()`
-    # is a disjunction that stays green when any one of them regresses alone.
-    assert not occ[:, s2].any(), "S2 is no longer all-reference; the empty COLUMN is gone"
-    assert not occ[2].any(), "region [25, 40) now holds sparse variants; the empty ROW is gone"
+# Row-major (R, S, P) -- pinned by the layout oracle in
+# test_write_svar2_emits_cache, which asserts this same reshape against the
+# cache memmaps. Assert each structure SEPARATELY: a single `not occ.all()`
+# is a disjunction that stays green when any one of them regresses alone.
+assert not occ[:, s2].any(), "S2 is no longer all-reference; the empty COLUMN is gone"
+assert not occ[2].any(), (
+    "region [25, 40) now holds sparse variants; the empty ROW is gone"
+)
 
-    # The measured grid. Every sparse variant carries exactly one call, which is
-    # what keeps genoray's cost model from routing it to the per-region dense
-    # channel; if a cost-model change pushes any of them dense this fails loudly
-    # rather than letting the sparse/dense parity tests pass against a thinner
-    # table while appearing green.
-    expected = np.zeros_like(occ)
-    expected[0, s0] = [True, True]
-    expected[0, s1] = [True, True]
-    expected[1, s0] = [False, True]
-    expected[1, s1] = [True, True]
-    np.testing.assert_array_equal(occ, expected)
-    assert int(occ.sum()) == 7, "fixture occupancy changed; update this pin deliberately"
+# The measured grid. Every sparse variant carries exactly one call, which is
+# what keeps genoray's cost model from routing it to the per-region dense
+# channel; if a cost-model change pushes any of them dense this fails loudly
+# rather than letting the sparse/dense parity tests pass against a thinner
+# table while appearing green.
+expected = np.zeros_like(occ)
+expected[0, s0] = [True, True]
+expected[0, s1] = [True, True]
+expected[1, s0] = [False, True]
+expected[1, s1] = [True, True]
+np.testing.assert_array_equal(occ, expected)
+assert int(occ.sum()) == 7, "fixture occupancy changed; update this pin deliberately"
 
-    # Non-vacuity, kept from the original guard: an all-empty vk grid would make
-    # every sparse/dense parity test built on this fixture pass trivially.
-    assert occ.any(), (
-        "vk channel is entirely empty: genoray routed every variant to the "
-        "dense channel, so all sparse-cache parity tests on this fixture are "
-        "now vacuous"
-    )
+# Non-vacuity, kept from the original guard: an all-empty vk grid would make
+# every sparse/dense parity test built on this fixture pass trivially.
+assert occ.any(), (
+    "vk channel is entirely empty: genoray routed every variant to the "
+    "dense channel, so all sparse-cache parity tests on this fixture are "
+    "now vacuous"
+)
 
-    # Mixed per-channel emptiness inside a PRESENT cell -- the property the old
-    # one-cell grid could not express, and the reason two shipped oracles were
-    # able to mask per channel without failing.
-    assert (w_snp[0, s0, 0] > 0) and (w_indel[0, s0, 0] == 0)
-    assert (w_snp[0, s0, 1] > 0) and (w_indel[0, s0, 1] > 0)
-    assert (w_snp[0, s1, 0] == 0) and (w_indel[0, s1, 0] > 0)
+# Mixed per-channel emptiness inside a PRESENT cell -- the property the old
+# one-cell grid could not express, and the reason two shipped oracles were
+# able to mask per channel without failing.
+assert (w_snp[0, s0, 0] > 0) and (w_indel[0, s0, 0] == 0)
+assert (w_snp[0, s0, 1] > 0) and (w_indel[0, s0, 1] > 0)
+assert (w_snp[0, s1, 0] == 0) and (w_indel[0, s1, 0] > 0)
 
-    # An ABSENT cell inside a non-empty region: region 1 holds variants, but
-    # (S0, ploid 0) has none, so lookup must return (0, 0) there rather than a
-    # neighbour's range.
-    assert not occ[1, s0, 0]
+# An ABSENT cell inside a non-empty region: region 1 holds variants, but
+# (S0, ploid 0) has none, so lookup must return (0, 0) there rather than a
+# neighbour's range.
+assert not occ[1, s0, 0]
 
-    # The sample axis is now ORDERED, not just occupied: S0 and S1 differ at
-    # (region 1, ploid 0), so a transposed sample axis is detectable. During
-    # #357 this guard had to be withdrawn as unsatisfiable.
-    assert not np.array_equal(occ[:, s0], occ[:, s1])
+# The sample axis is now ORDERED, not just occupied: S0 and S1 differ at
+# (region 1, ploid 0), so a transposed sample axis is detectable. During
+# #357 this guard had to be withdrawn as unsatisfiable.
+assert not np.array_equal(occ[:, s0], occ[:, s1])
 
-    # Both dense channels are exercised. dense_snp_range was all zeros before
-    # this fixture was enriched, so the dense SNP path had no coverage here.
-    dense_snp = np.asarray(d["dense_snp_range"], np.int64)
-    dense_indel = np.asarray(d["dense_indel_range"], np.int64)
-    assert (dense_snp[:, 1] > dense_snp[:, 0]).any(), "dense SNP channel is empty again"
-    assert (dense_indel[:, 1] > dense_indel[:, 0]).any(), "dense indel channel is empty"
+# Both dense channels are exercised. dense_snp_range was all zeros before
+# this fixture was enriched, so the dense SNP path had no coverage here.
+dense_snp = np.asarray(d["dense_snp_range"], np.int64)
+dense_indel = np.asarray(d["dense_indel_range"], np.int64)
+assert (dense_snp[:, 1] > dense_snp[:, 0]).any(), "dense SNP channel is empty again"
+assert (dense_indel[:, 1] > dense_indel[:, 0]).any(), "dense indel channel is empty"
 ```
 
 Rename the test to `test_fixture_grid_is_non_degenerate` and update its docstring to describe the 7-of-18 grid. Keep the module's existing import style (`from genoray import SparseVar2` inside the test, as the current version does).

@@ -1099,8 +1099,15 @@ def _assemble_variant_buffers_numba(
             out["ref"] = (rw.data, rw.seq_offsets)
         if alt_mode == 1:
             aw = compute_alt_window(
-                ref_shim, v_contigs, starts_v, ilens_v, alt_data, alt_seq_off,
-                flank_len, lut_arr, row_offsets,
+                ref_shim,
+                v_contigs,
+                starts_v,
+                ilens_v,
+                alt_data,
+                alt_seq_off,
+                flank_len,
+                lut_arr,
+                row_offsets,
             )
             out["alt_window"] = (aw.data, aw.seq_offsets)
         elif alt_mode == 2:
@@ -1157,7 +1164,9 @@ def _assemble_variant_buffers_rust(
         np.ascontiguousarray(alt_global, np.uint8),
         np.ascontiguousarray(alt_off_global, np.int64),
         None if ref_global is None else np.ascontiguousarray(ref_global, np.uint8),
-        None if ref_off_global is None else np.ascontiguousarray(ref_off_global, np.int64),
+        None
+        if ref_off_global is None
+        else np.ascontiguousarray(ref_off_global, np.int64),
         bool(want_ref_bytes),
         bool(want_flank),
         int(ref_mode),
@@ -1213,8 +1222,12 @@ def assert_kernel_parity_dict(name: str, *inputs) -> None:
         for i, (a, b) in enumerate(zip(nt, rt)):
             a = np.asarray(a)
             b = np.asarray(b)
-            assert a.dtype == b.dtype, f"{name}[{key}][{i}]: dtype {a.dtype} != {b.dtype}"
-            assert a.shape == b.shape, f"{name}[{key}][{i}]: shape {a.shape} != {b.shape}"
+            assert a.dtype == b.dtype, (
+                f"{name}[{key}][{i}]: dtype {a.dtype} != {b.dtype}"
+            )
+            assert a.shape == b.shape, (
+                f"{name}[{key}][{i}]: shape {a.shape} != {b.shape}"
+            )
             np.testing.assert_array_equal(a, b)
 ```
 
@@ -1290,47 +1303,47 @@ Concretely, after the scalar/dosage/custom fields are built into `fields` (keep 
 Replace the windows branch (`if regions is not None and issubclass(haps.kind, _FlatVariantWindows) and opt is not None:` ... `return win`) with:
 
 ```python
-    opt = haps.window_opt
-    if (
-        regions is not None
-        and issubclass(haps.kind, _FlatVariantWindows)
-        and opt is not None
-    ):
-        L = opt.flank_length
-        ref_mode = 1 if opt.ref == "window" else 2
-        alt_mode = 1 if opt.alt == "window" else 2
-        bufs = get("assemble_variant_buffers")(
-            1,  # windows mode
-            v_idxs,
-            row_offsets,
-            stat.alt_alleles,
-            stat.alt_offsets,
-            ref_global,
-            ref_off_global,
-            False,  # want_ref_bytes (windows mode emits tokens, not raw bytes)
-            False,  # want_flank
-            ref_mode,
-            alt_mode,
-            L,
-            haps.token_lut,
-            v_contigs,
-            stat.v_starts,
-            stat.ilens,
-            stat.ref,        # reference genome buffer
-            stat.ref_offsets,  # contig offsets
-            haps.reference.pad_char,
+opt = haps.window_opt
+if (
+    regions is not None
+    and issubclass(haps.kind, _FlatVariantWindows)
+    and opt is not None
+):
+    L = opt.flank_length
+    ref_mode = 1 if opt.ref == "window" else 2
+    alt_mode = 1 if opt.alt == "window" else 2
+    bufs = get("assemble_variant_buffers")(
+        1,  # windows mode
+        v_idxs,
+        row_offsets,
+        stat.alt_alleles,
+        stat.alt_offsets,
+        ref_global,
+        ref_off_global,
+        False,  # want_ref_bytes (windows mode emits tokens, not raw bytes)
+        False,  # want_flank
+        ref_mode,
+        alt_mode,
+        L,
+        haps.token_lut,
+        v_contigs,
+        stat.v_starts,
+        stat.ilens,
+        stat.ref,  # reference genome buffer
+        stat.ref_offsets,  # contig offsets
+        haps.reference.pad_char,
+    )
+    wshape = (b, eff_ploidy, None, None)
+    wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
+    win = _FlatVariantWindows(wfields)
+    for name, (data, seq_off) in bufs.items():
+        fw = _FlatWindow(data, np.asarray(seq_off, np.int64), row_offsets, wshape)
+        setattr(win, name, fw)
+    if haps.dummy_variant is not None:
+        win = win.fill_empty_groups(
+            haps.dummy_variant, unk=haps.unknown_token, flank_length=L
         )
-        wshape = (b, eff_ploidy, None, None)
-        wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
-        win = _FlatVariantWindows(wfields)
-        for name, (data, seq_off) in bufs.items():
-            fw = _FlatWindow(data, np.asarray(seq_off, np.int64), row_offsets, wshape)
-            setattr(win, name, fw)
-        if haps.dummy_variant is not None:
-            win = win.fill_empty_groups(
-                haps.dummy_variant, unk=haps.unknown_token, flank_length=L
-            )
-        return win
+    return win
 ```
 
 - [ ] **Step 3: Build the plain-variants alt/ref + flank result from the dict**
@@ -1338,53 +1351,59 @@ Replace the windows branch (`if regions is not None and issubclass(haps.kind, _F
 Replace the inline alt/ref allele gather and the flank ride-along so the plain-variants path also goes through the kernel. Where the code currently does `fields["alt"] = _FlatAlleles(...)` and `fields["ref"] = _FlatAlleles(...)`, and the later `if haps.flank_length and ...: compute_flank_tokens(...)` block, replace with a single call after the scalar fields are assembled:
 
 ```python
-    want_flank = bool(
-        haps.flank_length and haps.token_lut is not None and regions is not None
-    )
-    L = haps.flank_length or 0
-    bufs = get("assemble_variant_buffers")(
-        0,  # variants mode
-        v_idxs,
+want_flank = bool(
+    haps.flank_length and haps.token_lut is not None and regions is not None
+)
+L = haps.flank_length or 0
+bufs = get("assemble_variant_buffers")(
+    0,  # variants mode
+    v_idxs,
+    row_offsets,
+    stat.alt_alleles,
+    stat.alt_offsets,
+    ref_global,
+    ref_off_global,
+    ref_present,  # want_ref_bytes
+    want_flank,
+    0,  # ref_mode (unused in variants mode)
+    0,  # alt_mode (unused)
+    L,
+    haps.token_lut,
+    v_contigs,
+    stat.v_starts,
+    stat.ilens,
+    stat.ref if stat.ref is not None else np.zeros(0, np.uint8),
+    stat.ref_offsets if stat.ref_offsets is not None else np.zeros(1, np.int64),
+    haps.reference.pad_char if haps.reference is not None else 0,
+)
+alt_data, alt_seq_off = bufs["alt"]
+fields["alt"] = _FlatAlleles(
+    np.asarray(alt_data, np.uint8),
+    np.asarray(alt_seq_off, np.int64),
+    row_offsets,
+    shape,
+)
+if "ref" in bufs:
+    ref_data, ref_seq_off = bufs["ref"]
+    fields["ref"] = _FlatAlleles(
+        np.asarray(ref_data, np.uint8),
+        np.asarray(ref_seq_off, np.int64),
         row_offsets,
-        stat.alt_alleles,
-        stat.alt_offsets,
-        ref_global,
-        ref_off_global,
-        ref_present,  # want_ref_bytes
-        want_flank,
-        0,  # ref_mode (unused in variants mode)
-        0,  # alt_mode (unused)
-        L,
-        haps.token_lut,
-        v_contigs,
-        stat.v_starts,
-        stat.ilens,
-        stat.ref if stat.ref is not None else np.zeros(0, np.uint8),
-        stat.ref_offsets if stat.ref_offsets is not None else np.zeros(1, np.int64),
-        haps.reference.pad_char if haps.reference is not None else 0,
+        shape,
     )
-    alt_data, alt_seq_off = bufs["alt"]
-    fields["alt"] = _FlatAlleles(
-        np.asarray(alt_data, np.uint8), np.asarray(alt_seq_off, np.int64), row_offsets, shape
+flat = _FlatVariants(fields)
+if "flank_tokens" in bufs:
+    from .._flat import _Flat
+
+    tok, off = bufs["flank_tokens"]
+    flat.flank_tokens = _Flat.from_offsets(
+        tok, (b, eff_ploidy, None, 2 * L), np.asarray(off, np.int64)
     )
-    if "ref" in bufs:
-        ref_data, ref_seq_off = bufs["ref"]
-        fields["ref"] = _FlatAlleles(
-            np.asarray(ref_data, np.uint8), np.asarray(ref_seq_off, np.int64), row_offsets, shape
-        )
-    flat = _FlatVariants(fields)
-    if "flank_tokens" in bufs:
-        from .._flat import _Flat
 
-        tok, off = bufs["flank_tokens"]
-        flat.flank_tokens = _Flat.from_offsets(
-            tok, (b, eff_ploidy, None, 2 * L), np.asarray(off, np.int64)
-        )
+if haps.dummy_variant is not None:
+    flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
 
-    if haps.dummy_variant is not None:
-        flat = flat.fill_empty_groups(haps.dummy_variant, unk=haps.unknown_token)
-
-    return flat
+return flat
 ```
 
 > IMPORTANT ordering: the `fields` dict insertion order determines downstream wrapping; today `alt` is inserted before `start`/`ref`/etc. Preserve the existing field order — build `fields["alt"]` placeholder position by keeping the scalar block as-is and only swapping the alt/ref *values* to come from `bufs`. If the original code inserted `alt` first, keep `alt` first (move the `bufs["alt"]` assignment up to where `fields["alt"]` was originally set, not appended at the end). Verify with `RaggedVariants` field order in a parity run (Task 8).
@@ -1462,9 +1481,9 @@ def _globals():
     alt_bytes = np.frombuffer(b"ACGT", np.uint8)
     # alt alleles: v0="A", v1="CG", v2="T"
     alt_data = np.frombuffer(b"ACGT", np.uint8)
-    alt_data = np.frombuffer(b"A" b"CG" b"T", np.uint8)
+    alt_data = np.frombuffer(b"ACGT", np.uint8)
     alt_off = np.array([0, 1, 3, 4], np.int64)
-    ref_data = np.frombuffer(b"C" b"G" b"AA", np.uint8)
+    ref_data = np.frombuffer(b"CGAA", np.uint8)
     ref_off = np.array([0, 1, 2, 4], np.int64)
     v_starts = np.array([5, 12, 20], np.int32)
     ilens = np.array([0, -1, 1], np.int32)  # SNP, 1bp del, 1bp ins
@@ -1484,14 +1503,31 @@ def test_windows_mode_matrix(tok_dtype, ref_mode, alt_mode):
     assert_kernel_parity_dict(
         "assemble_variant_buffers",
         1,  # windows
-        v_idxs, row_offsets, alt_data, alt_off, ref_data, ref_off,
-        False, False, ref_mode, alt_mode, 2, lut, v_contigs, v_starts, ilens,
-        ref, ref_offsets, ord("N"),
+        v_idxs,
+        row_offsets,
+        alt_data,
+        alt_off,
+        ref_data,
+        ref_off,
+        False,
+        False,
+        ref_mode,
+        alt_mode,
+        2,
+        lut,
+        v_contigs,
+        v_starts,
+        ilens,
+        ref,
+        ref_offsets,
+        ord("N"),
     )
 
 
 @pytest.mark.parametrize("tok_dtype", [np.uint8, np.int32])
-@pytest.mark.parametrize("want_ref,want_flank", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(
+    "want_ref,want_flank", [(False, False), (True, False), (False, True), (True, True)]
+)
 def test_variants_mode_matrix(tok_dtype, want_ref, want_flank):
     ref, ref_offsets = _reference()
     alt_data, alt_off, ref_data, ref_off, v_starts, ilens = _globals()
@@ -1502,9 +1538,24 @@ def test_variants_mode_matrix(tok_dtype, want_ref, want_flank):
     assert_kernel_parity_dict(
         "assemble_variant_buffers",
         0,  # variants
-        v_idxs, row_offsets, alt_data, alt_off, ref_data, ref_off,
-        want_ref, want_flank, 0, 0, 2, lut, v_contigs, v_starts, ilens,
-        ref, ref_offsets, ord("N"),
+        v_idxs,
+        row_offsets,
+        alt_data,
+        alt_off,
+        ref_data,
+        ref_off,
+        want_ref,
+        want_flank,
+        0,
+        0,
+        2,
+        lut,
+        v_contigs,
+        v_starts,
+        ilens,
+        ref,
+        ref_offsets,
+        ord("N"),
     )
 
 
@@ -1520,9 +1571,24 @@ def test_empty_selection(mode, ref_mode, alt_mode):
     assert_kernel_parity_dict(
         "assemble_variant_buffers",
         mode,
-        v_idxs, row_offsets, alt_data, alt_off, ref_data, ref_off,
-        False, (mode == 0), ref_mode, alt_mode, 2, lut, v_contigs, v_starts, ilens,
-        ref, ref_offsets, ord("N"),
+        v_idxs,
+        row_offsets,
+        alt_data,
+        alt_off,
+        ref_data,
+        ref_off,
+        False,
+        (mode == 0),
+        ref_mode,
+        alt_mode,
+        2,
+        lut,
+        v_contigs,
+        v_starts,
+        ilens,
+        ref,
+        ref_offsets,
+        ord("N"),
     )
 ```
 
