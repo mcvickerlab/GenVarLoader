@@ -91,6 +91,16 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.43.1 (2026-09-29)
+
+### Fix
+
+- **deps**: require seqpro 0.23 and genoray 6.0.1
+- **svar2**: scope the link fingerprint to payload files (#419)
+
 ## v0.43.0 (2026-09-17)
 
 ### BREAKING CHANGE
