@@ -641,10 +641,11 @@ and pass `store_field_keys=store_field_keys, store_fields=store_fields` into the
 Replace the hard-coded line (`:174`):
 
 ```python
-        self.available_var_fields = ["alt", "ilen", "start"] + [
-            k for k in self.store_field_keys
-            if k not in {"alt", "ilen", "start", "ref", "dosage"}
-        ]
+self.available_var_fields = ["alt", "ilen", "start"] + [
+    k
+    for k in self.store_field_keys
+    if k not in {"alt", "ilen", "start", "ref", "dosage"}
+]
 ```
 
 - [ ] **Step 3: Rebuild + smoke-check discovery**
@@ -740,12 +741,20 @@ At the top of `_reconstruct_variants`, compute the requested extra fields (order
 Change the kernel call to pass `field_specs`, and unpack the two new returns per contig group:
 
 ```python
-            pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
-                decode_variants_from_svar2_readbound(
-                    self.store, self.ds_contigs[ci],
-                    gi[0], gi[1], gi[2], gi[3], gi[4], gi[5], P, field_specs,
-                )
-            )
+pos, ilen, alt_bytes, str_off, var_off, field_bufs, field_isizes = (
+    decode_variants_from_svar2_readbound(
+        self.store,
+        self.ds_contigs[ci],
+        gi[0],
+        gi[1],
+        gi[2],
+        gi[3],
+        gi[4],
+        gi[5],
+        P,
+        field_specs,
+    )
+)
 ```
 
 Accumulate per-field buffers per group into `cat_fields: list[list[np.ndarray]]` (one inner list per requested field), asserting `field_isizes[j] == field_dtypes[j].itemsize`.
@@ -755,18 +764,20 @@ Accumulate per-field buffers per group into `cat_fields: list[list[np.ndarray]]`
 In the `len(cat_pos) == 1` branch, build a `fields` dict parallel to the existing `alt`/`start`/`ilen`, then splat into `RaggedVariants`:
 
 ```python
-            extra = {
-                req_keys[j]: Ragged.from_offsets(
-                    cat_fields[j][0].view(field_dtypes[j]), shape, var_off_g
-                )
-                for j in range(len(req_keys))
-            }
-            return RaggedVariants(
-                alt=Ragged.from_offsets(cat_alt[0].view("S1"), shape, var_off_g, str_offsets=str_off_g),
-                start=Ragged.from_offsets(cat_pos[0], shape, var_off_g),
-                ilen=Ragged.from_offsets(cat_ilen[0], shape, var_off_g),
-                **extra,
-            )
+extra = {
+    req_keys[j]: Ragged.from_offsets(
+        cat_fields[j][0].view(field_dtypes[j]), shape, var_off_g
+    )
+    for j in range(len(req_keys))
+}
+return RaggedVariants(
+    alt=Ragged.from_offsets(
+        cat_alt[0].view("S1"), shape, var_off_g, str_offsets=str_off_g
+    ),
+    start=Ragged.from_offsets(cat_pos[0], shape, var_off_g),
+    ilen=Ragged.from_offsets(cat_ilen[0], shape, var_off_g),
+    **extra,
+)
 ```
 
 - [ ] **Step 3: Multi-contig path — reorder fields by the same `src`**
@@ -774,13 +785,17 @@ In the `len(cat_pos) == 1` branch, build a `fields` dict parallel to the existin
 In the general path, after computing `src, var_off_g = _ragged_arange_src(grouped_var_off, perm)`, each field is per-variant so it reorders exactly like `pos`:
 
 ```python
-            extra = {}
-            for j in range(len(req_keys)):
-                fc = np.concatenate([g[j] for g in per_group_fields]) if per_group_fields else np.zeros(0, np.uint8)
-                fc_typed = fc.view(field_dtypes[j])
-                fg = fc_typed[:0].copy() if src.size == 0 else fc_typed[src]
-                extra[req_keys[j]] = Ragged.from_offsets(fg, shape, var_off_g)
-            return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r, **extra)
+extra = {}
+for j in range(len(req_keys)):
+    fc = (
+        np.concatenate([g[j] for g in per_group_fields])
+        if per_group_fields
+        else np.zeros(0, np.uint8)
+    )
+    fc_typed = fc.view(field_dtypes[j])
+    fg = fc_typed[:0].copy() if src.size == 0 else fc_typed[src]
+    extra[req_keys[j]] = Ragged.from_offsets(fg, shape, var_off_g)
+return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r, **extra)
 ```
 
 (`per_group_fields[g][j]` is group `g`'s buffer for field `j`, already `.view(dtype)`-ed to length `n_var_group`. Reuse the same `src` computed for `pos_g`/`ilen_g`.)
@@ -873,7 +888,9 @@ from genoray import SparseVar2
 from genoray._svar2_fields import InfoField, FormatField
 
 SparseVar2.from_vcf(
-    out=store_dir, source=vcf_gz, reference=fasta,
+    out=store_dir,
+    source=vcf_gz,
+    reference=fasta,
     info_fields=[InfoField("AF"), InfoField("NS")],
     format_fields=[FormatField("DP")],
 )
@@ -889,12 +906,15 @@ Parse the VCF with `cyvcf2` into a dict `{(contig, pos): {"AF": ..., "NS": ..., 
 import numpy as np
 import pytest
 
+
 @pytest.mark.parametrize("union", [False, True])
 def test_svar2_ragged_variants_fields(tmp_path, union):
     ds_path = _write_dataset(tmp_path)  # gvl.write over the svar2 source
     import genvarloader as gvl
+
     ds = gvl.Dataset.open(ds_path, reference=FASTA).with_seqs(
-        "variants", var_fields=["alt", "start", "ilen", "AF", "NS", "DP"],
+        "variants",
+        var_fields=["alt", "start", "ilen", "AF", "NS", "DP"],
     )
     if union:
         ds = ds.with_settings(unphased_union=True)  # use the real gvl API name

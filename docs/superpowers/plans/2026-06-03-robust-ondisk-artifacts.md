@@ -452,9 +452,7 @@ def _ensure_built(source_fa: Path, gvlfa_dir: Path) -> FastaCache:
             except Exception:
                 pass  # unreadable/corrupt -> fall through and rebuild
         _build_into(source_fa, tmp, gvlfa_dir)
-    return FastaCache.model_validate_json(
-        (gvlfa_dir / METADATA_FILENAME).read_text()
-    )
+    return FastaCache.model_validate_json((gvlfa_dir / METADATA_FILENAME).read_text())
 ```
 
 In `_ensure_from_fasta` (current lines 216-246) replace the two `meta = build(source_fa, gvlfa_dir)` calls (the rebuild inside `if not valid` and the final fallback) and the migrate path with calls that go through the lock. Concretely:
@@ -929,7 +927,9 @@ def test_concurrent_ensure_cache_no_corruption(tmp_path, ref_fasta):
     expected = np.array(np.memmap(single_data, np.uint8, "r"))
 
     # N concurrent builders against the same source
-    procs = [_CTX.Process(target=_build_cache_worker, args=(str(src),)) for _ in range(6)]
+    procs = [
+        _CTX.Process(target=_build_cache_worker, args=(str(src),)) for _ in range(6)
+    ]
     for p in procs:
         p.start()
     for p in procs:
@@ -972,9 +972,7 @@ def test_concurrent_gvl_write_one_valid_dataset(tmp_path, phased_vcf_gvl, refere
     dest = tmp_path / "shared.gvl"
 
     procs = [
-        _CTX.Process(
-            target=_write_worker, args=(str(dest), str(src_vcf), bed_rows)
-        )
+        _CTX.Process(target=_write_worker, args=(str(dest), str(src_vcf), bed_rows))
         for _ in range(4)
     ]
     for p in procs:

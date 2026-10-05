@@ -43,7 +43,7 @@ Single chokepoint. Add a `GVL_FORCE_PARALLEL` env var read by `should_paralleliz
 
 ```python
 def should_parallelize(total_bytes: int) -> bool:
-    if _force_parallel():          # GVL_FORCE_PARALLEL truthy → always parallel
+    if _force_parallel():  # GVL_FORCE_PARALLEL truthy → always parallel
         return True
     return total_bytes >= num_threads() * _MIN_BYTES_PER_THREAD
 ```
@@ -59,7 +59,7 @@ Two bugs, both named in #263:
 **(a) `setdefault` → overwrite.** An ambient `RAYON_NUM_THREADS=16` (base image) currently wins in spawn workers, so `cap_threads()` never caps. Change to assign directly:
 
 ```python
-os.environ["RAYON_NUM_THREADS"] = str(_NUM_THREADS)   # GVL's resolved count wins
+os.environ["RAYON_NUM_THREADS"] = str(_NUM_THREADS)  # GVL's resolved count wins
 ```
 
 GVL's resolved count wins; users steer explicitly via `GVL_NUM_THREADS`. Still runs before the first rust parallel call, so it takes effect at global-pool init. (Overwriting *after* pool init is a no-op — rayon reads the env var once — so the existing "must run first" contract is unchanged and still documented.)

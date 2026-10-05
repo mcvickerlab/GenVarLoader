@@ -290,6 +290,7 @@ def test_to_padded_matches_seqpro():
     off = np.array([0, 2, 5], np.int64)  # rows len 2 and 3
     f = _Flat.from_offsets(data, (2, None), off)
     from genvarloader._ragged import to_padded
+
     expected = to_padded(_rag(data, (2, None), off), -1)
     np.testing.assert_array_equal(f.to_padded(-1), expected)
 
@@ -423,6 +424,7 @@ Append to `tests/dataset/test_flat.py`:
 ```python
 def test_reverse_masked_int_matches_awkward():
     import awkward as ak
+
     data = np.arange(10, dtype=np.int32)
     off = np.array([0, 3, 6, 10], np.int64)  # 3 rows
     mask = np.array([True, False, True])
@@ -437,6 +439,7 @@ def test_reverse_masked_int_matches_awkward():
 
 def test_reverse_masked_dna_matches_existing():
     from genvarloader._ragged import reverse_complement_masked, _COMP  # noqa
+
     seq = np.frombuffer(b"ACGTAACCGGTT", dtype="S1")
     off = np.array([0, 4, 12], np.int64)  # 2 rows
     mask = np.array([True, False])
@@ -477,30 +480,32 @@ def _reverse_rows_masked(data, offsets, mask):  # pragma: no cover - njit
 Add the method to `_Flat`:
 
 ```python
-    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray | None = None) -> "_Flat":
-        """Reverse (DNA: reverse-complement) the `mask`-selected rows, in place.
+def reverse_masked(
+    self, mask: NDArray[np.bool_], comp: NDArray | None = None
+) -> "_Flat":
+    """Reverse (DNA: reverse-complement) the `mask`-selected rows, in place.
 
-        `mask` is one entry per outer query; replicate across any inner fixed
-        axes in C order to get one entry per flattened ragged row, matching the
-        awkward `ak.where` broadcast it replaces.
-        """
-        m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
-        if m.size != self.n_rows:
-            factor, rem = divmod(self.n_rows, m.size)
-            if rem != 0:
-                raise ValueError(
-                    f"mask has {m.size} entries but {self.n_rows} rows "
-                    "(not an integer multiple)."
-                )
-            m = np.repeat(m, factor)
-        if comp is not None:
-            # DNA reverse-complement via the flat seqpro kernel (reuses gvl's LUT).
-            from ._ragged import reverse_complement_masked
+    `mask` is one entry per outer query; replicate across any inner fixed
+    axes in C order to get one entry per flattened ragged row, matching the
+    awkward `ak.where` broadcast it replaces.
+    """
+    m = np.ascontiguousarray(mask, np.bool_).reshape(-1)
+    if m.size != self.n_rows:
+        factor, rem = divmod(self.n_rows, m.size)
+        if rem != 0:
+            raise ValueError(
+                f"mask has {m.size} entries but {self.n_rows} rows "
+                "(not an integer multiple)."
+            )
+        m = np.repeat(m, factor)
+    if comp is not None:
+        # DNA reverse-complement via the flat seqpro kernel (reuses gvl's LUT).
+        from ._ragged import reverse_complement_masked
 
-            rag = reverse_complement_masked(self.to_ragged(), m)
-            return _Flat(np.asarray(rag.data), self.offsets, self.shape)
-        _reverse_rows_masked(self.data, self.offsets, m)
-        return self
+        rag = reverse_complement_masked(self.to_ragged(), m)
+        return _Flat(np.asarray(rag.data), self.offsets, self.shape)
+    _reverse_rows_masked(self.data, self.offsets, m)
+    return self
 ```
 
 > **Implementer note:** `reverse_complement_masked` already does the mask replication; passing the already-replicated `m` is harmless (replication is idempotent when `m.size == n_rows`). If pyrefly complains about the circular import, the local import inside the method is the fix.
@@ -543,7 +548,9 @@ class _FlatAnnotatedHaps:
     def shape(self) -> tuple[int | None, ...]:
         return self.haps.shape
 
-    def reverse_masked(self, mask: NDArray[np.bool_], comp: NDArray) -> "_FlatAnnotatedHaps":
+    def reverse_masked(
+        self, mask: NDArray[np.bool_], comp: NDArray
+    ) -> "_FlatAnnotatedHaps":
         self.haps = self.haps.reverse_masked(mask, comp=comp)
         self.var_idxs = self.var_idxs.reverse_masked(mask)
         self.ref_coords = self.ref_coords.reverse_masked(mask)
@@ -558,7 +565,9 @@ class _FlatAnnotatedHaps:
 
     def squeeze(self, axis=None) -> "_FlatAnnotatedHaps":
         return _FlatAnnotatedHaps(
-            self.haps.squeeze(axis), self.var_idxs.squeeze(axis), self.ref_coords.squeeze(axis)
+            self.haps.squeeze(axis),
+            self.var_idxs.squeeze(axis),
+            self.ref_coords.squeeze(axis),
         )
 
     def to_ragged(self):
@@ -594,8 +603,11 @@ Append to `tests/dataset/test_flat.py`:
 ```python
 def test_flat_annotated_to_ragged():
     from genvarloader._flat import _Flat, _FlatAnnotatedHaps
+
     off = np.array([0, 2, 4], np.int64)
-    h = _Flat.from_offsets(np.frombuffer(b"ACGT", "S1").view(np.uint8).copy(), (2, None), off)
+    h = _Flat.from_offsets(
+        np.frombuffer(b"ACGT", "S1").view(np.uint8).copy(), (2, None), off
+    )
     v = _Flat.from_offsets(np.array([0, 1, 2, 3], np.int32), (2, None), off)
     p = _Flat.from_offsets(np.array([10, 11, 12, 13], np.int32), (2, None), off)
     rah = _FlatAnnotatedHaps(h, v, p).to_ragged()
@@ -638,37 +650,41 @@ At the top of `reverse_complement_ragged` (before the `isinstance(rag, Ragged)` 
 In `pad` (`:357`), add before the `isinstance(rag, Ragged)` chain:
 
 ```python
-    if isinstance(rag, (_Flat, _FlatAnnotatedHaps)):
-        if isinstance(rag, _Flat):
-            pad_value = b"N" if rag.data.dtype.kind in "SU" else 0
-            return rag.view("S1").to_padded(pad_value) if rag.data.dtype == np.uint8 else rag.to_padded(pad_value)
-        return rag.to_padded()
+if isinstance(rag, (_Flat, _FlatAnnotatedHaps)):
+    if isinstance(rag, _Flat):
+        pad_value = b"N" if rag.data.dtype.kind in "SU" else 0
+        return (
+            rag.view("S1").to_padded(pad_value)
+            if rag.data.dtype == np.uint8
+            else rag.to_padded(pad_value)
+        )
+    return rag.to_padded()
 ```
 
 In `getitem`, replace the densify block (`:94-103`) so it handles flat and routes ragged-output flats to `to_ragged`:
 
 ```python
-    if view.output_length == "variable":
-        recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals)) else pad(r)
-            for r in recon
-        )
-    elif isinstance(view.output_length, int):
-        recon = tuple(
-            r if isinstance(r, (RaggedVariants, RaggedIntervals))
-            else r.to_fixed(view.output_length) if isinstance(r, (_Flat, _FlatAnnotatedHaps))
-            else r.to_numpy()
-            for r in recon
-        )
+if view.output_length == "variable":
+    recon = tuple(
+        r if isinstance(r, (RaggedVariants, RaggedIntervals)) else pad(r) for r in recon
+    )
+elif isinstance(view.output_length, int):
+    recon = tuple(
+        r
+        if isinstance(r, (RaggedVariants, RaggedIntervals))
+        else r.to_fixed(view.output_length)
+        if isinstance(r, (_Flat, _FlatAnnotatedHaps))
+        else r.to_numpy()
+        for r in recon
+    )
 ```
 
 Then, immediately before the `out_reshape` step (`:105`), add a final wrap so any still-flat (ragged-output) element becomes its public `Ragged` type:
 
 ```python
-    recon = tuple(
-        o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o
-        for o in recon
-    )
+recon = tuple(
+    o.to_ragged() if isinstance(o, (_Flat, _FlatAnnotatedHaps)) else o for o in recon
+)
 ```
 
 > **Implementer note:** for ragged output, `reshape`/`squeeze` then run on the resulting `Ragged` (existing behavior). `_Flat.reshape`/`squeeze` exist too, so if you prefer to reshape-then-wrap, that also works — but wrapping first keeps the diff smallest and reuses the proven `Ragged` reshape. The `to_fixed`/`to_padded` for `_Flat[uint8]` must `.view("S1")` first so dtype matches the legacy `to_numpy()` output; the helper methods handle this when called via `_FlatAnnotatedHaps`, but a bare S1 `_Flat` (haplotypes mode) needs the `.view("S1")` — encode that in `_Flat.to_fixed`/`to_padded` by checking `data.dtype == np.uint8`? No — keep `_Flat` dtype-agnostic; instead the reconstructor returns the haps `_Flat` already `.view("S1")` (Task 6). Verify dtype at the boundary with the snapshot gate.
@@ -756,30 +772,32 @@ from .._flat import _Flat, _FlatAnnotatedHaps
 Replace the non-splice body of `_reconstruct_haplotypes` (`:758-784`). Allocate the buffer/offsets directly instead of via `Ragged.from_offsets`, run the kernel, return a `_Flat` viewed as S1:
 
 ```python
-        if req.splice_plan is None:
-            data = np.empty(req.out_offsets[-1], np.uint8)
-            shape = (*req.shifts.shape, None)
-            reconstruct_haplotypes_from_sparse(
-                geno_offset_idx=req.geno_offset_idx,
-                out=data,
-                out_offsets=req.out_offsets,
-                regions=req.regions,
-                shifts=req.shifts,
-                geno_offsets=self.genotypes.offsets,
-                geno_v_idxs=self.genotypes.data,
-                v_starts=self.variants.start,
-                ilens=self.variants.ilen,
-                alt_alleles=self.variants.alt.data.view(np.uint8),
-                alt_offsets=self.variants.alt.offsets,
-                ref=self.reference.reference,
-                ref_offsets=self.reference.offsets,
-                pad_char=self.reference.pad_char,
-                keep=req.keep,
-                keep_offsets=req.keep_offsets,
-                annot_v_idxs=None,
-                annot_ref_pos=None,
-            )
-            return cast("Ragged[np.bytes_]", _Flat.from_offsets(data, shape, req.out_offsets).view("S1"))
+if req.splice_plan is None:
+    data = np.empty(req.out_offsets[-1], np.uint8)
+    shape = (*req.shifts.shape, None)
+    reconstruct_haplotypes_from_sparse(
+        geno_offset_idx=req.geno_offset_idx,
+        out=data,
+        out_offsets=req.out_offsets,
+        regions=req.regions,
+        shifts=req.shifts,
+        geno_offsets=self.genotypes.offsets,
+        geno_v_idxs=self.genotypes.data,
+        v_starts=self.variants.start,
+        ilens=self.variants.ilen,
+        alt_alleles=self.variants.alt.data.view(np.uint8),
+        alt_offsets=self.variants.alt.offsets,
+        ref=self.reference.reference,
+        ref_offsets=self.reference.offsets,
+        pad_char=self.reference.pad_char,
+        keep=req.keep,
+        keep_offsets=req.keep_offsets,
+        annot_v_idxs=None,
+        annot_ref_pos=None,
+    )
+    return cast(
+        "Ragged[np.bytes_]", _Flat.from_offsets(data, shape, req.out_offsets).view("S1")
+    )
 ```
 
 > **Implementer note:** the kernel writes into `data` (uint8); `.view("S1")` makes the `_Flat` dtype `S1` so the boundary's S1/`to_fixed` path matches the old `to_numpy()` dtype, AND the RC branch must then test `data.dtype.kind == "S"` (see Task 4 Step 3 note) — pick one convention and make both consistent. Recommended: keep `_Flat` data as `S1` for haps and branch RC on `dtype.kind == "S"`; update the Task 4 RC check accordingly. Leave the splice path (`:786-824`) on `Ragged` for Task 9.
@@ -789,36 +807,39 @@ Replace the non-splice body of `_reconstruct_haplotypes` (`:758-784`). Allocate 
 Replace the non-splice body of `_reconstruct_annotated_haplotypes` (`:837-879`) to allocate three flat buffers, run the kernel, and return a tuple of `_Flat`s (keeping the method's `tuple` return contract):
 
 ```python
-        if req.splice_plan is None:
-            shape = (*req.shifts.shape, None)
-            haps = np.empty(req.out_offsets[-1], np.uint8)
-            annot_v = np.empty(req.out_offsets[-1], V_IDX_TYPE)
-            annot_pos = np.empty(req.out_offsets[-1], np.int32)
-            reconstruct_haplotypes_from_sparse(
-                geno_offset_idx=req.geno_offset_idx,
-                out=haps,
-                out_offsets=req.out_offsets,
-                regions=req.regions,
-                shifts=req.shifts,
-                geno_offsets=self.genotypes.offsets,
-                geno_v_idxs=self.genotypes.data,
-                v_starts=self.variants.start,
-                ilens=self.variants.ilen,
-                alt_alleles=self.variants.alt.data.view(np.uint8),
-                alt_offsets=self.variants.alt.offsets,
-                ref=self.reference.reference,
-                ref_offsets=self.reference.offsets,
-                pad_char=self.reference.pad_char,
-                keep=req.keep,
-                keep_offsets=req.keep_offsets,
-                annot_v_idxs=annot_v,
-                annot_ref_pos=annot_pos,
-            )
-            return (
-                cast("Ragged[np.bytes_]", _Flat.from_offsets(haps, shape, req.out_offsets).view("S1")),
-                cast("Ragged", _Flat.from_offsets(annot_v, shape, req.out_offsets)),
-                cast("Ragged", _Flat.from_offsets(annot_pos, shape, req.out_offsets)),
-            )
+if req.splice_plan is None:
+    shape = (*req.shifts.shape, None)
+    haps = np.empty(req.out_offsets[-1], np.uint8)
+    annot_v = np.empty(req.out_offsets[-1], V_IDX_TYPE)
+    annot_pos = np.empty(req.out_offsets[-1], np.int32)
+    reconstruct_haplotypes_from_sparse(
+        geno_offset_idx=req.geno_offset_idx,
+        out=haps,
+        out_offsets=req.out_offsets,
+        regions=req.regions,
+        shifts=req.shifts,
+        geno_offsets=self.genotypes.offsets,
+        geno_v_idxs=self.genotypes.data,
+        v_starts=self.variants.start,
+        ilens=self.variants.ilen,
+        alt_alleles=self.variants.alt.data.view(np.uint8),
+        alt_offsets=self.variants.alt.offsets,
+        ref=self.reference.reference,
+        ref_offsets=self.reference.offsets,
+        pad_char=self.reference.pad_char,
+        keep=req.keep,
+        keep_offsets=req.keep_offsets,
+        annot_v_idxs=annot_v,
+        annot_ref_pos=annot_pos,
+    )
+    return (
+        cast(
+            "Ragged[np.bytes_]",
+            _Flat.from_offsets(haps, shape, req.out_offsets).view("S1"),
+        ),
+        cast("Ragged", _Flat.from_offsets(annot_v, shape, req.out_offsets)),
+        cast("Ragged", _Flat.from_offsets(annot_pos, shape, req.out_offsets)),
+    )
 ```
 
 - [ ] **Step 3: Assemble `_FlatAnnotatedHaps` in `get_haps_and_shifts`**
@@ -951,7 +972,7 @@ The spliced reconstruction paths (`_reconstruct_haplotypes` splice branch, `_rec
 Append spliced cases to `tests/dataset/test_flat_getitem_snapshot.py` CASES (regenerate snapshots for the new cases only — delete nothing existing):
 
 ```python
-    ("haps_spliced", dict(seqs="haplotypes"), "ragged"),  # with a SpliceIndexer
+(("haps_spliced", dict(seqs="haplotypes"), "ragged"),)  # with a SpliceIndexer
 ```
 
 > **Implementer note:** read `tests/dataset/` for an existing spliced test to copy the `subset_to`/splice setup; the snapshot harness's `_build` needs a splice branch. If splicing needs a specific BED/region setup the fixture lacks, add a minimal spliced unit test comparing flat vs a pre-refactor `Ragged` reference computed in the same test (capture by temporarily forcing the legacy path) instead of a committed snapshot.
@@ -1047,6 +1068,7 @@ Create `tests/dataset/test_no_awkward_in_hotpath.py` — a regression guard that
 
 ```python
 """Guard: the fixed/ragged getitem hot path must not dispatch awkward kernels."""
+
 import numpy as np
 import pytest
 import genvarloader as gvl
@@ -1064,7 +1086,12 @@ def test_tracks_fixed_no_awkward(monkeypatch, dataset_path_with_ref):
         return orig(*a, **k)
 
     monkeypatch.setattr(ak, "to_numpy", counting)
-    ds = gvl.Dataset.open(*dataset_path_with_ref).with_seqs(None).with_tracks("read-depth").with_len(64)
+    ds = (
+        gvl.Dataset.open(*dataset_path_with_ref)
+        .with_seqs(None)
+        .with_tracks("read-depth")
+        .with_len(64)
+    )
     _ = ds[[0, 1, 2, 3], [0, 0, 0, 0]]
     assert calls["n"] == 0
 ```

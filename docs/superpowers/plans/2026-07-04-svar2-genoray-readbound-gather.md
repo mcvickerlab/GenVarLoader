@@ -983,6 +983,8 @@ Create `tests/test_py_ranges_readbound.py` (run via the built wheel — this is 
 
 ```python
 import numpy as np
+
+
 # genoray._core.PyContigReader is constructed the same way the existing
 # py_query_ranges tests do; reuse that harness path if one exists in genoray's
 # python test suite. Placeholder assertion of the new keys:

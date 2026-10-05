@@ -105,8 +105,12 @@ def test_provenance_regions_appends_blocks():
     prov = provenance("regions", [(2, 2), (1, 2)], ploidy=1)
     # merged order is (r, s): A(r0s0) A(r0s1) A(r1s0) A(r1s1) B(r0s0) B(r0s1)
     assert prov.tolist() == [
-        [0, 0], [0, 1], [0, 2], [0, 3],
-        [1, 0], [1, 1],
+        [0, 0],
+        [0, 1],
+        [0, 2],
+        [0, 3],
+        [1, 0],
+        [1, 1],
     ]
 
 
@@ -115,8 +119,12 @@ def test_provenance_samples_interleaves_per_region():
     prov = provenance("samples", [(2, 1), (2, 2)], ploidy=1)
     # merged S' = 3. Per region: A's sample, then B's two.
     assert prov.tolist() == [
-        [0, 0], [1, 0], [1, 1],   # region 0
-        [0, 1], [1, 2], [1, 3],   # region 1
+        [0, 0],
+        [1, 0],
+        [1, 1],  # region 0
+        [0, 1],
+        [1, 2],
+        [1, 3],  # region 1
     ]
 
 
@@ -397,8 +405,8 @@ def test_copy_runs_concatenates_two_ragged_sources(tmp_path):
 def test_copy_runs_interleaves_out_of_order_runs(tmp_path):
     # sample-axis shape: A slot0, B slot0, A slot1, B slot1
     a, b = tmp_path / "a.npy", tmp_path / "b.npy"
-    _write_raw(a, np.array([10, 11, 12], np.int32))   # slots [10,11], [12]
-    _write_raw(b, np.array([20, 21], np.int32))       # slots [20], [21]
+    _write_raw(a, np.array([10, 11, 12], np.int32))  # slots [10,11], [12]
+    _write_raw(b, np.array([20, 21], np.int32))  # slots [20], [21]
     off_a = np.array([0, 2, 3], np.int64)
     off_b = np.array([0, 1, 2], np.int64)
 
@@ -424,9 +432,7 @@ def test_copy_runs_handles_empty_slots(tmp_path):
 
 def test_copy_runs_spans_multiple_chunks(tmp_path, monkeypatch):
     """Force >1 chunk to exercise the streaming loop."""
-    monkeypatch.setattr(
-        "genvarloader._dataset._concat_io.CONCAT_CHUNK_BYTES", 64
-    )
+    monkeypatch.setattr("genvarloader._dataset._concat_io.CONCAT_CHUNK_BYTES", 64)
     a = tmp_path / "a.npy"
     data = np.arange(1000, dtype=np.int32)
     _write_raw(a, data)
@@ -690,8 +696,15 @@ def _mk(samples, n_regions, *, backend="pgen_vcf", ploidy=2, tracks=(), chroms=N
         ploidy=ploidy,
     )
     return ConcatInput(
-        path=None, meta=meta, bed=bed, n_regions=n, n_samples=len(samples),
-        backend=backend, tracks=list(tracks), annot_tracks=[], has_dosages=False,
+        path=None,
+        meta=meta,
+        bed=bed,
+        n_regions=n,
+        n_samples=len(samples),
+        backend=backend,
+        tracks=list(tracks),
+        annot_tracks=[],
+        has_dosages=False,
     )
 
 
@@ -1096,12 +1109,14 @@ Append to `tests/dataset/test_concat.py`:
 ```python
 def _read_offsets(p: Path):
     import numpy as np
+
     return np.fromfile(p / "genotypes" / "offsets.npy", dtype=np.int64)
 
 
 def _read_v_idxs(p: Path):
     import numpy as np
     from genoray._types import V_IDX_TYPE
+
     return np.fromfile(p / "genotypes" / "variant_idxs.npy", dtype=V_IDX_TYPE)
 
 
@@ -1122,6 +1137,7 @@ def test_concat_regions_metadata_matches(tmp_path, region_shards):
     gvl.concat(out, shards, axis="regions")
 
     import json
+
     got = json.loads((out / "metadata.json").read_text())
     exp = json.loads((whole / "metadata.json").read_text())
     assert got["samples"] == exp["samples"]
@@ -1136,6 +1152,7 @@ def test_concat_samples_merges_sample_list(tmp_path, sample_shards):
     gvl.concat(out, shards, axis="samples")
 
     import json
+
     got = json.loads((out / "metadata.json").read_text())
     exp = json.loads((whole / "metadata.json").read_text())
     assert got["samples"] == exp["samples"]
@@ -1162,6 +1179,7 @@ def test_concat_records_variants_fingerprint(tmp_path, region_shards):
     gvl.concat(out, shards, axis="regions")
 
     import json
+
     meta = json.loads((out / "metadata.json").read_text())
     fp = meta["variants_fingerprint"]
     assert fp["algorithm"] == "blake2b"
@@ -1270,9 +1288,7 @@ def concat(
     """
     from ._impl import Dataset as _Dataset
 
-    paths = [
-        Path(d.path if isinstance(d, _Dataset) else d) for d in datasets
-    ]
+    paths = [Path(d.path if isinstance(d, _Dataset) else d) for d in datasets]
     dest = Path(path)
     if dest.exists() and not overwrite:
         raise FileExistsError(f"{dest} exists; pass overwrite=True to replace it")
@@ -1419,6 +1435,7 @@ def svar_region_shards(tmp_path_factory, concat_case) -> tuple[list[Path], Path]
 
 def test_concat_svar_regions_matches_single_shot(tmp_path, svar_region_shards):
     import numpy as np
+
     shards, whole = svar_region_shards
     out = tmp_path / "merged.gvl"
     gvl.concat(out, shards, axis="regions")
@@ -1430,6 +1447,7 @@ def test_concat_svar_regions_matches_single_shot(tmp_path, svar_region_shards):
 
 def test_concat_svar_preserves_link(tmp_path, svar_region_shards):
     import json
+
     shards, whole = svar_region_shards
     out = tmp_path / "merged.gvl"
     gvl.concat(out, shards, axis="regions")
@@ -1442,6 +1460,7 @@ def test_concat_svar_preserves_link(tmp_path, svar_region_shards):
 def test_concat_regions_reads_equal_to_single_shot(tmp_path, region_shards, reference):
     """The real acceptance check: every merged cell reads identically."""
     import numpy as np
+
     shards, whole = region_shards
     out = tmp_path / "merged.gvl"
     gvl.concat(out, shards, axis="regions")
@@ -1463,6 +1482,7 @@ def test_concat_samples_reads_equal_to_single_shot(tmp_path, sample_shards, refe
     full write's. Byte identity is not expected here.
     """
     import numpy as np
+
     shards, whole = sample_shards
     out = tmp_path / "merged.gvl"
     gvl.concat(out, shards, axis="samples")
@@ -1617,8 +1637,9 @@ def _concat_svar2_ranges(
 
     for name in ("vk_snp_range", "vk_indel_range"):
         srcs = [
-            np.fromfile(p / "genotypes" / "svar2_ranges" / f"{name}.npy", np.int64)
-            .reshape(-1, 2)
+            np.fromfile(
+                p / "genotypes" / "svar2_ranges" / f"{name}.npy", np.int64
+            ).reshape(-1, 2)
             for p in paths
         ]
         out = np.empty((n_regions * n_samples * ploidy, 2), np.int64)
@@ -1629,8 +1650,9 @@ def _concat_svar2_ranges(
 
     for name in ("dense_snp_range", "dense_indel_range"):
         srcs = [
-            np.fromfile(p / "genotypes" / "svar2_ranges" / f"{name}.npy", np.int64)
-            .reshape(-1, 2)
+            np.fromfile(
+                p / "genotypes" / "svar2_ranges" / f"{name}.npy", np.int64
+            ).reshape(-1, 2)
             for p in paths
         ]
         if axis == "samples":
@@ -1643,8 +1665,9 @@ def _concat_svar2_ranges(
         np.load(p / "genotypes" / "svar2_ranges" / "sample_cols.npy") for p in paths
     ]
     if axis == "samples":
-        all_samples = [(s, c) for i, inp in zip(cols, inputs)
-                       for s, c in zip(inp.meta.samples, i)]
+        all_samples = [
+            (s, c) for i, inp in zip(cols, inputs) for s, c in zip(inp.meta.samples, i)
+        ]
         merged_cols = np.array(
             [c for _s, c in sorted(all_samples, key=lambda t: t[0])], np.int64
         )
@@ -1737,6 +1760,7 @@ def test_open_rejects_mutated_variants_arrow(tmp_path, region_shards, reference)
 def test_open_accepts_absent_fingerprint(tmp_path, region_shards, reference):
     """Datasets written before the field exists must still open."""
     import json
+
     shards, _ = region_shards
     out = tmp_path / "merged.gvl"
     gvl.concat(out, shards, axis="regions")

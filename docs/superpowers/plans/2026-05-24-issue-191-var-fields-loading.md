@@ -114,8 +114,7 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
     The output RaggedVariants must not contain a `dosage` field.
     """
     ds = (
-        gvl.Dataset
-        .open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start"])
@@ -129,8 +128,7 @@ def test_dosage_absent_when_not_requested(svar_with_dosages_ds):
 def test_dosage_present_when_requested(svar_with_dosages_ds):
     """Sanity: opting in adds the field."""
     ds = (
-        gvl.Dataset
-        .open(svar_with_dosages_ds, _REF, rc_neg=False)
+        gvl.Dataset.open(svar_with_dosages_ds, _REF, rc_neg=False)
         .with_len("ragged")
         .with_seqs("variants")
         .with_settings(var_fields=["alt", "ref", "start", "dosage"])

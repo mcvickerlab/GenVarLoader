@@ -62,7 +62,9 @@ def test_make_synthetic_bigwigs_deterministic(tmp_path):
 
 
 def test_make_regions_grouped_in_contig_order(tmp_path):
-    regions = make_regions({"chr21": 200_000, "chr22": 150_000}, n_per_contig=4, width=1000, seed=1)
+    regions = make_regions(
+        {"chr21": 200_000, "chr22": 150_000}, n_per_contig=4, width=1000, seed=1
+    )
     assert regions.columns == ["chrom", "chromStart", "chromEnd"]
     # contig-grouped in dict order (chr21 block then chr22 block)
     chroms = regions["chrom"].to_list()
@@ -1004,7 +1006,9 @@ def main() -> None:
 
         _write_track(out, bed, track, samples, 4 << 30)
         dt = time.perf_counter() - t0
-    print(f"impl={args.impl} regions={bed.height} samples={len(samples)} wall={dt:.3f}s")
+    print(
+        f"impl={args.impl} regions={bed.height} samples={len(samples)} wall={dt:.3f}s"
+    )
 
 
 if __name__ == "__main__":
