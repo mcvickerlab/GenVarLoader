@@ -83,7 +83,7 @@ Add this branch in `_flatten_output` **before** the final `isinstance(obj, np.nd
 Add to the `CASES` list (variants is seqs-only; tracks must be off so the return is a bare `RaggedVariants`, not a tuple):
 
 ```python
-    ("variants_ragged", dict(seqs="variants"), "ragged"),
+(("variants_ragged", dict(seqs="variants"), "ragged"),)
 ```
 
 Confirm `_build` turns tracks off for seqs-only cases (it calls `with_tracks(False)` when `tracks is None`). `with_seqs("variants")` is valid for the fixture (it has a VCF with variants).
@@ -173,20 +173,18 @@ def _alt_layout_parts(
 Replace the layout-surgery block in `_get_alleles` (the `node = alleles.layout` … `RegularArray(...)` … `ak.Array(pvl_content)` lines) so it delegates to the helper. The gather still uses the current `ak.to_packed(... [v_idxs])` for now (Task 2 swaps it):
 
 ```python
-    def _get_alleles(
-        self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
-    ) -> ak.Array:
-        v_idxs = genos.data
-        # (b*p*v ~l) packed allele bytes for the selected variants
-        alleles = ak.to_packed(
-            cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs])
-        )
-        return _build_allele_layout(
-            np.asarray(alleles.data).view(np.uint8),
-            np.asarray(alleles.offsets),
-            np.asarray(genos.offsets),
-            genos.shape[-2],
-        )
+def _get_alleles(
+    self, genos: Ragged[V_IDX_TYPE], kind: Literal["alt", "ref"]
+) -> ak.Array:
+    v_idxs = genos.data
+    # (b*p*v ~l) packed allele bytes for the selected variants
+    alleles = ak.to_packed(cast(RaggedAlleles, getattr(self.variants, kind)[v_idxs]))
+    return _build_allele_layout(
+        np.asarray(alleles.data).view(np.uint8),
+        np.asarray(alleles.offsets),
+        np.asarray(genos.offsets),
+        genos.shape[-2],
+    )
 ```
 
 (`genos.shape[-2]` is ploidy `p`.)
@@ -239,11 +237,15 @@ In the AF-filter branch, swap the pack but keep `ak.to_regular` (it is the only 
 In the dosage branch:
 
 ```python
-        if self.dosages is not None and "dosage" in self.var_fields:
-            dosages = self.dosages[r, s]
-            if _keep is not None:
-                dosages = ak.to_regular(dosages[_keep], 1)
-            fields["dosage"] = Ragged(dosages).to_packed() if not isinstance(dosages, Ragged) else dosages.to_packed()
+if self.dosages is not None and "dosage" in self.var_fields:
+    dosages = self.dosages[r, s]
+    if _keep is not None:
+        dosages = ak.to_regular(dosages[_keep], 1)
+    fields["dosage"] = (
+        Ragged(dosages).to_packed()
+        if not isinstance(dosages, Ragged)
+        else dosages.to_packed()
+    )
 ```
 
 > Keep it simple: if `self.dosages[r, s]` already returns a `Ragged`, use `dosages.to_packed()`; the `_keep`/`to_regular` sub-branch may yield an awkward Array, so wrap with `Ragged(...)` before `.to_packed()`. Confirm the runtime types and pick the minimal correct form; the snapshot gate is the check.
@@ -304,14 +306,20 @@ from genvarloader._dataset._haps import _build_allele_layout
 
 def _make_rv(alt_rows, ref_rows, starts, group_off, ploidy):
     """alt_rows/ref_rows: list[bytes] per variant; group_off: variant boundaries per (b*p) row."""
+
     def alleles(rows):
         data = np.frombuffer(b"".join(rows), np.uint8)
         off = np.concatenate([[0], np.cumsum([len(r) for r in rows])]).astype(np.int64)
         return _build_allele_layout(data, off, np.asarray(group_off, np.int64), ploidy)
+
     alt = alleles(alt_rows)
     ref = alleles(ref_rows)
     n = len(starts)
-    start = Ragged.from_offsets(np.asarray(starts, np.int32), (len(group_off) - 1, None), np.asarray(group_off, np.int64))
+    start = Ragged.from_offsets(
+        np.asarray(starts, np.int32),
+        (len(group_off) - 1, None),
+        np.asarray(group_off, np.int64),
+    )
     return RaggedVariants(alt=alt, start=start, ref=ref)
 
 
@@ -322,15 +330,20 @@ def _ref_rc(rv, to_rc):
     return alt, ref
 
 
-@pytest.mark.parametrize("mask", [
-    np.array([True, True]),    # all
-    np.array([False, False]),  # none (early return)
-    np.array([True, False]),   # mixed
-])
+@pytest.mark.parametrize(
+    "mask",
+    [
+        np.array([True, True]),  # all
+        np.array([False, False]),  # none (early return)
+        np.array([True, False]),  # mixed
+    ],
+)
 def test_rc_matches_awkward(mask):
     # b=2, p=1, group_off over 2 rows: row0 has 2 variants, row1 has 1
     group_off = [0, 2, 3]
-    rv = _make_rv([b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1)
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1
+    )
     exp_alt, exp_ref = _ref_rc(rv, mask)
     rv.rc_(mask)
     np.testing.assert_array_equal(ak.to_list(rv["alt"]), ak.to_list(exp_alt))
@@ -339,7 +352,9 @@ def test_rc_matches_awkward(mask):
 
 def test_rc_none_means_all():
     group_off = [0, 2, 3]
-    rv = _make_rv([b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1)
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1
+    )
     exp_alt, exp_ref = _ref_rc(rv, np.ones(2, bool))
     rv.rc_(None)
     np.testing.assert_array_equal(ak.to_list(rv["alt"]), ak.to_list(exp_alt))
@@ -357,31 +372,29 @@ Expected: FAIL — the current `rc_` uses the eager awkward path; tests fail onl
 In `python/genvarloader/_dataset/_rag_variants.py`, replace the body of `rc_` (keep the signature, docstring, and the `to_rc is None` / `not to_rc.any()` guards):
 
 ```python
-    def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
-        if to_rc is None:
-            to_rc = np.ones(self.shape[0], np.bool_)
-        elif not to_rc.any():
-            return self
-
-        from .._ragged import _COMP, reverse_complement_masked
-        from seqpro.rag import Ragged
-        from ._haps import _alt_layout_parts
-
-        for field in ("alt", "ref"):
-            if field not in self.fields:
-                continue
-            arr = self[field]
-            leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
-            # per-allele mask: to_rc is per-batch; broadcast across ploidy then variants
-            per_bp = np.repeat(np.ascontiguousarray(to_rc, np.bool_), ploidy)
-            per_allele = np.repeat(per_bp, np.diff(group_off))
-            view = Ragged.from_offsets(
-                leaf.view("S1"), (per_allele.size, None), allele_off
-            )
-            # in-place: mutates `leaf`, which shares memory with `arr`'s buffer
-            reverse_complement_masked(view, per_allele)
-
+def rc_(self, to_rc: NDArray[np.bool_] | None = None) -> Self:
+    if to_rc is None:
+        to_rc = np.ones(self.shape[0], np.bool_)
+    elif not to_rc.any():
         return self
+
+    from .._ragged import _COMP, reverse_complement_masked
+    from seqpro.rag import Ragged
+    from ._haps import _alt_layout_parts
+
+    for field in ("alt", "ref"):
+        if field not in self.fields:
+            continue
+        arr = self[field]
+        leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+        # per-allele mask: to_rc is per-batch; broadcast across ploidy then variants
+        per_bp = np.repeat(np.ascontiguousarray(to_rc, np.bool_), ploidy)
+        per_allele = np.repeat(per_bp, np.diff(group_off))
+        view = Ragged.from_offsets(leaf.view("S1"), (per_allele.size, None), allele_off)
+        # in-place: mutates `leaf`, which shares memory with `arr`'s buffer
+        reverse_complement_masked(view, per_allele)
+
+    return self
 ```
 
 > The leaf buffer shares memory with the `ak.Array` (verified), so mutating `view` (which wraps `leaf`) reverse-complements `self["alt"]`/`self["ref"]` in place — preserving `rc_`'s in-place contract without `ak.where`/`ak.to_packed`. Confirm `NDArray`/`Self` are imported in this module (they are used in the existing signature).
@@ -420,12 +433,16 @@ Append to `tests/dataset/test_flat_variants.py`:
 ```python
 def test_to_packed_matches_awkward_contiguous():
     group_off = [0, 2, 3]
-    rv = _make_rv([b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1)
+    rv = _make_rv(
+        [b"ACG", b"T", b"GG"], [b"A", b"CC", b"T"], [1, 5, 9], group_off, ploidy=1
+    )
     exp = ak.to_packed(ak.Array(rv))  # old behavior
     got = rv.to_packed()
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
     assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
-    np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
+    np.testing.assert_array_equal(
+        np.asarray(got["start"].data), np.asarray(exp["start"].data)
+    )
 
 
 def test_to_packed_matches_awkward_sliced():
@@ -435,14 +452,17 @@ def test_to_packed_matches_awkward_sliced():
         [b"ACG", b"T", b"GG", b"AA", b"C"],
         [b"A", b"CC", b"T", b"G", b"TT"],
         [1, 5, 9, 12, 20],
-        group_off, ploidy=1,
+        group_off,
+        ploidy=1,
     )
-    sliced = rv[1:]            # drop the first (b,p) row
+    sliced = rv[1:]  # drop the first (b,p) row
     exp = ak.to_packed(ak.Array(sliced))
     got = sliced.to_packed()
     assert ak.to_list(got["alt"]) == ak.to_list(exp["alt"])
     assert ak.to_list(got["ref"]) == ak.to_list(exp["ref"])
-    np.testing.assert_array_equal(np.asarray(got["start"].data), np.asarray(exp["start"].data))
+    np.testing.assert_array_equal(
+        np.asarray(got["start"].data), np.asarray(exp["start"].data)
+    )
 ```
 
 - [ ] **Step 2: Run to verify (guards the refactor)**
@@ -455,30 +475,34 @@ Expected: PASS against the current `ak.to_packed(self)`; this pins behavior so S
 Replace `RaggedVariants.to_packed`:
 
 ```python
-    def to_packed(self) -> Self:
-        from seqpro.rag import Ragged
-        from ._haps import _alt_layout_parts, _build_allele_layout
+def to_packed(self) -> Self:
+    from seqpro.rag import Ragged
+    from ._haps import _alt_layout_parts, _build_allele_layout
 
-        packed = {}
-        for field in self.fields:
-            arr = self[field]
-            if field in ("alt", "ref"):
-                leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
-                # pack the allele (byte) level: contiguates bytes, zero-bases allele_off
-                allele_lvl = Ragged.from_offsets(
-                    leaf.view("S1"), (allele_off.size - 1, None), allele_off
-                ).to_packed()
-                # group_off may be non-zero-based (sliced view) -> rebase
-                rebased_group = np.asarray(group_off, np.int64) - int(group_off[0])
-                packed[field] = _build_allele_layout(
-                    np.asarray(allele_lvl.data).view(np.uint8),
-                    np.asarray(allele_lvl.offsets),
-                    rebased_group,
-                    ploidy,
-                )
-            else:
-                packed[field] = Ragged(arr).to_packed() if not isinstance(arr, Ragged) else arr.to_packed()
-        return type(self)(**packed)
+    packed = {}
+    for field in self.fields:
+        arr = self[field]
+        if field in ("alt", "ref"):
+            leaf, allele_off, group_off, ploidy = _alt_layout_parts(arr)
+            # pack the allele (byte) level: contiguates bytes, zero-bases allele_off
+            allele_lvl = Ragged.from_offsets(
+                leaf.view("S1"), (allele_off.size - 1, None), allele_off
+            ).to_packed()
+            # group_off may be non-zero-based (sliced view) -> rebase
+            rebased_group = np.asarray(group_off, np.int64) - int(group_off[0])
+            packed[field] = _build_allele_layout(
+                np.asarray(allele_lvl.data).view(np.uint8),
+                np.asarray(allele_lvl.offsets),
+                rebased_group,
+                ploidy,
+            )
+        else:
+            packed[field] = (
+                Ragged(arr).to_packed()
+                if not isinstance(arr, Ragged)
+                else arr.to_packed()
+            )
+    return type(self)(**packed)
 ```
 
 > `type(self)(**packed)` reuses `RaggedVariants.__init__`, which `ak.zip`s the packed fields (the one remaining, documented awkward call — cheap layout wrap). For the allele level, `allele_off.size - 1` is the number of variants; `to_packed` reorders by the existing allele order, which is `(b,p,variant)` row-major — matching `ak.to_packed`'s canonical order. Confirm at runtime whether `self[field]` for numeric fields returns a seqpro `Ragged` (has `.to_packed()`) or a bare `ak.Array`; the `isinstance(arr, Ragged)` guard handles both, and the byte-identity test is the check.
@@ -516,14 +540,18 @@ Read the existing `guard_dataset` fixture + `_install_ak_counters` in `tests/dat
 def test_variants_ragged_minimal_awkward(monkeypatch, guard_dataset):
     """Variants gather + rc_ + to_packed must dispatch no awkward kernels.
     ak.zip (record construction) is the documented remaining awkward and is NOT patched here."""
-    calls = _install_ak_counters(monkeypatch)  # patches to_numpy/to_packed/flatten/where
+    calls = _install_ak_counters(
+        monkeypatch
+    )  # patches to_numpy/to_packed/flatten/where
     ds = guard_dataset.with_seqs("variants").with_tracks(False)
     regions = list(range(min(4, ds.shape[0])))
     samples = [i % ds.shape[1] for i in range(len(regions))]
     rv = ds[regions, samples]
-    rv.rc_(np.ones(len(regions), np.bool_))   # exercise rc_ explicitly
-    rv.to_packed()                             # exercise field-wise to_packed
-    assert calls["n"] == 0, "variants gather/rc_/to_packed dispatched awkward (to_packed/where/flatten/to_numpy)"
+    rv.rc_(np.ones(len(regions), np.bool_))  # exercise rc_ explicitly
+    rv.to_packed()  # exercise field-wise to_packed
+    assert calls["n"] == 0, (
+        "variants gather/rc_/to_packed dispatched awkward (to_packed/where/flatten/to_numpy)"
+    )
 ```
 
 > If `ds[regions, samples]` for variants returns a tuple (tracks somehow on), use `with_tracks(False)` (already applied) and unwrap. If the guard fails because a path still calls a patched function, investigate — it reveals a missed swap; report DONE_WITH_CONCERNS rather than weakening the assert. Note: `ak.zip` is intentionally not in the patched set.

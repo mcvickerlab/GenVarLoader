@@ -16,6 +16,7 @@ The crash, confirmed by repro:
 
 ```python
 import genvarloader as gvl
+
 gvl.Dataset.open("tests/data/phased_dataset.vcf.gvl")
 # ValueError: Cannot return RaggedSeqs: no reference genome was provided.
 ```

@@ -85,8 +85,12 @@ transitions like `with_seqs` / `with_output_format`; type-preserving knobs live 
 ```python
 from genvarloader import DummyVariant
 
-ds.with_settings(dummy_variant=DummyVariant(start=-1, ref=b"N", alt=b"N", ilen=0, dosage=0.0))
-ds.with_settings(dummy_variant=False)   # disable; mirrors the min_af/max_af `False` convention
+ds.with_settings(
+    dummy_variant=DummyVariant(start=-1, ref=b"N", alt=b"N", ilen=0, dosage=0.0)
+)
+ds.with_settings(
+    dummy_variant=False
+)  # disable; mirrors the min_af/max_af `False` convention
 ```
 
 - New parameter `dummy_variant: DummyVariant | Literal[False] | None = None` on `with_settings`

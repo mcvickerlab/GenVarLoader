@@ -718,7 +718,9 @@ def _downgrade_to_aos(path):
         rec["start"] = starts
         rec["end"] = ends
         rec["value"] = values
-        out = np.memmap(d / "intervals.npy", dtype=INTERVAL_DTYPE, mode="w+", shape=rec.shape)
+        out = np.memmap(
+            d / "intervals.npy", dtype=INTERVAL_DTYPE, mode="w+", shape=rec.shape
+        )
         out[:] = rec
         out.flush()
         del starts, ends, values, out
@@ -732,7 +734,9 @@ def _downgrade_to_aos(path):
 
 
 def test_round_trip_byte_identical(track_dataset_path, reference):
-    before = gvl.Dataset.open(track_dataset_path, reference=reference).with_tracks("cov")[0, 0]
+    before = gvl.Dataset.open(track_dataset_path, reference=reference).with_tracks(
+        "cov"
+    )[0, 0]
     before = np.asarray(before).copy()
 
     _downgrade_to_aos(track_dataset_path)
@@ -743,9 +747,14 @@ def test_round_trip_byte_identical(track_dataset_path, reference):
     assert (track_dir / "ends.npy").exists()
     assert (track_dir / "values.npy").exists()
     assert not (track_dir / "intervals.npy").exists()
-    assert json.loads((track_dataset_path / "metadata.json").read_text())["format_version"] == "2.0.0"
+    assert (
+        json.loads((track_dataset_path / "metadata.json").read_text())["format_version"]
+        == "2.0.0"
+    )
 
-    after = gvl.Dataset.open(track_dataset_path, reference=reference).with_tracks("cov")[0, 0]
+    after = gvl.Dataset.open(track_dataset_path, reference=reference).with_tracks(
+        "cov"
+    )[0, 0]
     np.testing.assert_array_equal(np.asarray(after), before)
 
 
@@ -771,7 +780,10 @@ def test_resumable_after_interrupt_before_metadata_bump(track_dataset_path):
     assert (track_dir / "intervals.npy").exists()  # AoS still present
 
     gvl.migrate(track_dataset_path)  # completes the migration
-    assert json.loads((track_dataset_path / "metadata.json").read_text())["format_version"] == "2.0.0"
+    assert (
+        json.loads((track_dataset_path / "metadata.json").read_text())["format_version"]
+        == "2.0.0"
+    )
     assert not (track_dir / "intervals.npy").exists()
 
 
@@ -783,7 +795,9 @@ def test_cleans_leftover_aos_after_interrupt_before_delete(track_dataset_path):
     # Re-introduce a leftover AoS file (as if delete was interrupted).
     starts = np.memmap(track_dir / "starts.npy", dtype=np.int32, mode="r")
     rec = np.zeros(len(starts), dtype=INTERVAL_DTYPE)
-    out = np.memmap(track_dir / "intervals.npy", dtype=INTERVAL_DTYPE, mode="w+", shape=rec.shape)
+    out = np.memmap(
+        track_dir / "intervals.npy", dtype=INTERVAL_DTYPE, mode="w+", shape=rec.shape
+    )
     out[:] = rec
     out.flush()
     del starts, out
@@ -930,9 +944,9 @@ from ._dataset._migrate import migrate
 and insert `"migrate"` into `__all__` (alphabetically, between `"get_splice_bed"` and `"migrate_svar_link"`):
 
 ```python
-    "get_splice_bed",
-    "migrate",
-    "migrate_svar_link",
+("get_splice_bed",)
+("migrate",)
+("migrate_svar_link",)
 ```
 
 - [ ] **Step 5: Run the test to verify it passes**
@@ -1053,24 +1067,16 @@ In `python/genvarloader/_dataset/_reconstruct.py`, add the import near the top (
 `geno_v_idxs` (`:232-234`):
 
 ```python
-                        geno_v_idxs=_ffi_array(
-                            self.haps.genotypes.data, np.int32, "geno_v_idxs"
-                        ),
+geno_v_idxs = (_ffi_array(self.haps.genotypes.data, np.int32, "geno_v_idxs"),)
 ```
 
 `itv_starts` / `itv_ends` / `itv_values` / `itv_offsets` (`:241-250`):
 
 ```python
-                        itv_starts=_ffi_array(
-                            intervals.starts.data, np.int32, "itv_starts"
-                        ),
-                        itv_ends=_ffi_array(intervals.ends.data, np.int32, "itv_ends"),
-                        itv_values=_ffi_array(
-                            intervals.values.data, np.float32, "itv_values"
-                        ),
-                        itv_offsets=_ffi_array(
-                            intervals.starts.offsets, np.int64, "itv_offsets"
-                        ),
+itv_starts = (_ffi_array(intervals.starts.data, np.int32, "itv_starts"),)
+itv_ends = (_ffi_array(intervals.ends.data, np.int32, "itv_ends"),)
+itv_values = (_ffi_array(intervals.values.data, np.float32, "itv_values"),)
+itv_offsets = (_ffi_array(intervals.starts.offsets, np.int64, "itv_offsets"),)
 ```
 
 Leave `v_starts` and `ilens` (`:236-239`) as `np.ascontiguousarray(...)` — Task 5 converts those to the cached arrays. Leave `o_idx`, `out_ofsts_per_t`, `regions`, `shifts`, `geno_idx`, `track_ofsts_per_t`, `params`, `keep`, `keep_offsets` as `np.ascontiguousarray(...)` (batch-bounded).
@@ -1082,19 +1088,19 @@ In `python/genvarloader/_dataset/_haps.py`, add `from ._utils import _ffi_array`
 `:796` (plain `reconstruct_haplotypes_fused`):
 
 ```python
-                    geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+geno_v_idxs = (_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),)
 ```
 
 `:869` (`reconstruct_haplotypes_spliced_fused`):
 
 ```python
-                geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+geno_v_idxs = (_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),)
 ```
 
 `:958` (`reconstruct_annotated_haplotypes_fused`):
 
 ```python
-                        geno_v_idxs=_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),
+geno_v_idxs = (_ffi_array(self.genotypes.data, np.int32, "geno_v_idxs"),)
 ```
 
 Leave the sub-linear args (`v_starts`, `ilens`, `alt_alleles`, `alt_offsets`, `ref_`, `ref_offsets`) as `np.ascontiguousarray(...)` for now — Task 5. Leave `regions`, `shifts`, `geno_offset_idx`, `keep`, `keep_offsets`, `permuted_regions`, `flat_shifts`, `flat_geno_offset_idx`, `out_offsets` as `np.ascontiguousarray(...)` (batch-bounded). Leave `_as_starts_stops(self.genotypes.offsets)` untouched.
@@ -1147,13 +1153,17 @@ def test_tracks_only_no_memmap_copy(track_dataset_path, reference, _no_memmap_co
 
 
 def test_haps_no_memmap_copy(track_dataset_path, reference, _no_memmap_copies):
-    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs("haplotypes")
+    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs(
+        "haplotypes"
+    )
     _ = ds[0, 0]
     assert _no_memmap_copies == [], f"sample-scale memmap copies: {_no_memmap_copies}"
 
 
 def test_annotated_no_memmap_copy(track_dataset_path, reference, _no_memmap_copies):
-    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs("annotated")
+    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs(
+        "annotated"
+    )
     _ = ds[0, 0]
     assert _no_memmap_copies == [], f"sample-scale memmap copies: {_no_memmap_copies}"
 ```
@@ -1225,7 +1235,9 @@ from genvarloader._dataset._haps import Haps
 
 
 def _haps(track_dataset_path, reference) -> Haps:
-    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs("haplotypes")
+    ds = gvl.Dataset.open(track_dataset_path, reference=reference).with_seqs(
+        "haplotypes"
+    )
     seqs = ds._seqs
     assert isinstance(seqs, Haps)
     return seqs
@@ -1315,27 +1327,23 @@ And add the property (anywhere in the `Haps` class body, e.g. after `__post_init
 In `python/genvarloader/_dataset/_haps.py`, at the plain fused call (`:797-806`) replace:
 
 ```python
-                    v_starts=np.ascontiguousarray(self.variants.start, np.int32),
-                    ilens=np.ascontiguousarray(self.variants.ilen, np.int32),
-                    alt_alleles=np.ascontiguousarray(
-                        self.variants.alt.data.view(np.uint8), np.uint8
-                    ),
-                    alt_offsets=np.ascontiguousarray(
-                        self.variants.alt.offsets, np.int64
-                    ),
-                    ref_=np.ascontiguousarray(self.reference.reference, np.uint8),
-                    ref_offsets=np.ascontiguousarray(self.reference.offsets, np.int64),
+v_starts = (np.ascontiguousarray(self.variants.start, np.int32),)
+ilens = (np.ascontiguousarray(self.variants.ilen, np.int32),)
+alt_alleles = (np.ascontiguousarray(self.variants.alt.data.view(np.uint8), np.uint8),)
+alt_offsets = (np.ascontiguousarray(self.variants.alt.offsets, np.int64),)
+ref_ = (np.ascontiguousarray(self.reference.reference, np.uint8),)
+ref_offsets = (np.ascontiguousarray(self.reference.offsets, np.int64),)
 ```
 
 with:
 
 ```python
-                    v_starts=self.ffi_static.v_starts,
-                    ilens=self.ffi_static.ilens,
-                    alt_alleles=self.ffi_static.alt_alleles,
-                    alt_offsets=self.ffi_static.alt_offsets,
-                    ref_=self.ffi_static.ref,
-                    ref_offsets=self.ffi_static.ref_offsets,
+v_starts = (self.ffi_static.v_starts,)
+ilens = (self.ffi_static.ilens,)
+alt_alleles = (self.ffi_static.alt_alleles,)
+alt_offsets = (self.ffi_static.alt_offsets,)
+ref_ = (self.ffi_static.ref,)
+ref_offsets = (self.ffi_static.ref_offsets,)
 ```
 
 Apply the identical replacement at the spliced fused call (`:870-877`) and the annotated fused call (`:959-970`), matching each call's indentation. (Each of those three sites asserts `self.reference is not None` upstream, so `ffi_static.ref`/`ref_offsets` are non-`None` there.)
@@ -1345,17 +1353,15 @@ Apply the identical replacement at the spliced fused call (`:870-877`) and the a
 In `python/genvarloader/_dataset/_reconstruct.py`, at the `intervals_and_realign_track_fused(...)` call (`:236-239`) replace:
 
 ```python
-                        v_starts=np.ascontiguousarray(
-                            self.haps.variants.start, np.int32
-                        ),
-                        ilens=np.ascontiguousarray(self.haps.variants.ilen, np.int32),
+v_starts = (np.ascontiguousarray(self.haps.variants.start, np.int32),)
+ilens = (np.ascontiguousarray(self.haps.variants.ilen, np.int32),)
 ```
 
 with:
 
 ```python
-                        v_starts=self.haps.ffi_static.v_starts,
-                        ilens=self.haps.ffi_static.ilens,
+v_starts = (self.haps.ffi_static.v_starts,)
+ilens = (self.haps.ffi_static.ilens,)
 ```
 
 - [ ] **Step 6: Run the cache test**

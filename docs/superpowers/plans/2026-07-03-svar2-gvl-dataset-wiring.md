@@ -97,9 +97,11 @@ def test_resolve_falls_back_to_relative_then_absolute(tmp_path):
     gvl = tmp_path / "ds.gvl"
     gvl.mkdir()
     import os
+
     rel = os.path.relpath(d, start=gvl).replace(os.sep, "/")
     link = Svar2Link(
-        relative_path=rel, absolute_path=str(d),
+        relative_path=rel,
+        absolute_path=str(d),
         fingerprint=Svar2Fingerprint(n_variants=3, store_bytes=4),
     )
     assert _resolve_svar2(gvl, link, None) == d
@@ -109,7 +111,8 @@ def test_resolve_raises_when_unfindable(tmp_path):
     gvl = tmp_path / "ds.gvl"
     gvl.mkdir()
     link = Svar2Link(
-        relative_path="missing.svar2", absolute_path=str(tmp_path / "missing.svar2"),
+        relative_path="missing.svar2",
+        absolute_path=str(tmp_path / "missing.svar2"),
         fingerprint=Svar2Fingerprint(n_variants=3, store_bytes=4),
     )
     with pytest.raises(FileNotFoundError):
@@ -131,6 +134,7 @@ Copy `_svar_link.py`'s structure. Fingerprint on a **stable** `.svar2` identity:
 Mirrors _svar_link.py. SVAR2 fingerprint identity = n_variants (from the
 SparseVar2 index) + byte count of a canonical store file.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -187,9 +191,7 @@ def _verify_fingerprint2(svar2_path: Path, link: Svar2Link | None) -> None:
         return
     store = svar2_path / _STORE_FILE
     if not store.exists():
-        raise FileNotFoundError(
-            f"Expected {store}; resolved svar2 is malformed."
-        )
+        raise FileNotFoundError(f"Expected {store}; resolved svar2 is malformed.")
     import polars as pl
 
     n_variants_observed = (
@@ -247,11 +249,15 @@ def test_metadata_roundtrips_svar2_link():
     from genvarloader._dataset._svar2_link import Svar2Fingerprint, Svar2Link
 
     link = Svar2Link(
-        relative_path="c.svar2", absolute_path="/abs/c.svar2",
+        relative_path="c.svar2",
+        absolute_path="/abs/c.svar2",
         fingerprint=Svar2Fingerprint(n_variants=5, store_bytes=99),
     )
     m = Metadata(
-        contigs=["chr1"], samples=["s0"], ploidy=2, n_regions=1,
+        contigs=["chr1"],
+        samples=["s0"],
+        ploidy=2,
+        n_regions=1,
         svar2_link=link,
     )
     m2 = Metadata.model_validate_json(m.model_dump_json())
@@ -341,9 +347,7 @@ def test_write_svar2_produces_ranges_cache(svar2_store, tmp_path):
     from genoray import SparseVar2
 
     sv = SparseVar2(svar2_store)
-    bed = pl.DataFrame(
-        {"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]}
-    )
+    bed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [40]})
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=bed, variants=Path(svar2_store))
 
@@ -414,14 +418,24 @@ def _write_from_svar2(
     S = len(samples)
     P = svar2.ploidy
 
-    dense_range = np.memmap(out_dir / "svar2_dense_range.npy", np.int32, "w+", shape=(R, 2))
-    region_starts = np.memmap(out_dir / "svar2_region_starts.npy", np.int32, "w+", shape=(R,))
-    vk_snp = np.memmap(out_dir / "svar2_vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2))
-    vk_indel = np.memmap(out_dir / "svar2_vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2))
+    dense_range = np.memmap(
+        out_dir / "svar2_dense_range.npy", np.int32, "w+", shape=(R, 2)
+    )
+    region_starts = np.memmap(
+        out_dir / "svar2_region_starts.npy", np.int32, "w+", shape=(R,)
+    )
+    vk_snp = np.memmap(
+        out_dir / "svar2_vk_snp_range.npy", np.int64, "w+", shape=(R, S, P, 2)
+    )
+    vk_indel = np.memmap(
+        out_dir / "svar2_vk_indel_range.npy", np.int64, "w+", shape=(R, S, P, 2)
+    )
 
     sample_cols: list[int] | None = None
     contig_offset = 0
-    for (c,), df in bed.partition_by("chrom", as_dict=True, maintain_order=True).items():
+    for (c,), df in bed.partition_by(
+        "chrom", as_dict=True, maintain_order=True
+    ).items():
         c = cast(str, c)
         rc = df.height
         rows = slice(contig_offset, contig_offset + rc)
@@ -446,7 +460,9 @@ def _write_from_svar2(
     with open(out_dir / "svar2_meta.json", "w") as f:
         json.dump(
             {
-                "n_regions": R, "n_samples": S, "ploidy": P,
+                "n_regions": R,
+                "n_samples": S,
+                "ploidy": P,
                 "sample_cols": sample_cols,
                 "dense_range": {"shape": [R, 2], "dtype": "<i4"},
                 "region_starts": {"shape": [R], "dtype": "<i4"},
@@ -549,9 +565,7 @@ def test_svar2_dataset_haps_match_live_source(svar2_store, reference_fasta, tmp_
     )
     # Compare byte-for-byte over every (sample, ploid).
     np.testing.assert_array_equal(cached.to_packed().data, live.to_packed().data)
-    np.testing.assert_array_equal(
-        np.asarray(cached.offsets), np.asarray(live.offsets)
-    )
+    np.testing.assert_array_equal(np.asarray(cached.offsets), np.asarray(live.offsets))
 ```
 
 Add the `_load_contig_ref` helper + `reference_fasta`/`svar2_store` fixtures to `tests/dataset/conftest.py` if absent (mirror the fixtures in `tests/test_svar2_reconstruct.py`).
@@ -566,30 +580,44 @@ Expected: FAIL — `Dataset.open` builds a plain `Haps` (no svar2 dispatch yet) 
 In `_svar2_source.py`, add a classmethod-free helper that builds a `gather_ranges` bundle dict from cached memmap slices and calls `self.svar2.gather_ranges`. Refactor `_query` so its `d` (payload dict) can come from **either** live `overlap_batch` (kept as oracle) or `gather_ranges(bundle)`:
 
 ```python
-    def _query_cached(self, contig, regions, dense_range, region_starts,
-                      vk_snp_range, vk_indel_range, sample_cols):
-        """Build a find_ranges bundle from cached slices and gather it (tree-free).
-        Shapes: dense_range (R,2), region_starts (R,), vk_*_range (R,S,P,2)."""
-        R = dense_range.shape[0]
-        S = vk_snp_range.shape[1]
-        P = vk_snp_range.shape[2]
-        bundle = {
-            "dense_range": np.ascontiguousarray(dense_range, np.int32),
-            "region_starts": np.ascontiguousarray(region_starts, np.int32),
-            "sample_cols": np.ascontiguousarray(sample_cols, np.int64),
-            "vk_snp_range": np.ascontiguousarray(vk_snp_range.reshape(R * S * P, 2), np.int64),
-            "vk_indel_range": np.ascontiguousarray(vk_indel_range.reshape(R * S * P, 2), np.int64),
-            "n_regions": R, "n_samples": S, "ploidy": P,
-        }
-        d = self.svar2.gather_ranges(contig, bundle)
-        reg = np.asarray(regions, np.int32).reshape(R, 2)
-        reg_rs = np.repeat(reg, S, axis=0)
-        regions_gvl = np.zeros((R * S, 3), np.int32)
-        regions_gvl[:, 1:] = reg_rs
-        dense_range_gvl = np.ascontiguousarray(
-            np.repeat(np.asarray(d["dense_range"], np.int32), S, axis=0), np.int32
-        )
-        return d, R, S, P, regions_gvl, dense_range_gvl
+def _query_cached(
+    self,
+    contig,
+    regions,
+    dense_range,
+    region_starts,
+    vk_snp_range,
+    vk_indel_range,
+    sample_cols,
+):
+    """Build a find_ranges bundle from cached slices and gather it (tree-free).
+    Shapes: dense_range (R,2), region_starts (R,), vk_*_range (R,S,P,2)."""
+    R = dense_range.shape[0]
+    S = vk_snp_range.shape[1]
+    P = vk_snp_range.shape[2]
+    bundle = {
+        "dense_range": np.ascontiguousarray(dense_range, np.int32),
+        "region_starts": np.ascontiguousarray(region_starts, np.int32),
+        "sample_cols": np.ascontiguousarray(sample_cols, np.int64),
+        "vk_snp_range": np.ascontiguousarray(
+            vk_snp_range.reshape(R * S * P, 2), np.int64
+        ),
+        "vk_indel_range": np.ascontiguousarray(
+            vk_indel_range.reshape(R * S * P, 2), np.int64
+        ),
+        "n_regions": R,
+        "n_samples": S,
+        "ploidy": P,
+    }
+    d = self.svar2.gather_ranges(contig, bundle)
+    reg = np.asarray(regions, np.int32).reshape(R, 2)
+    reg_rs = np.repeat(reg, S, axis=0)
+    regions_gvl = np.zeros((R * S, 3), np.int32)
+    regions_gvl[:, 1:] = reg_rs
+    dense_range_gvl = np.ascontiguousarray(
+        np.repeat(np.asarray(d["dense_range"], np.int32), S, axis=0), np.int32
+    )
+    return d, R, S, P, regions_gvl, dense_range_gvl
 ```
 
 Extract the kernel-call bodies of `reconstruct`/`realign_tracks` so they accept the `(d, R, S, P, regions_gvl, dense_range_gvl)` tuple from **either** `_query` (live) or `_query_cached`. Keep the live `_query` intact — it is the parity oracle.
@@ -607,15 +635,16 @@ class HapsSvar2(Reconstructor["RaggedSeqs"]):
     contigs: list[str]
     samples: list[str]
     ploidy: int
-    dense_range: NDArray[np.int32]        # (R, 2) memmap
-    region_starts: NDArray[np.int32]      # (R,) memmap
-    vk_snp_range: NDArray[np.int64]       # (R, S, P, 2) memmap
-    vk_indel_range: NDArray[np.int64]     # (R, S, P, 2) memmap
-    sample_cols: NDArray[np.int64]        # (S,)
+    dense_range: NDArray[np.int32]  # (R, 2) memmap
+    region_starts: NDArray[np.int32]  # (R,) memmap
+    vk_snp_range: NDArray[np.int64]  # (R, S, P, 2) memmap
+    vk_indel_range: NDArray[np.int64]  # (R, S, P, 2) memmap
+    sample_cols: NDArray[np.int64]  # (S,)
 
     @classmethod
-    def from_path(cls, path, reference, contigs, samples, ploidy,
-                  svar2_link, svar2_override):
+    def from_path(
+        cls, path, reference, contigs, samples, ploidy, svar2_link, svar2_override
+    ):
         import json
         from genoray import SparseVar2
         from ._svar2_link import _resolve_svar2, _verify_fingerprint2
@@ -625,31 +654,54 @@ class HapsSvar2(Reconstructor["RaggedSeqs"]):
         svar2 = SparseVar2(svar2_path)
         geno = path / "genotypes"
         meta = json.loads((geno / "svar2_meta.json").read_text())
+
         def mm(name):
             spec = meta[name]
-            return np.memmap(geno / f"svar2_{name}.npy",
-                             dtype=np.dtype(spec["dtype"]),
-                             mode="r", shape=tuple(spec["shape"]))
+            return np.memmap(
+                geno / f"svar2_{name}.npy",
+                dtype=np.dtype(spec["dtype"]),
+                mode="r",
+                shape=tuple(spec["shape"]),
+            )
+
         if reference is None:
             raise ValueError("SVAR2 haplotype output requires a reference genome.")
         return cls(
-            path=path, reference=reference, svar2=svar2, contigs=contigs,
-            samples=samples, ploidy=ploidy,
-            dense_range=mm("dense_range"), region_starts=mm("region_starts"),
-            vk_snp_range=mm("vk_snp_range"), vk_indel_range=mm("vk_indel_range"),
+            path=path,
+            reference=reference,
+            svar2=svar2,
+            contigs=contigs,
+            samples=samples,
+            ploidy=ploidy,
+            dense_range=mm("dense_range"),
+            region_starts=mm("region_starts"),
+            vk_snp_range=mm("vk_snp_range"),
+            vk_indel_range=mm("vk_indel_range"),
             sample_cols=np.asarray(meta["sample_cols"], np.int64),
         )
 
     def to_kind(self, kind):
         from .._ragged import RaggedSeqs
+
         if kind is not RaggedSeqs:
             raise NotImplementedError(
                 f"SVAR2 datasets support only 'haplotypes' output, not {kind.__name__}."
             )
         return self
 
-    def __call__(self, idx, r_idx, regions, output_length, jitter, rng,
-                 deterministic, splice_plan=None, flat=False, to_rc=None):
+    def __call__(
+        self,
+        idx,
+        r_idx,
+        regions,
+        output_length,
+        jitter,
+        rng,
+        deterministic,
+        splice_plan=None,
+        flat=False,
+        to_rc=None,
+    ):
         if splice_plan is not None:
             raise NotImplementedError("Spliced SVAR2 haplotypes are not supported.")
         # idx -> (region, sample); group by contig; gather+reconstruct per contig;
@@ -715,25 +767,26 @@ Expected: FAIL — `_recon` is a plain `Haps`, or `_build_seqs` errors on missin
 3a. In `_open.py::_build_seqs` (`:149`), branch on `metadata.svar2_link`:
 
 ```python
-        if self._has_genotypes():
-            if metadata.ploidy is None:
-                raise ValueError("Malformed dataset: found genotypes but not ploidy.")
-            if metadata.svar2_link is not None:
-                from ._haps import HapsSvar2
-                if reference is None:
-                    raise ValueError(
-                        "SVAR2 datasets require a reference genome for haplotype output."
-                    )
-                return HapsSvar2.from_path(
-                    path=self.path,
-                    reference=reference,
-                    contigs=metadata.contigs,
-                    samples=metadata.samples,
-                    ploidy=metadata.ploidy,
-                    svar2_link=metadata.svar2_link,
-                    svar2_override=getattr(self, "svar2", None),
-                )
-            seqs = Haps.from_path(...)  # unchanged SVAR1 path
+if self._has_genotypes():
+    if metadata.ploidy is None:
+        raise ValueError("Malformed dataset: found genotypes but not ploidy.")
+    if metadata.svar2_link is not None:
+        from ._haps import HapsSvar2
+
+        if reference is None:
+            raise ValueError(
+                "SVAR2 datasets require a reference genome for haplotype output."
+            )
+        return HapsSvar2.from_path(
+            path=self.path,
+            reference=reference,
+            contigs=metadata.contigs,
+            samples=metadata.samples,
+            ploidy=metadata.ploidy,
+            svar2_link=metadata.svar2_link,
+            svar2_override=getattr(self, "svar2", None),
+        )
+    seqs = Haps.from_path(...)  # unchanged SVAR1 path
 ```
 
 `self._has_genotypes()` checks for `genotypes/` — confirm it does not require SVAR1-specific files (`svar_meta.json`); if it does, relax it to also accept `svar2_meta.json`.
@@ -743,14 +796,15 @@ Expected: FAIL — `_recon` is a plain `Haps`, or `_build_seqs` errors on missin
 3c. In `_reconstruct.py::_build_reconstructor`, accept `HapsSvar2` for the `haplotypes` kind. The simplest wiring: treat `HapsSvar2` like `Haps` in the `seqs_kind in ("haplotypes", ...)` branch but restrict to `"haplotypes"`:
 
 ```python
-    from ._haps import HapsSvar2
-    if isinstance(seqs, HapsSvar2):
-        if seqs_kind not in (None, "haplotypes"):
-            raise NotImplementedError(
-                f"SVAR2 datasets support only 'haplotypes', not {seqs_kind!r}."
-            )
-        active_seqs = seqs
-        # dispatch: HapsSvar2 alone -> itself; with tracks -> HapsSvar2Tracks (Task 6)
+from ._haps import HapsSvar2
+
+if isinstance(seqs, HapsSvar2):
+    if seqs_kind not in (None, "haplotypes"):
+        raise NotImplementedError(
+            f"SVAR2 datasets support only 'haplotypes', not {seqs_kind!r}."
+        )
+    active_seqs = seqs
+    # dispatch: HapsSvar2 alone -> itself; with tracks -> HapsSvar2Tracks (Task 6)
 ```
 
 Add `HapsSvar2` (and `HapsSvar2Tracks` from Task 6) to the `_recon` type union in `_impl.py` (`:899`) and the `match self._recon` in `__getitem__` (`:1028`).
@@ -792,15 +846,17 @@ def test_svar2_tracks_match_live(svar2_store, reference_fasta, bigwig_track, tmp
     out = tmp_path / "ds.gvl"
     gvl.write(path=out, bed=bed, variants=Path(svar2_store), tracks=[bigwig_track])
 
-    ds = gvl.Dataset.open(out, reference=reference_fasta).with_seqs("haplotypes").with_tracks(...)
+    ds = (
+        gvl.Dataset.open(out, reference=reference_fasta)
+        .with_seqs("haplotypes")
+        .with_tracks(...)
+    )
     _, cached_tracks = ds[0, :]
 
     # Live oracle: SparseVar2Source.realign_tracks with the same track buffer.
     sv = SparseVar2(svar2_store)
     live = SparseVar2Source(sv).realign_tracks("chr1", [(0, 40)], *_track_args(...))
-    np.testing.assert_array_equal(
-        cached_tracks.to_packed().data, live.to_packed().data
-    )
+    np.testing.assert_array_equal(cached_tracks.to_packed().data, live.to_packed().data)
 ```
 
 Adapt fixtures/`_track_args` to whatever the existing `tests/test_svar2_realign_tracks.py` uses.
@@ -851,11 +907,13 @@ Parametrize over `{SNP, INS, DEL} × {1, 2, 4} samples × {1, 2} ploidy` (reuse 
 ```python
 import pytest
 
+
 @pytest.mark.parametrize("variant_kind", ["snp", "ins", "del"])
 @pytest.mark.parametrize("n_samples", [1, 2, 4])
 @pytest.mark.parametrize("ploidy", [1, 2])
-def test_svar2_cached_matches_decode_matrix(variant_kind, n_samples, ploidy, tmp_path):
-    ...  # synth store -> gvl.write -> open -> compare cached vs live vs decode
+def test_svar2_cached_matches_decode_matrix(
+    variant_kind, n_samples, ploidy, tmp_path
+): ...  # synth store -> gvl.write -> open -> compare cached vs live vs decode
 ```
 
 - [ ] **Step 2: Add the real chr21 germline + somatic parity test (slow)**
