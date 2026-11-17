@@ -90,6 +90,47 @@ pub fn assemble_alt_window(
     (Array1::from_vec(out), Array1::from_vec(out_off))
 }
 
+/// Re-insert the anchor base into empty-ALT pure deletions before alt-window
+/// assembly. SVAR2 stores an atomized pure DEL with an empty ALT (genoray keeps
+/// no anchor in the key) at the VCF anchor position, so `[start, end)` spans the
+/// anchor plus the deleted bases exactly as for SVAR1 (`GTA>G`). Haplotype
+/// reconstruction keeps the anchor (`ref[pos]`), so the alt window must too, or
+/// `flank5 . alt . flank3` silently drops a base and disagrees with both the
+/// haplotype and the SVAR1 alt window. The anchor is the first byte of each
+/// variant's ref-window span, `rw_data[rw_off[i] + L]`.
+///
+/// Returns `None` when no variant needs re-anchoring (the common SVAR1 case), so
+/// callers keep the gathered buffers without a copy. Mirrors
+/// `_anchor_empty_del_alts` in `_dataset/_flat_flanks.py`.
+pub fn anchor_empty_del_alts(
+    alt_data: ArrayView1<u8>,
+    alt_seq_off: ArrayView1<i64>,
+    ilens_v: ArrayView1<i32>,
+    rw_data: ArrayView1<u8>,
+    rw_off: ArrayView1<i64>,
+    flank_len: usize,
+) -> Option<(Array1<u8>, Array1<i64>)> {
+    let n = alt_seq_off.len() - 1;
+    let needs = |i: usize| alt_seq_off[i + 1] == alt_seq_off[i] && ilens_v[i] < 0;
+    if !(0..n).any(needs) {
+        return None;
+    }
+    let alt_s = alt_data.as_slice().expect("anchor_empty_del_alts: alt_data must be contiguous");
+    let rw_s = rw_data.as_slice().expect("anchor_empty_del_alts: rw_data must be contiguous");
+    let mut out: Vec<u8> = Vec::with_capacity(alt_s.len() + n);
+    let mut off: Vec<i64> = Vec::with_capacity(n + 1);
+    off.push(0);
+    for i in 0..n {
+        if needs(i) {
+            out.push(rw_s[rw_off[i] as usize + flank_len]);
+        } else {
+            out.extend_from_slice(&alt_s[alt_seq_off[i] as usize..alt_seq_off[i + 1] as usize]);
+        }
+        off.push(out.len() as i64);
+    }
+    Some((Array1::from_vec(out), Array1::from_vec(off)))
+}
+
 /// Fetch the per-variant reference window `[start-L, end+L)` into one flat
 /// buffer, with `ends = starts - min(ilen, 0) + 1`. Returns `(data, rw_off)`
 /// where `rw_off` are per-variant byte boundaries (len `n+1`). Reuses
@@ -251,14 +292,15 @@ pub fn assemble_windows_mode<Tok: Copy>(
 
     // One fused fetch if either side needs a window read.
     let need_fetch = ref_mode == 1 || alt_mode == 1;
-    let fetched = if need_fetch {
+    let (fetched, ilens_sel) = if need_fetch {
         let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
-        Some(fetch_windows(
+        let f = fetch_windows(
             v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
             pad_char,
-        ))
+        );
+        (Some(f), Some(ilens_v))
     } else {
-        None
+        (None, None)
     };
 
     // ref side (ordered first to match Python field insertion order).
@@ -278,13 +320,20 @@ pub fn assemble_windows_mode<Tok: Copy>(
     if alt_mode == 1 {
         let (rw_data, rw_off) = fetched.as_ref().expect("alt window needs a fetch");
         let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
-        let (alt_bytes, alt_off) = assemble_alt_window(
-            f5.view(),
-            f3.view(),
+        let ilens_v = ilens_sel.as_ref().expect("alt window needs gathered ilens");
+        let anchored = anchor_empty_del_alts(
             alt_data.view(),
             alt_seq_off.view(),
+            ilens_v.view(),
+            rw_data.view(),
+            rw_off.view(),
             l,
         );
+        let (a_data, a_off) = match &anchored {
+            Some((d, o)) => (d.view(), o.view()),
+            None => (alt_data.view(), alt_seq_off.view()),
+        };
+        let (alt_bytes, alt_off) = assemble_alt_window(f5.view(), f3.view(), a_data, a_off, l);
         let tok = tokenize(alt_bytes.view(), lut);
         tok_bufs.push(("alt_window", tok, alt_off));
     } else if alt_mode == 2 {
@@ -353,6 +402,45 @@ mod tests {
         // var1: 20, 67,71, 21  (2*1 + 2 = 4 bytes)
         assert_eq!(out.to_vec(), vec![10u8, 65, 11, 20, 67, 71, 21]);
         assert_eq!(off.to_vec(), vec![0i64, 3, 7]);
+    }
+
+    #[test]
+    fn test_anchor_empty_del_alts() {
+        // L=1. var0: SNP alt "A"; var1: SVAR2 pure DEL (ilen -2, empty ALT) whose
+        // ref window is [9 | 30 31 32 | 8] -> anchor 30; var2: empty ALT but
+        // ilen 0 (not a DEL) stays empty.
+        let alt_data = arr1(&[65u8]);
+        let alt_seq_off = arr1(&[0i64, 1, 1, 1]);
+        let ilens = arr1(&[0i32, -2, 0]);
+        let rw = arr1(&[1u8, 2, 3, 9, 30, 31, 32, 8, 4, 5, 6]);
+        let rw_off = arr1(&[0i64, 3, 8, 11]);
+        let (d, o) = anchor_empty_del_alts(
+            alt_data.view(),
+            alt_seq_off.view(),
+            ilens.view(),
+            rw.view(),
+            rw_off.view(),
+            1,
+        )
+        .expect("a pure DEL needs re-anchoring");
+        assert_eq!(d.to_vec(), vec![65u8, 30]);
+        assert_eq!(o.to_vec(), vec![0i64, 1, 2, 2]);
+
+        // SVAR1-style anchored DEL: nothing to do, no copy.
+        let alt_data = arr1(&[30u8]);
+        let alt_seq_off = arr1(&[0i64, 1]);
+        let ilens = arr1(&[-2i32]);
+        let rw = arr1(&[9u8, 30, 31, 32, 8]);
+        let rw_off = arr1(&[0i64, 5]);
+        assert!(anchor_empty_del_alts(
+            alt_data.view(),
+            alt_seq_off.view(),
+            ilens.view(),
+            rw.view(),
+            rw_off.view(),
+            1,
+        )
+        .is_none());
     }
 
     #[test]

@@ -149,16 +149,21 @@ If none match, a `FileNotFoundError` is raised naming the expected `.svar2` base
 suggesting `svar2=`. After resolution, the fingerprint (`Svar2Fingerprint`, above) is verified;
 a mismatch raises `ValueError` and lists both expected and observed values.
 
-## `.svar2` variants ALT convention
+## `.svar2` pure-deletion ALT bytes
 
-For a pure deletion (e.g. VCF `GTA>G`), decoding `with_seqs("variants")` yields different raw
-ALT bytes depending on the backing store: `.svar` reports the VCF anchor base (`b"G"`), while
-`.svar2` reports the atomized empty ALT (`b""`) — a genoray `.svar2` format convention, not a
-bug. Both stores consume the ALT identically when reconstructing haplotype sequence, so
-`with_seqs("haplotypes")` / `with_seqs("annotated")` output is byte-identical between the two
-backends; only `RaggedVariants.alt` differs, and only for pure-deletion records. The same holds
-for `with_seqs("variant-windows")`: `ref_window` is byte-identical between the backends, while the
-`alt`/`alt_window` fields differ only for pure-deletion records (the same empty-vs-anchor ALT).
+genoray's `.svar2` stores an atomized pure deletion (e.g. VCF `GTA>G`) at the VCF anchor
+position with an empty ALT (`b""`); `.svar` keeps the VCF anchor base (`b"G"`). The variant's
+position, `ilen` and reference span (anchor plus deleted bases) are the same in both stores.
+
+- Bare ALT bytes differ: `RaggedVariants.alt` from `with_seqs("variants")`, and the `alt` field
+  of `with_seqs("variant-windows")` with `VarWindowOpt(alt="allele")`, are `b""` on `.svar2` and
+  `b"G"` on `.svar`, for pure-deletion records only.
+- Flanked windows do not differ. `ref_window` reads `[start-L, end+L)` from the reference, and
+  `alt_window` is `flank5 . ALT . flank3` with the anchor base restored for an empty-ALT
+  deletion, so both are byte-identical between the backends and `alt_window` equals the
+  reference with that one variant applied.
+- Haplotypes (`with_seqs("haplotypes")` / `"annotated"`) are byte-identical: reconstruction
+  also keeps the anchor (`ref[pos]`) for an empty-ALT deletion.
 
 ## `.svar2` Phase-1 unsupported combinations
 
