@@ -94,6 +94,15 @@
 # Changelog
 
 
+# Changelog
+
+
+## v0.43.2 (2026-11-17)
+
+### Fix
+
+- **svar2**: restore the anchor base in alt_window for empty-ALT deletions
+
 ## v0.43.1 (2026-09-29)
 
 ### Fix
