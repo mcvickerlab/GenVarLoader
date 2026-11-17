@@ -119,6 +119,39 @@ def _assemble_alt_windows(f5, f3, alt_data, alt_seq_off, flank_len):
     return out, out_off
 
 
+def _anchor_empty_del_alts(
+    alt_data: NDArray[np.uint8],
+    alt_seq_off: NDArray[np.int64],
+    ilens: NDArray[np.int32],
+    rw_data: NDArray[np.uint8],
+    rw_off: NDArray[np.int64],
+    flank_len: int,
+) -> tuple[NDArray[np.uint8], NDArray[np.int64]]:
+    """Re-insert the anchor base into empty-ALT pure deletions before alt-window assembly.
+
+    SVAR2 stores an atomized pure deletion with an empty ALT at the VCF anchor
+    position, so its ``[start, end)`` span is anchor + deleted bases, the same as
+    SVAR1's ``GTA>G``. Haplotypes keep the anchor (``ref[pos]``), so the alt window
+    must too. The anchor is the first byte of the variant's ref-window span,
+    ``rw_data[rw_off[i] + L]``. Returns the inputs unchanged when nothing needs
+    re-anchoring. Mirrors Rust ``anchor_empty_del_alts``.
+    """
+    alt_data = np.asarray(alt_data, np.uint8)
+    alt_seq_off = np.asarray(alt_seq_off, np.int64)
+    ilens = np.asarray(ilens, np.int32)
+    alt_len = np.diff(alt_seq_off)
+    needs = (alt_len == 0) & (ilens < 0)
+    if not needs.any():
+        return alt_data, alt_seq_off
+    idx = np.flatnonzero(needs)
+    anchors = np.asarray(rw_data, np.uint8)[
+        np.asarray(rw_off, np.int64)[idx] + flank_len
+    ]
+    new_data = np.insert(alt_data, alt_seq_off[idx], anchors)
+    new_off = lengths_to_offsets(alt_len + needs, np.int64)
+    return new_data.astype(np.uint8, copy=False), new_off
+
+
 def compute_ref_window(
     reference,
     v_contigs: NDArray[np.integer],
@@ -153,14 +186,21 @@ def compute_alt_window(
     lut: NDArray,
     row_offsets: NDArray[np.int64],
 ) -> "_FlatWindow":
-    """Alt window = tokenized ``flank5 . alt . flank3`` assembly."""
+    """Alt window = tokenized ``flank5 . alt . flank3`` assembly.
+
+    An empty-ALT pure deletion (SVAR2) gets its anchor base back first, so the
+    window equals the haplotype around the variant (see ``_anchor_empty_del_alts``).
+    """
     starts = np.asarray(starts, np.int32)
     ilens = np.asarray(ilens, np.int32)
     ends = starts - np.minimum(ilens, 0) + 1
     rw = reference.fetch(v_contigs, starts - flank_len, ends + flank_len)
-    f5, f3 = _slice_flanks(
-        rw.data.view(np.uint8), np.asarray(rw.offsets, np.int64), flank_len
-    )  # each (n, L)
+    rw_data = rw.data.view(np.uint8)
+    rw_off = np.asarray(rw.offsets, np.int64)
+    f5, f3 = _slice_flanks(rw_data, rw_off, flank_len)  # each (n, L)
+    alt_data, alt_seq_off = _anchor_empty_del_alts(
+        alt_data, alt_seq_off, ilens, rw_data, rw_off, flank_len
+    )
     alt_bytes, alt_off = _assemble_alt_windows(
         np.ascontiguousarray(f5).reshape(-1),
         np.ascontiguousarray(f3).reshape(-1),
@@ -223,6 +263,9 @@ def compute_windows(
 
     # alt window: flank5 . alt . flank3 from sliced flanks.
     f5, f3 = _slice_flanks(data, rw_off, flank_len)
+    alt_data, alt_seq_off = _anchor_empty_del_alts(
+        alt_data, alt_seq_off, ilens, data, rw_off, flank_len
+    )
     alt_bytes, alt_off = _assemble_alt_windows(
         np.ascontiguousarray(f5).reshape(-1),
         np.ascontiguousarray(f3).reshape(-1),

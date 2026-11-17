@@ -50,7 +50,8 @@ def test_svar2_variant_windows_ref_window_matches_svar1(
     tmp_path, bed, svar_fixture, svar2_fixture, _src
 ):
     """ref_window is a pure reference read over an identical variant SET, so it is
-    byte-identical to SVAR1 (independent of the deletion-ALT encoding difference)."""
+    byte-identical to SVAR1 (independent of the deletion-ALT encoding difference;
+    see ``test_svar2_variant_windows_alt_window_matches_svar1`` for alt_window)."""
     _bcf, ref = _src
     w1, w2 = _open_windows_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
     assert w2.ref_window is not None
@@ -62,6 +63,136 @@ def test_svar2_variant_windows_ref_window_matches_svar1(
     assert np.array_equal(
         np.asarray(w2.fields["start"].offsets), np.asarray(w1.fields["start"].offsets)
     )
+
+
+def _vcf_alleles() -> dict[tuple[int, int], tuple[bytes, bytes]]:
+    """``(0-based pos, ilen) -> (REF, ALT)`` VCF-style (anchored) alleles of ``_VCF``."""
+    out = {}
+    for line in _VCF.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        _c, pos, _id, ref, alt = line.split("\t")[:5]
+        out[(int(pos) - 1, len(alt) - len(ref))] = (ref.encode(), alt.encode())
+    return out
+
+
+def _expected_windows(w, L: int):
+    """Per-variant expected (ref_window, alt_window) tokens from the FASTA + VCF.
+
+    The alt window is the reference with that single variant applied, read over the
+    same span as the ref window: ``ref[s-L:s] . ALT . ref[e:e+L]`` with the VCF
+    (anchored) ALT. A pure deletion keeps its anchor base, exactly as in the
+    reconstructed haplotype.
+    """
+    alleles = _vcf_alleles()
+    lut = np.full(256, 4, np.uint8)
+    for i, c in enumerate(b"ACGT"):
+        lut[c] = i
+    # Out-of-contig flank bases are padded with N (-> unknown token), like gvl.
+    ref = np.frombuffer((("N" * L) + _REF + ("N" * L)).encode(), np.uint8)
+    starts = np.asarray(w.fields["start"].data)
+    ilens = np.asarray(w.fields["ilen"].data)
+    exp_ref, exp_alt = [], []
+    for s, il in zip(starts.tolist(), ilens.tolist()):
+        r, a = alleles[(s, il)]
+        s, e = s + L, s + L + len(r)  # into the padded reference
+        assert ref[s:e].tobytes() == r, "fixture REF disagrees with FASTA"
+        exp_ref.append(lut[ref[s - L : e + L]])
+        exp_alt.append(
+            lut[
+                np.concatenate(
+                    [ref[s - L : s], np.frombuffer(a, np.uint8), ref[e : e + L]]
+                )
+            ]
+        )
+    return exp_ref, exp_alt
+
+
+def _window_rows(w) -> list[np.ndarray]:
+    off = np.asarray(w.seq_offsets)
+    data = np.asarray(w.data)
+    return [data[off[i] : off[i + 1]] for i in range(len(off) - 1)]
+
+
+@pytest.mark.parametrize("unphased_union", [False, True])
+def test_svar2_variant_windows_alt_window_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src, unphased_union
+):
+    """alt_window is byte-identical to SVAR1 and equals the haplotype around each variant.
+
+    SVAR2 decodes a pure deletion with an empty ALT (atomized, no anchor) while its
+    ref-window span still starts at the anchor. The alt window must re-add the
+    anchor: ``ATG|CTT|TTT`` -> ``ATG|C|TTT``, not ``ATG||TTT``.
+    """
+    _bcf, ref = _src
+    L = _WIN_OPT.flank_length
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    ws = []
+    for ds in (ds1, ds2):
+        ds = ds.with_output_format("flat").with_seqs("variant-windows", _WIN_OPT)
+        ds = ds.with_settings(
+            var_fields=["alt", "ilen", "start"], unphased_union=unphased_union
+        )
+        ws.append(ds[:, :])
+    w1, w2 = ws
+    assert w1.alt_window is not None and w2.alt_window is not None
+    _assert_window_equal(w2.ref_window, w1.ref_window, "ref_window")
+    _assert_window_equal(w2.alt_window, w1.alt_window, "alt_window")
+
+    for name, w in (("svar", w1), ("svar2", w2)):
+        exp_ref, exp_alt = _expected_windows(w, L)
+        ilens = np.asarray(w.fields["ilen"].data)
+        assert (ilens < 0).any() and (ilens > 0).any() and (ilens == 0).any()
+        for i, (got, exp) in enumerate(zip(_window_rows(w.ref_window), exp_ref)):
+            np.testing.assert_array_equal(got, exp, err_msg=f"{name} ref_window {i}")
+        for i, (got, exp) in enumerate(zip(_window_rows(w.alt_window), exp_alt)):
+            np.testing.assert_array_equal(got, exp, err_msg=f"{name} alt_window {i}")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AttributeError,
+    reason="svar2 returns RaggedVariants for flat 'variants' output, so the"
+    " ride-along flank_tokens are never produced (pre-existing gap)",
+)
+def test_svar2_flank_tokens_match_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """Ride-along ``flank_tokens`` (``ref[s-L:s] . ref[e:e+L]``) should be byte-identical to SVAR1.
+
+    They read only the reference around the shared ``[start, end)`` span, so the
+    empty-vs-anchored deletion ALT cannot affect them once svar2 emits them."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    fts = []
+    for ds in (ds1, ds2):
+        flat = (
+            ds.with_seqs("variants")
+            .with_output_format("flat")
+            .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+        )
+        out = flat[:, :]
+        assert out.flank_tokens is not None
+        fts.append(out.flank_tokens)
+    assert np.array_equal(np.asarray(fts[0].offsets), np.asarray(fts[1].offsets))
+    assert np.array_equal(np.asarray(fts[0].data), np.asarray(fts[1].data))
+
+
+def test_svar2_variant_windows_dummy_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """With a dummy variant filling empty groups, both windows stay identical to SVAR1."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    dummy = gvl.DummyVariant(ref=b"N", alt=b"N")
+    ws = [
+        ds.with_output_format("flat")
+        .with_seqs("variant-windows", _WIN_OPT)
+        .with_settings(dummy_variant=dummy)[:, :]
+        for ds in (ds1, ds2)
+    ]
+    _assert_window_equal(ws[1].ref_window, ws[0].ref_window, "ref_window")
+    _assert_window_equal(ws[1].alt_window, ws[0].alt_window, "alt_window")
 
 
 # 40 bp reference (chr1). VCF POS (1-based) -> 0-based: SNP@2 (A>G), INS@6
@@ -918,7 +1049,11 @@ def test_svar2_variant_windows_alt_window_decomposition(
     tmp_path, bed, svar_fixture, svar2_fixture, _src
 ):
     """alt_window[j] == ref_window[j][:L] + tokenize(alt_j) + ref_window[j][-L:].
-    Uses only svar2's own outputs; ref_window is separately pinned to SVAR1."""
+
+    A pure deletion's bare ALT is empty on svar2, so its alt window carries the
+    anchor base instead, which is the first base of the ref span
+    (``ref_window[j][L]``). Uses only svar2's own outputs; ref_window and
+    alt_window are separately pinned to SVAR1."""
     _bcf, ref = _src
     ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
     L = _WIN_OPT.flank_length
@@ -950,8 +1085,10 @@ def test_svar2_variant_windows_alt_window_decomposition(
         rj = rd[rso[j] : rso[j + 1]]
         aj = ad[aso[j] : aso[j + 1]]
         bj = bd[bso[j] : bso[j + 1]]
-        expected = np.concatenate([rj[:L], bj, rj[len(rj) - L :]])
+        allele = rj[L : L + 1] if len(bj) == 0 else bj  # re-anchored pure DEL
+        expected = np.concatenate([rj[:L], allele, rj[len(rj) - L :]])
         assert np.array_equal(aj, expected), f"alt_window variant {j} mismatch"
+    assert (np.diff(bso) == 0).any(), "fixture must exercise an empty-ALT pure DEL"
 
 
 def test_svar2_variant_windows_bare_alt_tokenizes_variants_alt(
