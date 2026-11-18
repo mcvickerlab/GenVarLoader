@@ -444,6 +444,57 @@ def test_svar2_ragged_variants_fields_unphased_union(
             )
 
 
+# --- Flat variants carry the same INFO/FORMAT fields as ragged (issue #427) --
+
+
+@pytest.mark.parametrize("unphased_union", [False, True])
+def test_svar2_flat_variants_fields_match_ragged(
+    tmp_path, svar2_fields_store, oracle_and_samples, _src, unphased_union
+):
+    """Flat ``variants`` output carries every requested store field, matching ragged.
+
+    Multi-contig interleaved bed (row reorder path) with a variant-free region so
+    the dummy fill also covers the INFO/FORMAT fields, and flank tokens requested.
+    Ragged output is oracle-checked above; equality pins the flat assembly to it.
+    """
+    import genvarloader as gvl
+
+    oracle, samples = oracle_and_samples
+    _bcf, ref = _src
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 15, 20],
+            "chromEnd": [15, 20, 30, 40],
+        }
+    )
+    ds = _build_dataset(tmp_path, "d_flat.gvl", bed, svar2_fields_store, ref)
+    ds = ds.with_seqs("variants").with_settings(
+        var_fields=_VAR_FIELDS,
+        unphased_union=unphased_union,
+        dummy_variant=gvl.DummyVariant(ref=b"N", alt=b"N"),
+    )
+    rv = ds[:, :]
+    fv = ds.with_output_format("flat").with_settings(
+        flank_length=2, token_alphabet=b"ACGT", unknown_token=4
+    )[:, :]
+    assert isinstance(fv, gvl.FlatVariants)
+    assert list(fv.fields) == ["alt", "start", "ilen", "AF", "NS", "DP"]
+    assert fv.flank_tokens is not None
+    assert fv.flank_tokens.shape[-1] == 4
+    back = fv.to_ragged()
+    assert int(np.asarray(rv.start.lengths).min()) >= 1, "dummy fill missing"
+    for k in ("start", "ilen", "AF", "NS", "DP"):
+        a, b = rv[k].to_packed(), back[k].to_packed()
+        assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets)), k
+        ad, bd = np.asarray(a.data), np.asarray(b.data)
+        assert ad.dtype == bd.dtype, k
+        np.testing.assert_array_equal(ad, bd, err_msg=k)
+    a, b = rv.alt.to_chars().to_packed(), back.alt.to_chars().to_packed()
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets))
+    assert np.array_equal(np.asarray(a.data), np.asarray(b.data))
+
+
 # --- Test 5: variant-windows, including an EMPTY-group fill-value case -----
 
 
