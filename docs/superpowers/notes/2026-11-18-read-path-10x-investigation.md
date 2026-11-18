@@ -31,6 +31,13 @@ Ran calla-asca `perf/profile-train-step` @ b613404 on 1× RTX PRO 6000 Blackwell
 - Per the decision rule in step 2: **calla-asca is not loader-limited — drop it as the driver for gvl read-path work.** The largest available calla-asca win is overlapping the fetch with the GPU (`num_workers>0` or a prefetch thread): ~83 → ~38 ms/step at most, with no gvl change.
 - Raw logs were in the session scratchpad only; rerun with `CALLA_ASCA_DATA_DIR=<design-spec worktree>/data ./px python scripts/profile_train_step.py ...` (a fresh worktree has no `data/`).
 
+## Follow-ups (2026-11-18, same GPU box; host load avg ~190, so absolute CPU times are inflated, ratios within a run are fair)
+
+- **calla-asca prefetch thread** (calla-asca `perf/profile-train-step` @ 3848f10, pass P): real loop 160.1 → 77.9 ms/step at 4096 items (2.05×), 136.3 → 93.7 ms at 16384 (1.45×). gvl's `to_dataloader(mode="buffered"|"double_buffered")` does **not** fit calla-asca: fixed `batch_size` slicing vs `PackingSampler`, one gvl source vs calla's multi-source batch, and `RefDataset.to_dataloader` has no `mode`. A plain thread works because the SVAR2 decode releases the GIL (`src/ffi/mod.rs:1964`, `py.detach`).
+- **gvf-geuvadis p-SAGE-net** (Resume step 3): GPU one-hot on `perf/psagenet-gpu-onehot` @ 7bdbfe92. Bit-identical outputs; steady-state ~43 → ~75 items/s (1.74×) on RTX PRO 6000.
+- **calla-methyl** (`perf/profile-train-step` @ 4b5d4d7, base `varnorm`): **host-bound**. One worker fetch ≈ 340–450 ms/batch (182 items); production 6 workers ≈ 75 ms/step, matching fetch/6. Fetch split: **figwig label read ~200–230 ms (50–58%)** — one `FigWigReader.read` per unique sample, `calla_methyl/labels.py:61-79` via `data.py:281`; calla RefSeq call+tensorize ~88 ms (~25%; gvl `RefDataset` only 7–11 ms of it, rest `tokens.py:679` + `rag_to_nested`); **gvl variant windows 45–94 ms (13–20%)**; `pin_memory` 45–55 ms. gvl is third — fix figwig batching first.
+- **Net for gvl read-path work:** no surveyed workload is currently gvl-bound. Proposals 1–3 stay parked until one is.
+
 ## Headline conclusions
 
 - **Current SVAR1 haplotype kernel is already memcpy-bound** [measured-11-18]: b=1024 × 10 kb (20.5 MB) in 1.22 ms serial ≈ 17 GB/s. Kernel tuning cannot give 10× on CPU; only writing fewer bytes can.
