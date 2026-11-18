@@ -21,7 +21,8 @@ the full cohort).
 
 Out of scope (guarded with ``NotImplementedError``): ``min_af``/``max_af``,
 annotated haps, and exonic filtering for non-haplotype outputs.
-(``unphased_union`` and ``variant-windows`` ARE supported.)
+(``unphased_union``, ``variant-windows``, ``dummy_variant`` and flat ``variants``
+output with ride-along ``flank_tokens`` ARE supported.)
 """
 
 from __future__ import annotations
@@ -52,6 +53,8 @@ from ..genvarloader import (
     shift_and_realign_tracks_from_svar2_readbound,
 )
 from ._flat_variants import (
+    _FlatAlleles,
+    _FlatVariants,
     _FlatVariantWindows,
     _FlatWindow,
     _assemble_variant_buffers_rust,
@@ -83,6 +86,24 @@ _GatherInputs: TypeAlias = tuple[
 
 _GatheredGroup: TypeAlias = tuple[int, NDArray[np.intp], _GatherInputs]
 """``(dataset contig index, its query positions, that group's gathered inputs)``."""
+
+
+@dataclass(slots=True)
+class _DecodedVariants:
+    """One query block's decoded variant records in global ``(b, p_eff)`` row order.
+
+    ``var_off`` (length ``b * p_eff + 1``) groups variants into rows; ``alt`` is the
+    flat ALT byte buffer with per-variant boundaries ``alt_str_off``; ``fields``
+    maps each requested store INFO/FORMAT key to its typed per-variant values.
+    """
+
+    shape: tuple[int | None, ...]
+    var_off: NDArray[np.int64]
+    pos: NDArray[np.int32]
+    ilen: NDArray[np.int32]
+    alt: NDArray[np.uint8]
+    alt_str_off: NDArray[np.int64]
+    fields: dict[str, NDArray]
 
 
 def _range_work_bytes(n_queries: int, P: int, gi: _GatherInputs) -> int:
@@ -524,8 +545,11 @@ class Svar2Haps(Haps[_H]):
                 )
             if issubclass(self.kind, _FlatVariantWindows):
                 return cast(_H, self._reconstruct_variant_windows(idx, regions))
-            # RaggedVariants: RC is applied by the caller (_getitem_unspliced),
-            # so to_rc is intentionally ignored here (mirrors SVAR1 Haps).
+            # RC is applied by the caller (_getitem_unspliced) for both variant
+            # outputs, so to_rc is intentionally ignored here (mirrors SVAR1 Haps).
+            if flat:
+                # Flat output (FlatVariants + ride-along flank_tokens), issue #427.
+                return cast(_H, self._reconstruct_flat_variants(idx, regions))
             return cast(_H, self._reconstruct_variants(idx, regions))
 
         if issubclass(self.kind, RaggedAnnotatedHaps):
@@ -1153,18 +1177,23 @@ class Svar2Haps(Haps[_H]):
         """
         return replace(self, var_fields=var_fields)
 
-    def _reconstruct_variants(
+    def _decode_variants(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]
-    ) -> RaggedVariants:
-        """Decode the per-query variant records (SoA) for a query block.
+    ) -> _DecodedVariants:
+        """Decode the per-query variant records (SoA) for a query block, in global ``(b, p_eff)`` row order.
+
+        Decodes each contig group with ``decode_variants_from_svar2_readbound``
+        and, when the block spans more than one contig, permutes the grouped
+        hap-rows back to the caller's ``(b, p_eff)`` order. Both the ragged
+        (:meth:`_reconstruct_variants`) and flat (:meth:`_reconstruct_flat_variants`)
+        outputs wrap the arrays this returns.
 
         Args:
             idx: Flat ``(region, sample)`` query indices for the block.
             regions: ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
 
         Returns:
-            RaggedVariants: Per-query ragged variant records (position, indel length, ALT
-                bytes, and any requested INFO/FORMAT fields).
+            _DecodedVariants: Global-order variant buffers and their offsets.
         """
         regions = np.asarray(regions, np.int32)
         P = self.stored_ploidy
@@ -1214,24 +1243,20 @@ class Svar2Haps(Haps[_H]):
                 self._type_field_bufs(field_bufs, field_isizes, req_keys, field_dtypes)
             )
 
+        shape = (b, p_eff, None)
+
         # Single contig group: grouped order already equals global (b, P) order,
         # so the reorder is the identity and every concatenate is a 1-element no-op.
         # Skip both (the numpy reorder otherwise dominates single-contig reads).
         if len(cat_pos) == 1:
-            shape = (b, p_eff, None)
-            var_off_g = lengths_to_offsets(cat_var_lens[0], np.int64)
-            str_off_g = lengths_to_offsets(cat_var_bytelen[0], np.int64)
-            extra = {
-                k: Ragged.from_offsets(cat_fields[0][j], shape, var_off_g)
-                for j, k in enumerate(req_keys)
-            }
-            return RaggedVariants(
-                alt=Ragged.from_offsets(
-                    cat_alt[0].view("S1"), shape, var_off_g, str_offsets=str_off_g
-                ),
-                start=Ragged.from_offsets(cat_pos[0], shape, var_off_g),
-                ilen=Ragged.from_offsets(cat_ilen[0], shape, var_off_g),
-                **extra,
+            return _DecodedVariants(
+                shape=shape,
+                var_off=lengths_to_offsets(cat_var_lens[0], np.int64),
+                pos=cat_pos[0],
+                ilen=cat_ilen[0],
+                alt=cat_alt[0],
+                alt_str_off=lengths_to_offsets(cat_var_bytelen[0], np.int64),
+                fields=dict(zip(req_keys, cat_fields[0])),
             )
 
         # Concatenate grouped outputs, then permute hap-rows back to global order.
@@ -1258,26 +1283,171 @@ class Svar2Haps(Haps[_H]):
         else:
             pos_g = pos_c[src]
             ilen_g = ilen_c[src]
-        alt_g, alt_var_off_g, alt_str_off_g = _ragged_arange_gather_2level(
+        alt_g, _alt_var_off_g, alt_str_off_g = _ragged_arange_gather_2level(
             alt_c, grouped_var_off, grouped_str_off, perm
         )
 
-        shape = (b, p_eff, None)
-        pos_r = Ragged.from_offsets(pos_g, shape, var_off_g)
-        ilen_r = Ragged.from_offsets(ilen_g, shape, var_off_g)
-        alt_r = Ragged.from_offsets(
-            alt_g.view("S1"), shape, alt_var_off_g, str_offsets=alt_str_off_g
-        )
-        extra = {}
+        fields: dict[str, NDArray] = {}
         for j, k in enumerate(req_keys):
             fc = (
                 np.concatenate([g[j] for g in cat_fields])
                 if cat_fields
                 else np.zeros(0, field_dtypes[j])
             )
-            fg = fc[:0].copy() if src.size == 0 else fc[src]
-            extra[k] = Ragged.from_offsets(fg, shape, var_off_g)
-        return RaggedVariants(alt=alt_r, start=pos_r, ilen=ilen_r, **extra)
+            fields[k] = fc[:0].copy() if src.size == 0 else fc[src]
+        return _DecodedVariants(
+            shape=shape,
+            var_off=var_off_g,
+            pos=pos_g,
+            ilen=ilen_g,
+            alt=alt_g,
+            alt_str_off=alt_str_off_g,
+            fields=fields,
+        )
+
+    def _reconstruct_variants(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> RaggedVariants:
+        """Decode the per-query variant records (SoA) for a query block.
+
+        Args:
+            idx: Flat ``(region, sample)`` query indices for the block.
+            regions: ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
+
+        Returns:
+            RaggedVariants: Per-query ragged variant records (position, indel length, ALT
+                bytes, and any requested INFO/FORMAT fields).
+        """
+        d = self._decode_variants(idx, regions)
+        if self.dummy_variant is not None:
+            # Empty-group fill lives on the flat type; route through it so ragged
+            # output honors dummy_variant exactly as SVAR1 does (its ragged output
+            # is also the flat result converted at the query boundary).
+            flat = self._flat_from_decoded(
+                d, regions, include_ilen=True, want_flank=False
+            )
+            flat = flat.fill_empty_groups(self.dummy_variant, unk=self.unknown_token)
+            return flat.to_ragged()
+        extra = {
+            k: Ragged.from_offsets(v, d.shape, d.var_off) for k, v in d.fields.items()
+        }
+        return RaggedVariants(
+            alt=Ragged.from_offsets(
+                d.alt.view("S1"), d.shape, d.var_off, str_offsets=d.alt_str_off
+            ),
+            start=Ragged.from_offsets(d.pos, d.shape, d.var_off),
+            ilen=Ragged.from_offsets(d.ilen, d.shape, d.var_off),
+            **extra,
+        )
+
+    def _reconstruct_flat_variants(
+        self, idx: NDArray[np.integer], regions: NDArray[np.integer]
+    ) -> _FlatVariants:
+        """Flat ``variants`` output for svar2: :class:`_FlatVariants` plus ride-along ``flank_tokens``.
+
+        Runs the shared variants-mode ``assemble_variant_buffers`` kernel (the one
+        SVAR1's ``get_variants_flat`` uses) over the already-decoded, global-order
+        arrays via an identity gather, so alt bytes and ``flank_tokens`` come out of
+        the same code as ``.svar``. Fields mirror ``.svar``'s flat output: ``alt``,
+        ``start``, ``ilen`` (only when requested), then requested store
+        INFO/FORMAT fields in ``var_fields`` order.
+
+        ``alt`` keeps the svar2 bare-ALT convention (a pure deletion has
+        ``alt == b""``; ``.svar`` keeps the VCF anchor). ``start``/``ilen`` are
+        identical to ``.svar`` (the deletion's ``start`` is the anchor position),
+        so the flank span ``[start, start - min(ilen, 0) + 1)`` and therefore
+        ``flank_tokens`` are byte-identical to ``.svar`` without re-anchoring.
+        """
+        d = self._decode_variants(idx, regions)
+        want_flank = bool(self.flank_length and self.token_lut is not None)
+        flat = self._flat_from_decoded(
+            d, regions, include_ilen="ilen" in self.var_fields, want_flank=want_flank
+        )
+        if self.dummy_variant is not None:
+            flat = flat.fill_empty_groups(self.dummy_variant, unk=self.unknown_token)
+        return flat
+
+    def _flat_from_decoded(
+        self,
+        d: _DecodedVariants,
+        regions: NDArray[np.integer],
+        include_ilen: bool,
+        want_flank: bool,
+    ) -> _FlatVariants:
+        """Wrap decoded variants as :class:`_FlatVariants`, optionally with ``flank_tokens``.
+
+        Args:
+            d: The block's decoded variants (global row order).
+            regions: ``(n_regions, 3)`` array of ``(contig_id, start, end)``.
+            include_ilen: Emit the ``ilen`` field.
+            want_flank: Compute ride-along ``flank_tokens`` (needs ``flank_length``,
+                ``token_lut`` and a reference).
+
+        Returns:
+            _FlatVariants: The flat variants, without any dummy fill.
+        """
+        b, p_eff = cast(int, d.shape[0]), cast(int, d.shape[1])
+        n_var = len(d.pos)
+        regions = np.asarray(regions, np.int32)
+
+        L = int(self.flank_length or 0) if want_flank else 0
+        if want_flank:
+            ref = self.reference
+            assert ref is not None, "flank tokens need a reference genome"
+            # reference.offsets is in dataset-contig order, so regions[:, 0]
+            # indexes it directly (as for SVAR1's get_variants_flat).
+            v_contigs = np.repeat(
+                np.repeat(regions[:, 0], p_eff), np.diff(d.var_off)
+            ).astype(np.int32)
+            ref_arr, ref_off, pad_char = ref.reference, ref.offsets, ref.pad_char
+        else:
+            v_contigs = np.zeros(n_var, np.int32)
+            ref_arr, ref_off, pad_char = np.zeros(0, np.uint8), np.zeros(1, np.int64), 0
+
+        bufs = _assemble_variant_buffers_rust(
+            0,  # variants mode
+            np.arange(n_var, dtype=np.int32),  # identity v_idxs (data pre-gathered)
+            d.var_off,
+            d.alt,
+            d.alt_str_off,
+            None,  # ref_global: svar2 carries no REF allele bytes
+            None,
+            False,  # want_ref_bytes
+            want_flank,
+            0,  # ref_mode (unused in variants mode)
+            0,  # alt_mode (unused)
+            L,
+            self.token_lut,
+            v_contigs,
+            d.pos,
+            d.ilen,
+            ref_arr,
+            ref_off,
+            pad_char,
+        )
+
+        alt_data, alt_seq_off = bufs["alt"]
+        fields: dict[str, Any] = {
+            "alt": _FlatAlleles(
+                np.asarray(alt_data, np.uint8),
+                np.asarray(alt_seq_off, np.int64),
+                d.var_off,
+                d.shape,
+            ),
+            "start": _Flat.from_offsets(d.pos, d.shape, d.var_off),
+        }
+        if include_ilen:
+            fields["ilen"] = _Flat.from_offsets(d.ilen, d.shape, d.var_off)
+        for k, v in d.fields.items():
+            fields[k] = _Flat.from_offsets(v, d.shape, d.var_off)
+
+        flat = _FlatVariants(fields)
+        if "flank_tokens" in bufs:
+            tok, off = bufs["flank_tokens"]
+            flat.flank_tokens = _Flat.from_offsets(
+                tok, (b, p_eff, None, 2 * L), np.asarray(off, np.int64)
+            )
+        return flat
 
     def _reconstruct_variant_windows(
         self, idx: NDArray[np.integer], regions: NDArray[np.integer]

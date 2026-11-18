@@ -149,33 +149,246 @@ def test_svar2_variant_windows_alt_window_matches_svar1(
             np.testing.assert_array_equal(got, exp, err_msg=f"{name} alt_window {i}")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="svar2 returns RaggedVariants for flat 'variants' output, so the"
-    " ride-along flank_tokens are never produced (pre-existing gap)",
-)
+_FLANK = dict(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
+
+
+def _flat_variants(ds, **settings):
+    """Flat ``variants`` output with ride-along flank tokens and extra settings."""
+    return (
+        ds.with_seqs("variants")
+        .with_output_format("flat")
+        .with_settings(**_FLANK, **settings)[:, :]
+    )
+
+
+def _assert_flat_equal(a, b, name: str) -> None:
+    assert a.shape == b.shape, f"{name} shape differ: {a.shape} != {b.shape}"
+    assert np.array_equal(np.asarray(a.offsets), np.asarray(b.offsets)), (
+        f"{name} offsets differ"
+    )
+    da, db = np.asarray(a.data), np.asarray(b.data)
+    assert da.dtype == db.dtype, f"{name} dtype differ: {da.dtype} != {db.dtype}"
+    assert np.array_equal(da, db), f"{name} data differ"
+
+
+def _alt_rows(alt) -> list[bytes]:
+    off = np.asarray(alt.seq_offsets)
+    data = np.asarray(alt.byte_data).view(np.uint8)
+    return [data[off[i] : off[i + 1]].tobytes() for i in range(len(off) - 1)]
+
+
+def _del_starts(vcf: str) -> set[int]:
+    """0-based positions of the deletions in a fixture VCF."""
+    out = set()
+    for line in vcf.splitlines():
+        if line and not line.startswith("#"):
+            _c, pos, _id, ref, alt = line.split("\t")[:5]
+            if len(alt) < len(ref):
+                out.add(int(pos) - 1)
+    return out
+
+
+def _assert_flat_variants_parity(f1, f2, del_starts: set[int]) -> int:
+    """``.svar2`` flat variants equal ``.svar`` ones, field by field.
+
+    Every field but ``alt`` is byte-identical (data, offsets, shape, dtype), and so
+    are ``flank_tokens``. ``alt`` has identical per-row variant offsets and
+    identical bytes except the documented bare-ALT convention: an svar2 pure
+    deletion has ``alt == b""`` where ``.svar`` keeps the 1-byte VCF anchor.
+    Returns the number of deletions compared under that convention.
+    """
+    assert isinstance(f1, gvl.FlatVariants)
+    assert isinstance(f2, gvl.FlatVariants), type(f2)
+    assert list(f2.fields) == list(f1.fields)
+    for k in f1.fields:
+        if k != "alt":
+            _assert_flat_equal(f1.fields[k], f2.fields[k], k)
+    a1, a2 = f1.fields["alt"], f2.fields["alt"]
+    assert a1.shape == a2.shape
+    assert np.array_equal(np.asarray(a1.var_offsets), np.asarray(a2.var_offsets))
+    starts = np.asarray(f1.fields["start"].data).tolist()
+    n_del = 0
+    for s, r1, r2 in zip(starts, _alt_rows(a1), _alt_rows(a2), strict=True):
+        if s in del_starts:
+            assert len(r1) == 1 and r2 == b"", (s, r1, r2)
+            n_del += 1
+        else:
+            assert r1 == r2, (s, r1, r2)
+    assert f1.flank_tokens is not None and f2.flank_tokens is not None
+    _assert_flat_equal(f1.flank_tokens, f2.flank_tokens, "flank_tokens")
+    return n_del
+
+
+def _expected_flank_tokens(starts, ilens, L: int) -> np.ndarray:
+    """``ref[s-L:s] . ref[e:e+L]`` per variant, ``e = s - min(ilen, 0) + 1``."""
+    lut = np.full(256, 4, np.uint8)
+    for i, c in enumerate(b"ACGT"):
+        lut[c] = i
+    # Out-of-contig flank bases are padded with N (-> unknown token), like gvl.
+    ref = np.frombuffer((("N" * L) + _REF + ("N" * L)).encode(), np.uint8)
+    rows = []
+    for s, il in zip(starts, ilens, strict=True):
+        e = s - min(il, 0) + 1
+        rows.append(lut[np.concatenate([ref[s : s + L], ref[e + L : e + 2 * L]])])
+    return np.concatenate(rows) if rows else np.zeros(0, np.uint8)
+
+
 def test_svar2_flank_tokens_match_svar1(
     tmp_path, bed, svar_fixture, svar2_fixture, _src
 ):
-    """Ride-along ``flank_tokens`` (``ref[s-L:s] . ref[e:e+L]``) should be byte-identical to SVAR1.
+    """Ride-along ``flank_tokens`` (``ref[s-L:s] . ref[e:e+L]``) are byte-identical to SVAR1.
 
     They read only the reference around the shared ``[start, end)`` span, so the
-    empty-vs-anchored deletion ALT cannot affect them once svar2 emits them."""
+    empty-vs-anchored deletion ALT cannot affect them (issue #427)."""
     _bcf, ref = _src
     ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
     fts = []
     for ds in (ds1, ds2):
-        flat = (
-            ds.with_seqs("variants")
-            .with_output_format("flat")
-            .with_settings(flank_length=3, token_alphabet=b"ACGT", unknown_token=4)
-        )
-        out = flat[:, :]
+        out = _flat_variants(ds)
         assert out.flank_tokens is not None
         fts.append(out.flank_tokens)
     assert np.array_equal(np.asarray(fts[0].offsets), np.asarray(fts[1].offsets))
     assert np.array_equal(np.asarray(fts[0].data), np.asarray(fts[1].data))
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+@pytest.mark.parametrize("unphased_union", [False, True])
+@pytest.mark.parametrize(
+    "var_fields", [None, ["alt", "start"], ["start", "ilen", "alt"]]
+)
+def test_svar2_flat_variants_match_svar1(
+    tmp_path, svar_fixture, svar2_fixture, _src, dummy, unphased_union, var_fields
+):
+    """Flat ``variants`` output on ``.svar2`` matches ``.svar`` (issue #427).
+
+    Covers phased / ``unphased_union``, ``dummy_variant``, ``var_fields`` with and
+    without ``ilen``, and minus-strand regions (alt is RC'd, flank tokens stay
+    reference-oriented on both backends).
+    """
+    _bcf, ref = _src
+    sbed = pl.DataFrame(
+        {
+            "chrom": ["chr1"] * 4,
+            "chromStart": [0, 0, 5, 20],
+            "chromEnd": [40, 15, 20, 40],
+            "strand": ["+", "-", "-", "+"],
+        }
+    )
+    ds1, ds2 = _open_pair(tmp_path, sbed, svar_fixture, svar2_fixture, ref)
+    settings: dict = {"unphased_union": unphased_union}
+    if dummy:
+        settings["dummy_variant"] = gvl.DummyVariant(ref=b"N", alt=b"N")
+    if var_fields is not None:
+        settings["var_fields"] = var_fields
+    f1 = _flat_variants(ds1, **settings)
+    f2 = _flat_variants(ds2, **settings)
+    n_del = _assert_flat_variants_parity(f1, f2, _del_starts(_VCF))
+    assert n_del > 0, "fixture exercises no deletion; bare-ALT check is vacuous"
+    if not dummy:
+        ilen_of = {p: il for (p, il) in _vcf_alleles()}
+        starts = np.asarray(f2.fields["start"].data).tolist()
+        exp = _expected_flank_tokens(
+            starts, [ilen_of[s] for s in starts], _FLANK["flank_length"]
+        )
+        np.testing.assert_array_equal(np.asarray(f2.flank_tokens.data), exp)
+
+    # Flat fields equal svar2's own ragged output (incl. dummy rows).
+    rag = ds2.with_seqs("variants").with_settings(**settings)[:, :]
+    _assert_ragged_equal(
+        rag.start.to_packed(), f2.fields["start"].to_ragged().to_packed(), "start"
+    )
+    _assert_ragged_equal(
+        rag.alt.to_chars().to_packed(),
+        f2.fields["alt"].to_ragged().to_chars().to_packed(),
+        "alt",
+    )
+
+
+def test_svar2_flat_variants_minus_strand_rc(
+    tmp_path, svar_fixture, svar2_fixture, _src
+):
+    """On a minus-strand region alt is reverse-complemented and flank tokens are not."""
+    _bcf, ref = _src
+    fwd = pl.DataFrame({"chrom": ["chr1"], "chromStart": [0], "chromEnd": [15]})
+    rev = fwd.with_columns(strand=pl.lit("-"))
+    (tmp_path / "f").mkdir()
+    (tmp_path / "r").mkdir()
+    _, d_f = _open_pair(tmp_path / "f", fwd, svar_fixture, svar2_fixture, ref)
+    _, d_r = _open_pair(tmp_path / "r", rev, svar_fixture, svar2_fixture, ref)
+    a = _flat_variants(d_f)
+    b = _flat_variants(d_r)
+    _assert_flat_equal(a.flank_tokens, b.flank_tokens, "flank_tokens")
+    comp = bytes.maketrans(b"ACGTN", b"TGCAN")
+    fwd_alt = _alt_rows(a.fields["alt"])
+    rc = [r.translate(comp)[::-1] for r in fwd_alt]
+    assert rc == _alt_rows(b.fields["alt"])
+    assert rc != fwd_alt, "fixture has no RC-sensitive ALT; test would be vacuous"
+
+
+def test_svar2_flat_variants_multicontig_match_svar1(
+    tmp_path, svar_fixture2, svar2_fixture2, _src2
+):
+    """Interleaved multi-contig flat variants match SVAR1 (contig-group stitching)."""
+    from genoray import SparseVar, SparseVar2
+
+    _bcf, ref = _src2
+    bed = pl.DataFrame(
+        {
+            "chrom": ["chr2", "chr1", "chr2", "chr1"],
+            "chromStart": [0, 0, 10, 5],
+            "chromEnd": [40, 40, 40, 20],
+        }
+    )
+    d1 = tmp_path / "mc1.gvl"
+    d2 = tmp_path / "mc2.gvl"
+    gvl.write(d1, bed, variants=SparseVar(svar_fixture2), samples=None, overwrite=True)
+    gvl.write(
+        d2, bed, variants=SparseVar2(svar2_fixture2), samples=None, overwrite=True
+    )
+    ds1 = gvl.Dataset.open(d1, reference=ref)
+    ds2 = gvl.Dataset.open(d2, reference=ref)
+    for settings in ({}, {"unphased_union": True}):
+        f1 = _flat_variants(ds1, **settings)
+        f2 = _flat_variants(ds2, **settings)
+        assert _assert_flat_variants_parity(f1, f2, _del_starts(_VCF2)) > 0
+
+
+def test_svar2_flat_variants_buffered_dataloader_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """Flat svar2 variants (with flank tokens) survive the buffered dataloader's slot sizing."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    toks = []
+    for ds in (ds1, ds2):
+        ds = ds.with_seqs("variants").with_output_format("flat").with_settings(**_FLANK)
+        got = []
+        for batch in ds.to_dataloader(batch_size=2, mode="buffered"):
+            assert isinstance(batch, gvl.FlatVariants)
+            got.append(np.asarray(batch.flank_tokens.data).copy())
+        toks.append(np.concatenate(got))
+    assert toks[1].size > 0
+    np.testing.assert_array_equal(toks[0], toks[1])
+
+
+def test_svar2_flat_variants_jitter_guard_raises(tmp_path, svar2_fixture, _src):
+    """Flat variants keep the svar2 variants restriction: max_jitter>0 raises."""
+    from genoray import SparseVar2
+
+    _bcf, ref = _src
+    jbed = pl.DataFrame({"chrom": ["chr1"], "chromStart": [5], "chromEnd": [20]})
+    d = tmp_path / "d.gvl"
+    gvl.write(
+        d,
+        jbed,
+        variants=SparseVar2(svar2_fixture),
+        samples=None,
+        max_jitter=2,
+        overwrite=True,
+    )
+    ds = gvl.Dataset.open(d, reference=ref)
+    with pytest.raises(NotImplementedError, match="right-clip"):
+        _flat_variants(ds)
 
 
 def test_svar2_variant_windows_dummy_matches_svar1(
@@ -740,6 +953,23 @@ def test_svar2_variants_unphased_union_matches_svar1(
     b = ds2.with_seqs("variants").with_settings(unphased_union=True)[:, :]
     # Ploidy axis folded 2 -> 1.
     assert a.start.shape[-2] == 1 and b.start.shape[-2] == 1
+    _assert_ragged_equal(a.start.to_packed(), b.start.to_packed(), "start")
+    _assert_ragged_equal(a.ilen.to_packed(), b.ilen.to_packed(), "ilen")
+
+
+def test_svar2_ragged_variants_dummy_matches_svar1(
+    tmp_path, bed, svar_fixture, svar2_fixture, _src
+):
+    """Ragged ``variants`` honor ``dummy_variant`` on svar2 as on svar1.
+
+    svar2 used to ignore ``dummy_variant`` for ragged output, leaving empty
+    (region, sample, ploid) groups empty while svar1 filled them."""
+    _bcf, ref = _src
+    ds1, ds2 = _open_pair(tmp_path, bed, svar_fixture, svar2_fixture, ref)
+    dummy = gvl.DummyVariant(ref=b"N", alt=b"N")
+    a = ds1.with_seqs("variants").with_settings(dummy_variant=dummy)[:, :]
+    b = ds2.with_seqs("variants").with_settings(dummy_variant=dummy)[:, :]
+    assert int(np.asarray(a.start.lengths).min()) == 1
     _assert_ragged_equal(a.start.to_packed(), b.start.to_packed(), "start")
     _assert_ragged_equal(a.ilen.to_packed(), b.ilen.to_packed(), "ilen")
 

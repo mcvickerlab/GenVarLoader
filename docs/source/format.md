@@ -155,9 +155,14 @@ genoray's `.svar2` stores an atomized pure deletion (e.g. VCF `GTA>G`) at the VC
 position with an empty ALT (`b""`); `.svar` keeps the VCF anchor base (`b"G"`). The variant's
 position, `ilen` and reference span (anchor plus deleted bases) are the same in both stores.
 
-- Bare ALT bytes differ: `RaggedVariants.alt` from `with_seqs("variants")`, and the `alt` field
-  of `with_seqs("variant-windows")` with `VarWindowOpt(alt="allele")`, are `b""` on `.svar2` and
-  `b"G"` on `.svar`, for pure-deletion records only.
+- Bare ALT bytes differ: `RaggedVariants.alt` (and the flat `FlatVariants.fields["alt"]`) from
+  `with_seqs("variants")`, and the `alt` field of `with_seqs("variant-windows")` with
+  `VarWindowOpt(alt="allele")`, are `b""` on `.svar2` and `b"G"` on `.svar`, for pure-deletion
+  records only. On a negative-strand region the `.svar` anchor is reverse-complemented
+  (`b"C"`); the `.svar2` empty ALT stays `b""`.
+- `start` and `ilen` are the same, so the ride-along `FlatVariants.flank_tokens`
+  (`ref[start-L:start] . ref[end:end+L]`, `end = start - min(ilen, 0) + 1`) are byte-identical:
+  they read only the reference around that span and never look at the ALT bytes.
 - Flanked windows do not differ. `ref_window` reads `[start-L, end+L)` from the reference, and
   `alt_window` is `flank5 . ALT . flank3` with the anchor base restored for an empty-ALT
   deletion, so both are byte-identical between the backends and `alt_window` equals the
@@ -170,6 +175,10 @@ position, `ilen` and reference span (anchor plus deleted bases) are the same in 
 A `.svar2`-backed dataset supports all four output modes (`haplotypes`, `variants`,
 `variant-windows`, and haplotype-realigned `tracks`), `unphased_union`, and
 `var_fields`-selected store INFO/FORMAT fields (on both `"variants"` and `"variant-windows"`).
+`"variants"` output supports both output formats: ragged `RaggedVariants` and flat
+`FlatVariants` (`with_output_format("flat")`) with the ride-along `flank_tokens`, and both honor
+`dummy_variant`. Flat `FlatVariants` match `.svar` field for field (`alt`, `start`, `ilen` when
+requested, store fields, `flank_tokens`) except the pure-deletion ALT bytes below.
 Haplotype and `variants` output also support splicing, `var_filter="exonic"`, and
 automatic reverse-complementation for negative-strand regions. Spliced
 `RaggedVariants` are returned as complete `(transcript, sample, phase, ~variants)`
