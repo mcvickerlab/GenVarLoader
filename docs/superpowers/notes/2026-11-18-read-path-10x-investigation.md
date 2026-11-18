@@ -1,6 +1,6 @@
 # Read path: is a 10× speedup available? (investigation handoff, 2026-11-18)
 
-Status: **analysis done, nothing implemented.** Next step is a measurement on a GPU box (see "Resume here").
+Status: **analysis done, nothing implemented.** Step 1 measured 2026-11-18: calla-asca is GPU-bound (see "Step 1 result").
 Repos involved: GenVarLoader (`main` @ 3c68aa9c), genoray (6.0.2 @ 9b56ed4), calla (55d22f2), calla-asca (`design-spec` @ 141a684), calla-methyl, aster, gvf-geuvadis.
 
 Tags: **[code]** read in source, **[measured-repo]** number written in a repo doc/commit, **[measured-11-18]** microbench run during this investigation (M4 Pro, `tests/data/1kg` SVAR1, 100 regions × 5 samples × 10 kb), **[inferred]**.
@@ -15,6 +15,21 @@ Tags: **[code]** read in source, **[measured-repo]** number written in a repo do
    - `RefSeq` / calla Python dominates → fix in calla (suspect: `RefSeq._call_one_to_many` `np.unique` dedup then per-item Python gather, calla `data/sources/tokens.py:679-722`).
    - GPU-bound → calla-asca isn't loader-limited; drop it as the driver.
 3. Quick independent win (not gvl): gvf-geuvadis p-SAGE-net baseline one-hots to float32 on CPU (`bench/accuracy/psagenet_data.py:73-102`), measured loader-bound at 36.9 items/s on A30 (`psagenet_train.py:31-32,338`). Ship uint8 to GPU and one-hot there. ~30 min.
+
+## Step 1 result (2026-11-18, GPU box): calla-asca is GPU-bound
+
+Ran calla-asca `perf/profile-train-step` @ b613404 on 1× RTX PRO 6000 Blackwell (cu130), fp32, `num_workers=0`, full `peaks_F1000.gvl` (149k regions × 148 samples), 50 steps after 10 warmup.
+
+| `--max-items` | items / regions per batch | real loop (A) | fetch | ↳ AscaVariants | ↳ RefSeq | H2D | GPU fwd/bwd/step | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| 4096 (train default) | 472 / 4 | 83.1 ms (12.0 steps/s) | 13.9 ms | 6.7 ms | 3.1 ms | 1.2 ms | 37.8 ms | **GPU-bound** |
+| 16384 | 2006 / 17 | 91.0 ms (11.0 steps/s) | 27.0 ms | 12.0 ms | 8.8 ms | 2.4 ms | 48.4 ms | **GPU-bound** |
+
+- Fetch is ~37% (4096) / ~56% (16384) of GPU time. gvl is the largest single fetch cost (`decode_variants_from_svar2_readbound` 5.7–6.8 ms/step), but making it free would not move the step time: the GPU is the bottleneck.
+- The real loop is ~30 ms/step slower than fetch + H2D + GPU summed (83 vs 53 ms; 91 vs 78 ms). Not explained yet: pass A is a mean over different batches, pass B reports medians. Possible causes are Python/launch overhead hidden by B's syncs or batch variance. Worth one look before trusting the absolute numbers.
+- The earlier 296–390 ms/step estimate is stale: it predates calla 55d22f2 (Helion kernels, fewer host syncs).
+- Per the decision rule in step 2: **calla-asca is not loader-limited — drop it as the driver for gvl read-path work.** The largest available calla-asca win is overlapping the fetch with the GPU (`num_workers>0` or a prefetch thread): ~83 → ~38 ms/step at most, with no gvl change.
+- Raw logs were in the session scratchpad only; rerun with `CALLA_ASCA_DATA_DIR=<design-spec worktree>/data ./px python scripts/profile_train_step.py ...` (a fresh worktree has no `data/`).
 
 ## Headline conclusions
 
