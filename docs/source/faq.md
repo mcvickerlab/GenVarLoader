@@ -132,7 +132,7 @@ Notes:
 
 - Flanks only see the variants returned for the query region. Flank bases that extend past the region use the reference, not variants outside the region.
 - `flank_source="haplotype"` cannot be combined with `with_settings(unphased_union=True)`, because a union row mixes both haplotypes and has no single haplotype context. The combination raises a `ValueError`.
-- Haplotype flanks cost no extra throughput. The kernel skips the reference window read, and in benchmarks it is 15–58% faster than reference flanks.
+- Haplotype flanks cost about the same as reference flanks. In kernel benchmarks they take 0.94–1.7x the time of reference flanks; the extra work is building a short per-row haplotype buffer.
 
 ## Can I build a dataset in parallel shards and merge them?
 
