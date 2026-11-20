@@ -301,6 +301,14 @@ class VarWindowOpt:
     ``token_alphabet`` accepts a ``str``, ``bytes``, or ``seqpro.NucleotideAlphabet``
     (e.g. ``seqpro.alphabets.DNA``) and is normalized to ``bytes`` on construction;
     each byte's position is its token id, so ordering is preserved verbatim.
+
+    ``flank_source`` picks where the ``L`` flank bases come from. ``"reference"``
+    (default) uses the reference genome. ``"haplotype"`` uses the individual's
+    haplotype: the other ALT calls in the same ``(region, sample, ploid)`` row are
+    applied to the flanks, so ``alt_window`` is exactly the haplotype around the
+    variant and ``ref_window`` is that context with the variant reverted. Only
+    variants within the queried region are applied; flank bases past the region
+    edge stay reference. Not supported with ``unphased_union``.
     """
 
     flank_length: int
@@ -308,8 +316,13 @@ class VarWindowOpt:
     unknown_token: int
     ref: Literal["window", "allele"] = "window"
     alt: Literal["window", "allele"] = "window"
+    flank_source: Literal["reference", "haplotype"] = "reference"
 
     def __post_init__(self) -> None:
+        if self.flank_source not in ("reference", "haplotype"):
+            raise ValueError(
+                f"flank_source must be 'reference' or 'haplotype', got {self.flank_source!r}"
+            )
         # Normalize to the raw byte alphabet so downstream consumers (e.g.
         # ``build_token_lut``) only ever see ``bytes``.
         object.__setattr__(
@@ -790,6 +803,7 @@ def _assemble_variant_buffers_rust(
     reference,
     ref_offsets,
     pad_char,
+    hap_flanks=False,
 ):
     """Dtype-selecting shim: routes to assemble_variant_buffers_u8/i32 by lut dtype.
 
@@ -829,6 +843,7 @@ def _assemble_variant_buffers_rust(
         np.ascontiguousarray(reference, np.uint8),
         np.ascontiguousarray(ref_offsets, np.int64),
         int(pad_char),
+        bool(hap_flanks),
     )
 
 
@@ -1032,6 +1047,7 @@ def get_variants_flat(
             stat.ref,
             stat.ref_offsets,
             haps.reference.pad_char,
+            opt.flank_source == "haplotype",  # hap_flanks
         )
         wshape = (b, eff_ploidy, None, None)
         wfields = {k: v for k, v in fields.items() if k not in ("alt", "ref")}
@@ -1070,6 +1086,7 @@ def get_variants_flat(
         stat.ref if stat.ref is not None else np.zeros(0, np.uint8),
         stat.ref_offsets if stat.ref_offsets is not None else np.zeros(1, np.int64),
         haps.reference.pad_char if haps.reference is not None else 0,
+        haps.flank_source == "haplotype",  # hap_flanks
     )
 
     # Build fields in ORIGINAL insertion order (alt FIRST, then start, ref, rest).

@@ -75,6 +75,7 @@ def test_build_producer_schema_variant_windows():
         "unknown_token": 4,
         "ref": "window",
         "alt": "allele",
+        "flank_source": "reference",
     }
     assert "flank_length" not in schema
 
@@ -294,3 +295,33 @@ def test_build_producer_schema_unphased_union_default_omits_key():
 
     rebuilt = _apply_schema(dummy_ds, schema)
     assert rebuilt._seqs.unphased_union is False
+
+
+def test_producer_schema_round_trips_haplotype_flank_source():
+    """flank_source='haplotype' survives the producer schema for both flank configs."""
+    dummy = gvl.get_dummy_dataset().with_tracks(False)
+
+    ride = (
+        dummy.with_seqs("variants")
+        .with_settings(
+            flank_length=2,
+            token_alphabet=b"ACGT",
+            unknown_token=4,
+            flank_source="haplotype",
+        )
+        .with_output_format("flat")
+    )
+    schema = _build_producer_schema(ride)
+    assert schema["flank_source"] == "haplotype"
+    assert _apply_schema(dummy, schema)._seqs.flank_source == "haplotype"
+
+    opt = VarWindowOpt(
+        flank_length=3,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        flank_source="haplotype",
+    )
+    win = dummy.with_output_format("flat").with_seqs("variant-windows", opt)
+    schema = _build_producer_schema(win)
+    assert schema["window_opt"]["flank_source"] == "haplotype"
+    assert _apply_schema(dummy, schema)._seqs.window_opt == opt

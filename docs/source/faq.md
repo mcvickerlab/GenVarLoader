@@ -102,6 +102,38 @@ Both are sparse columnar variant archives from [`genoray`](https://github.com/mc
 
 One documented difference in raw output: for a pure deletion, the bare ALT allele from a `.svar` dataset is the VCF anchor base (e.g. `b"G"` for `GTA>G`), while a `.svar2` dataset reports the atomized empty ALT (`b""`), which is how genoray's `.svar2` format stores pure deletions. This affects only the bare allele bytes, `RaggedVariants.alt` / `FlatVariants.fields["alt"]` from `with_seqs("variants")` and the `alt` field of `"variant-windows"` with `VarWindowOpt(alt="allele")`, and only for pure-deletion records. The variant's `start` and `ilen` are the same on both backends (the deletion starts at the anchor), so the ride-along `FlatVariants.flank_tokens`, read from the reference around `[start, start - min(ilen, 0) + 1)`, are byte-identical. The flanked windows do not differ either: `ref_window` and `alt_window` are byte-identical between the two backends, and `alt_window` is the reference with that variant applied (for `GTA>G`, `flank5 . G . flank3`), because gvl restores the anchor base of an empty-ALT deletion when it assembles the window. Reconstructed haplotypes are byte-identical too.
 
+## Can variant flanks show the sample's haplotype instead of the reference?
+
+Yes. By default the ride-along `FlatVariants.flank_tokens` and the `ref_window`/`alt_window` of `"variant-windows"` take their flanking bases from the reference genome. Set `flank_source="haplotype"` to take them from the haplotype that carries the variant instead, so neighbouring SNPs and indels on the same haplotype show up in the flanks:
+
+```python
+# ride-along flank tokens on flat "variants" output
+fv = (
+    ds.with_seqs("variants")
+    .with_output_format("flat")
+    .with_settings(
+        flank_length=128,
+        token_alphabet=b"ACGT",
+        unknown_token=4,
+        flank_source="haplotype",
+    )[0, 0]
+)
+
+# variant windows
+opt = gvl.VarWindowOpt(
+    flank_length=128, token_alphabet=b"ACGT", unknown_token=4, flank_source="haplotype"
+)
+win = ds.with_output_format("flat").with_seqs("variant-windows", opt)[0, 0]
+```
+
+With haplotype flanks, `alt_window` is exactly the haplotype around the variant (`flank5 . ALT . flank3`), and `ref_window` is the same haplotype context with only the focal variant reverted to REF. Flanks follow gvl's haplotype reconstruction: variants are applied left to right, and a variant that overlaps an earlier applied one is not on the haplotype. Such a variant's flanks are the haplotype around its reference position.
+
+Notes:
+
+- Flanks only see the variants returned for the query region. Flank bases that extend past the region use the reference, not variants outside the region.
+- `flank_source="haplotype"` cannot be combined with `with_settings(unphased_union=True)`, because a union row mixes both haplotypes and has no single haplotype context. The combination raises a `ValueError`.
+- Haplotype flanks cost no extra throughput. The kernel skips the reference window read, and in benchmarks it is 15–58% faster than reference flanks.
+
 ## Can I build a dataset in parallel shards and merge them?
 
 Yes. Split your BED across jobs, `gvl.write` one dataset per shard, then merge with

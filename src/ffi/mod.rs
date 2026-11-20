@@ -481,6 +481,7 @@ fn assemble_variant_buffers_impl<'py, Tok: numpy::Element + Copy>(
     reference: PyReadonlyArray1<u8>,
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
+    hap_flanks: bool,
 ) -> Bound<'py, PyDict> {
     let rg = ref_global.as_ref().map(|a| a.as_array());
     let ro = ref_off_global.as_ref().map(|a| a.as_array());
@@ -502,6 +503,7 @@ fn assemble_variant_buffers_impl<'py, Tok: numpy::Element + Copy>(
             reference.as_array(),
             ref_offsets.as_array(),
             pad_char,
+            hap_flanks,
         )
     } else {
         assemble_windows_mode::<Tok>(
@@ -521,6 +523,7 @@ fn assemble_variant_buffers_impl<'py, Tok: numpy::Element + Copy>(
             reference.as_array(),
             ref_offsets.as_array(),
             pad_char,
+            hap_flanks,
         )
     };
     bufs_to_pydict(py, bufs)
@@ -528,6 +531,7 @@ fn assemble_variant_buffers_impl<'py, Tok: numpy::Element + Copy>(
 
 /// u8-token assembly (token_dtype == uint8). See `assemble_variant_buffers_impl`.
 #[pyfunction]
+#[pyo3(signature = (mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global, ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len, lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char, hap_flanks=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_variant_buffers_u8<'py>(
     py: Python<'py>,
@@ -550,6 +554,7 @@ pub fn assemble_variant_buffers_u8<'py>(
     reference: PyReadonlyArray1<u8>,
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
+    hap_flanks: bool,
 ) -> Bound<'py, PyDict> {
     assemble_variant_buffers_impl::<u8>(
         py,
@@ -572,11 +577,13 @@ pub fn assemble_variant_buffers_u8<'py>(
         reference,
         ref_offsets,
         pad_char,
+        hap_flanks,
     )
 }
 
 /// i32-token assembly (token_dtype == int32). See `assemble_variant_buffers_impl`.
 #[pyfunction]
+#[pyo3(signature = (mode, v_idxs, row_offsets, alt_global, alt_off_global, ref_global, ref_off_global, want_ref_bytes, want_flank, ref_mode, alt_mode, flank_len, lut, v_contigs, v_starts, ilens, reference, ref_offsets, pad_char, hap_flanks=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_variant_buffers_i32<'py>(
     py: Python<'py>,
@@ -599,6 +606,7 @@ pub fn assemble_variant_buffers_i32<'py>(
     reference: PyReadonlyArray1<u8>,
     ref_offsets: PyReadonlyArray1<i64>,
     pad_char: u8,
+    hap_flanks: bool,
 ) -> Bound<'py, PyDict> {
     assemble_variant_buffers_impl::<i32>(
         py,
@@ -621,6 +629,7 @@ pub fn assemble_variant_buffers_i32<'py>(
         reference,
         ref_offsets,
         pad_char,
+        hap_flanks,
     )
 }
 

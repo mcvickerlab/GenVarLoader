@@ -49,6 +49,356 @@ pub fn slice_flanks(
     (Array1::from_vec(f5), Array1::from_vec(f3))
 }
 
+/// Copy `dst.len()` reference bases starting at contig coordinate `from` into
+/// `dst`, padding positions outside `[0, contig.len())` with `pad_char`
+/// (absolute-coordinate padding, same as `reference::get_reference`).
+#[inline]
+fn copy_ref_padded(dst: &mut [u8], contig: &[u8], from: i64, pad_char: u8) {
+    let n = dst.len() as i64;
+    let clen = contig.len() as i64;
+    let lo = from.clamp(0, clen);
+    let hi = (from + n).clamp(0, clen);
+    if hi <= lo {
+        dst.fill(pad_char);
+        return;
+    }
+    let d_lo = (lo - from) as usize;
+    let d_hi = (hi - from) as usize;
+    dst[..d_lo].fill(pad_char);
+    dst[d_lo..d_hi].copy_from_slice(&contig[lo as usize..hi as usize]);
+    dst[d_hi..].fill(pad_char);
+}
+
+#[inline(always)]
+fn var_ref_end(start: i32, ilen: i32) -> i64 {
+    start as i64 - (ilen.min(0) as i64) + 1
+}
+
+/// Append `n` reference bases starting at contig coordinate `from` to `buf`
+/// (padded like [`copy_ref_padded`]).
+#[inline]
+fn push_ref_padded(buf: &mut Vec<u8>, contig: &[u8], from: i64, n: usize, pad_char: u8) {
+    let at = buf.len();
+    buf.resize(at + n, 0);
+    copy_ref_padded(&mut buf[at..], contig, from, pad_char);
+}
+
+/// Per-row inputs shared by the haplotype-flank helpers. All per-variant slices
+/// are indexed by *selected* variant (already gathered).
+struct RowCtx<'a> {
+    contig: &'a [u8],
+    starts: &'a [i32],
+    ilens: &'a [i32],
+    alt: &'a [u8],
+    alt_off: &'a [i64],
+    applied: &'a [bool],
+    pad_char: u8,
+}
+
+impl RowCtx<'_> {
+    /// Allele bytes of variant `k` as written into the haplotype. Empty-ALT pure
+    /// deletions (SVAR2) get their anchor base `ref[start]` back, written into
+    /// `anchor` (mirrors [`anchor_empty_del_alts`]).
+    #[inline]
+    fn allele<'s>(&'s self, k: usize, anchor: &'s mut [u8; 1]) -> &'s [u8] {
+        let (a0, a1) = (self.alt_off[k] as usize, self.alt_off[k + 1] as usize);
+        if a0 == a1 && self.ilens[k] < 0 {
+            let p = self.starts[k] as i64;
+            anchor[0] = if (0..self.contig.len() as i64).contains(&p) {
+                self.contig[p as usize]
+            } else {
+                self.pad_char
+            };
+            &anchor[..]
+        } else {
+            &self.alt[a0..a1]
+        }
+    }
+
+    /// Flanks of a focal variant `i` the haplotype does NOT carry (shadowed by an
+    /// overlapping earlier ALT). The focal variant is forced in and conflicting
+    /// neighbours are dropped: walk outward over applied neighbours until `L`
+    /// bases are filled on each side. `O(L + k)`; only used for shadowed variants.
+    fn walk(&self, i: usize, rs: usize, re: usize, f5: &mut [u8], f3: &mut [u8]) {
+        let l = f5.len();
+        let (starts, ilens) = (self.starts, self.ilens);
+        let mut anchor = [0u8; 1];
+
+        // 5': fill right-to-left, walking back from start_i.
+        let mut rem = l;
+        let mut cur = starts[i] as i64;
+        let mut j = i;
+        while rem > 0 {
+            let mut found = None;
+            while j > rs {
+                j -= 1;
+                if self.applied[j] && var_ref_end(starts[j], ilens[j]) <= cur {
+                    found = Some(j);
+                    break;
+                }
+            }
+            let gap = match found {
+                Some(k) => cur - var_ref_end(starts[k], ilens[k]),
+                None => i64::MAX,
+            };
+            let n_ref = (gap as u64).min(rem as u64) as usize;
+            copy_ref_padded(&mut f5[rem - n_ref..rem], self.contig, cur - n_ref as i64, self.pad_char);
+            rem -= n_ref;
+            let Some(k) = found else { break };
+            if rem == 0 {
+                break;
+            }
+            let a = self.allele(k, &mut anchor);
+            let take = a.len().min(rem);
+            f5[rem - take..rem].copy_from_slice(&a[a.len() - take..]);
+            rem -= take;
+            cur = starts[k] as i64;
+        }
+
+        // 3': fill left-to-right, walking forward from end_i.
+        let mut pos = 0usize;
+        let mut cur = var_ref_end(starts[i], ilens[i]);
+        let mut j = i + 1;
+        while pos < l {
+            let mut found = None;
+            while j < re {
+                let k = j;
+                j += 1;
+                if self.applied[k] && starts[k] as i64 >= cur {
+                    found = Some(k);
+                    break;
+                }
+            }
+            let gap = match found {
+                Some(k) => starts[k] as i64 - cur,
+                None => i64::MAX,
+            };
+            let n_ref = (gap as u64).min((l - pos) as u64) as usize;
+            copy_ref_padded(&mut f3[pos..pos + n_ref], self.contig, cur, self.pad_char);
+            pos += n_ref;
+            let Some(k) = found else { break };
+            if pos == l {
+                break;
+            }
+            let a = self.allele(k, &mut anchor);
+            let take = a.len().min(l - pos);
+            f3[pos..pos + take].copy_from_slice(&a[..take]);
+            pos += take;
+            cur = var_ref_end(starts[k], ilens[k]);
+        }
+    }
+}
+
+/// Haplotype ("personalized") per-variant flanks: for each selected variant, the
+/// `L` *haplotype* bases immediately 5' and 3' of it, with the other ALT calls
+/// in the same `(instance, ploid)` row applied. Returns one flat buffer laid out
+/// `[f5 | f3]` per variant (`2L` bytes each, variant-major) -- the exact layout
+/// of the ride-along `flank_tokens` before tokenization.
+///
+/// Rows (`row_offsets`, len `rows+1`) must be position-sorted, as they are
+/// everywhere variants are gathered. Which neighbours count as applied mirrors
+/// `reconstruct_haplotype_core`: a single greedy left-to-right pass where a
+/// variant overlapping an already-applied one is skipped ("first ALT wins").
+/// So for every variant the haplotype carries, `f5 . ALT . f3` is exactly the
+/// reconstructed haplotype around it. A shadowed variant gets its flanks with
+/// itself forced in and the conflicting neighbours dropped.
+///
+/// Cost: per row, one pass builds a *gap-compressed* haplotype: applied ALTs
+/// separated by their reference gaps, where any gap longer than `2L` is cut to
+/// its first `L` and last `L` bases (no flank can see further). Every flank is
+/// then a single `L`-byte slice of that buffer, so the work is `~(2L + |ALT|)`
+/// bytes per variant -- the same as the reference path's `[start-L, end+L)`
+/// read -- and dense rows are *cheaper* because short gaps are copied once.
+///
+/// Empty-ALT pure deletions (SVAR2) are re-anchored with `ref[start]`.
+/// `alt_data`/`alt_off`/`starts_v`/`ilens_v`/`v_contigs` are per *selected*
+/// variant (already gathered).
+#[allow(clippy::too_many_arguments)]
+pub fn haplotype_flanks(
+    row_offsets: ArrayView1<i64>,
+    v_contigs: ArrayView1<i32>,
+    starts_v: ArrayView1<i32>,
+    ilens_v: ArrayView1<i32>,
+    alt_data: ArrayView1<u8>,
+    alt_off: ArrayView1<i64>,
+    reference: ArrayView1<u8>,
+    ref_offsets: ArrayView1<i64>,
+    pad_char: u8,
+    flank_len: usize,
+) -> Array1<u8> {
+    let n = starts_v.len();
+    let l = flank_len;
+    let mut out = vec![0u8; n * 2 * l];
+    if n == 0 || l == 0 {
+        return Array1::from_vec(out);
+    }
+    let ref_s = reference.as_slice().expect("haplotype_flanks: reference must be contiguous");
+    let rof = ref_offsets.as_slice().expect("haplotype_flanks: ref_offsets must be contiguous");
+    let alt_s = alt_data.as_slice().expect("haplotype_flanks: alt_data must be contiguous");
+    let aof = alt_off.as_slice().expect("haplotype_flanks: alt_off must be contiguous");
+    let starts = starts_v.as_slice().expect("haplotype_flanks: starts must be contiguous");
+    let ilens = ilens_v.as_slice().expect("haplotype_flanks: ilens must be contiguous");
+    let contigs = v_contigs.as_slice().expect("haplotype_flanks: contigs must be contiguous");
+    let rows = row_offsets.as_slice().expect("haplotype_flanks: row_offsets must be contiguous");
+
+    let mut applied = vec![false; n];
+    // hap-buffer position of each applied variant's allele start (reused per row)
+    let mut hpos: Vec<usize> = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut anchor = [0u8; 1];
+    for r in 0..rows.len().saturating_sub(1) {
+        let (rs, re) = (rows[r] as usize, rows[r + 1] as usize);
+        if re <= rs {
+            continue;
+        }
+        let c = contigs[rs] as usize;
+        let contig = &ref_s[rof[c] as usize..rof[c + 1] as usize];
+
+        // Greedy forward pass: which variants does this haplotype carry?
+        let mut cursor = i64::MIN;
+        for j in rs..re {
+            if starts[j] as i64 >= cursor {
+                applied[j] = true;
+                cursor = var_ref_end(starts[j], ilens[j]);
+            }
+        }
+        let ctx = RowCtx {
+            contig,
+            starts,
+            ilens,
+            alt: alt_s,
+            alt_off: aof,
+            applied: &applied,
+            pad_char,
+        };
+
+        // Build the gap-compressed haplotype for this row.
+        buf.clear();
+        hpos.clear();
+        hpos.resize(re - rs, 0);
+        let mut cur = i64::MIN; // ref coordinate just past the last applied ALT
+        for j in rs..re {
+            if !applied[j] {
+                continue;
+            }
+            let s = starts[j] as i64;
+            if cur == i64::MIN {
+                push_ref_padded(&mut buf, contig, s - l as i64, l, pad_char);
+            } else {
+                let gap = (s - cur) as usize;
+                if gap <= 2 * l {
+                    push_ref_padded(&mut buf, contig, cur, gap, pad_char);
+                } else {
+                    push_ref_padded(&mut buf, contig, cur, l, pad_char);
+                    push_ref_padded(&mut buf, contig, s - l as i64, l, pad_char);
+                }
+            }
+            hpos[j - rs] = buf.len();
+            buf.extend_from_slice(ctx.allele(j, &mut anchor));
+            cur = var_ref_end(starts[j], ilens[j]);
+        }
+        push_ref_padded(&mut buf, contig, cur, l, pad_char);
+
+        // Slice every applied variant's flanks; walk only for shadowed ones.
+        for j in rs..re {
+            let (f5, f3) = out[j * 2 * l..(j + 1) * 2 * l].split_at_mut(l);
+            if applied[j] {
+                let p = hpos[j - rs];
+                let q = p + ctx.allele(j, &mut anchor).len();
+                f5.copy_from_slice(&buf[p - l..p]);
+                f3.copy_from_slice(&buf[q..q + l]);
+            } else {
+                ctx.walk(j, rs, re, f5, f3);
+            }
+        }
+    }
+    Array1::from_vec(out)
+}
+
+/// A tokenized ragged buffer: (tokens, int64 offsets).
+type TokBuf<Tok> = (Array1<Tok>, Array1<i64>);
+
+/// `variant-windows` with haplotype flanks: from the `[f5 | f3]` buffer of
+/// [`haplotype_flanks`], assemble `ref_window = f5 . REF . f3` (REF read
+/// straight from the reference) and/or `alt_window = f5 . ALT . f3` (empty-ALT
+/// deletions re-anchored). Tokenizes while copying (one pass, no reference
+/// window fetch). Returns `(ref_window, alt_window)` as `(tokens, offsets)`.
+#[allow(clippy::too_many_arguments)]
+fn hap_windows<Tok: Copy>(
+    flanks: &[u8],
+    want_ref: bool,
+    want_alt: bool,
+    v_contigs: &[i32],
+    starts: &[i32],
+    ilens: &[i32],
+    alt: &[u8],
+    alt_off: &[i64],
+    reference: &[u8],
+    ref_offsets: &[i64],
+    pad_char: u8,
+    l: usize,
+    lut: &[Tok],
+) -> (Option<TokBuf<Tok>>, Option<TokBuf<Tok>>) {
+    assert!(lut.len() >= 256, "hap_windows: lut must have >= 256 entries");
+    let n = starts.len();
+    let tok = |dst: &mut Vec<Tok>, src: &[u8]| dst.extend(src.iter().map(|&b| lut[b as usize]));
+    let contig_of = |i: usize| {
+        let c = v_contigs[i] as usize;
+        &reference[ref_offsets[c] as usize..ref_offsets[c + 1] as usize]
+    };
+    let mut scratch: Vec<u8> = Vec::new();
+
+    let ref_w = want_ref.then(|| {
+        let mut off = Vec::with_capacity(n + 1);
+        off.push(0i64);
+        let mut total = 0i64;
+        for i in 0..n {
+            total += 2 * l as i64 + (var_ref_end(starts[i], ilens[i]) - starts[i] as i64);
+            off.push(total);
+        }
+        let mut data: Vec<Tok> = Vec::with_capacity(total as usize);
+        for i in 0..n {
+            let fl = &flanks[i * 2 * l..(i + 1) * 2 * l];
+            let s = starts[i] as i64;
+            let len = (var_ref_end(starts[i], ilens[i]) - s) as usize;
+            scratch.clear();
+            push_ref_padded(&mut scratch, contig_of(i), s, len, pad_char);
+            tok(&mut data, &fl[..l]);
+            tok(&mut data, &scratch);
+            tok(&mut data, &fl[l..]);
+        }
+        (Array1::from_vec(data), Array1::from_vec(off))
+    });
+
+    let alt_w = want_alt.then(|| {
+        let mut off = Vec::with_capacity(n + 1);
+        off.push(0i64);
+        let mut total = 0i64;
+        for i in 0..n {
+            let a_len = alt_off[i + 1] - alt_off[i];
+            let a_len = if a_len == 0 && ilens[i] < 0 { 1 } else { a_len };
+            total += 2 * l as i64 + a_len;
+            off.push(total);
+        }
+        let mut data: Vec<Tok> = Vec::with_capacity(total as usize);
+        for i in 0..n {
+            let fl = &flanks[i * 2 * l..(i + 1) * 2 * l];
+            let (a0, a1) = (alt_off[i] as usize, alt_off[i + 1] as usize);
+            tok(&mut data, &fl[..l]);
+            if a0 == a1 && ilens[i] < 0 {
+                scratch.clear();
+                push_ref_padded(&mut scratch, contig_of(i), starts[i] as i64, 1, pad_char);
+                tok(&mut data, &scratch);
+            } else {
+                tok(&mut data, &alt[a0..a1]);
+            }
+            tok(&mut data, &fl[l..]);
+        }
+        (Array1::from_vec(data), Array1::from_vec(off))
+    });
+    (ref_w, alt_w)
+}
+
 /// Concatenate `flank5 . alt . flank3` per variant into a flat byte buffer.
 /// `f5`/`f3` are `(n*flank_len,)` variant-major. Mirrors numba
 /// `_assemble_alt_windows`. Returns `(out_bytes, out_offsets)`.
@@ -216,6 +566,7 @@ pub fn assemble_variants_mode<Tok: Copy>(
     reference: ArrayView1<u8>,
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
+    hap_flanks: bool,
 ) -> VariantBufs<Tok> {
     let mut byte_bufs = Vec::new();
     let mut tok_bufs = Vec::new();
@@ -232,24 +583,31 @@ pub fn assemble_variants_mode<Tok: Copy>(
     if want_flank {
         let lut = lut.expect("flank tokens requested but no token LUT supplied");
         let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
-        let (rw_data, rw_off) = fetch_windows(
-            v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
-            pad_char,
-        );
         let l = flank_len as usize;
-        let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
-        // Concatenate [f5 | f3] per variant (2L tokens, variant-major), tokenize.
-        let n = f5.len() / l;
-        let mut flank_bytes: Vec<u8> = Vec::with_capacity(n * 2 * l);
-        for i in 0..n {
-            for k in 0..l {
-                flank_bytes.push(f5[i * l + k]);
+        // [f5 | f3] per variant (2L bytes, variant-major).
+        let fb = if hap_flanks {
+            // alt bytes are already gathered per selected variant (byte_bufs[0]);
+            // no reference window fetch is needed.
+            let (_, a_data, a_off) = &byte_bufs[0];
+            haplotype_flanks(
+                row_offsets, v_contigs, starts_v.view(), ilens_v.view(), a_data.view(),
+                a_off.view(), reference, ref_offsets, pad_char, l,
+            )
+        } else {
+            let (rw_data, rw_off) = fetch_windows(
+                v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
+                pad_char,
+            );
+            let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
+            let n = f5.len() / l;
+            let mut flank_bytes: Vec<u8> = Vec::with_capacity(n * 2 * l);
+            let (f5s, f3s) = (f5.as_slice().unwrap(), f3.as_slice().unwrap());
+            for i in 0..n {
+                flank_bytes.extend_from_slice(&f5s[i * l..(i + 1) * l]);
+                flank_bytes.extend_from_slice(&f3s[i * l..(i + 1) * l]);
             }
-            for k in 0..l {
-                flank_bytes.push(f3[i * l + k]);
-            }
-        }
-        let fb = Array1::from_vec(flank_bytes);
+            Array1::from_vec(flank_bytes)
+        };
         let tok = tokenize(fb.view(), lut);
         // flank_tokens offsets are the variant-level row_offsets (fixed 2L inner
         // axis carried separately Python-side as a trailing regular dim).
@@ -267,7 +625,7 @@ pub fn assemble_variants_mode<Tok: Copy>(
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_windows_mode<Tok: Copy>(
     v_idxs: ArrayView1<i32>,
-    _row_offsets: ArrayView1<i64>,
+    row_offsets: ArrayView1<i64>,
     ref_mode: i64,
     alt_mode: i64,
     alt_global: ArrayView1<u8>,
@@ -282,6 +640,7 @@ pub fn assemble_windows_mode<Tok: Copy>(
     reference: ArrayView1<u8>,
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
+    hap_flanks: bool,
 ) -> VariantBufs<Tok> {
     let mut tok_bufs = Vec::new();
     let l = flank_len as usize;
@@ -289,6 +648,46 @@ pub fn assemble_windows_mode<Tok: Copy>(
     // alt alleles are always gathered (needed for alt window or bare alt).
     let (alt_data, alt_seq_off) =
         crate::variants::gather_alleles(v_idxs, alt_global, alt_off_global);
+
+    // Haplotype flanks: windows are assembled straight from the per-row
+    // gap-compressed haplotype + reference REF span, tokenized while copying.
+    if hap_flanks && (ref_mode == 1 || alt_mode == 1) {
+        let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
+        let flanks = haplotype_flanks(
+            row_offsets, v_contigs, starts_v.view(), ilens_v.view(), alt_data.view(),
+            alt_seq_off.view(), reference, ref_offsets, pad_char, l,
+        );
+        let (ref_w, alt_w) = hap_windows(
+            flanks.as_slice().unwrap(),
+            ref_mode == 1,
+            alt_mode == 1,
+            v_contigs.as_slice().expect("v_contigs must be contiguous"),
+            starts_v.as_slice().unwrap(),
+            ilens_v.as_slice().unwrap(),
+            alt_data.as_slice().unwrap(),
+            alt_seq_off.as_slice().unwrap(),
+            reference.as_slice().expect("reference must be contiguous"),
+            ref_offsets.as_slice().expect("ref_offsets must be contiguous"),
+            pad_char,
+            l,
+            lut.as_slice().expect("lut must be contiguous"),
+        );
+        // ref side first (Python field insertion order), then alt side.
+        if let Some((d, o)) = ref_w {
+            tok_bufs.push(("ref_window", d, o));
+        } else if ref_mode == 2 {
+            let rg = ref_global.expect("bare ref allele needs ref byte buffer");
+            let ro = ref_off_global.expect("bare ref allele needs ref offsets");
+            let (ref_data, ref_seq_off) = crate::variants::gather_alleles(v_idxs, rg, ro);
+            tok_bufs.push(("ref", tokenize(ref_data.view(), lut), ref_seq_off));
+        }
+        if let Some((d, o)) = alt_w {
+            tok_bufs.push(("alt_window", d, o));
+        } else if alt_mode == 2 {
+            tok_bufs.push(("alt", tokenize(alt_data.view(), lut), alt_seq_off));
+        }
+        return VariantBufs { byte_bufs: Vec::new(), tok_bufs };
+    }
 
     // One fused fetch if either side needs a window read.
     let need_fetch = ref_mode == 1 || alt_mode == 1;
@@ -522,6 +921,7 @@ mod tests {
             reference.view(),
             ref_offsets.view(),
             b'N',
+            false,
         );
         // SNP start=5 ilen=0 → end=6; read [4,7) = [4,5,6]. L=1.
         // ref_window tokens (identity) = [4,5,6], off [0,3].
@@ -569,6 +969,7 @@ mod tests {
             reference.view(),
             ref_offsets.view(),
             b'N',
+            false,
         );
         let names: Vec<&str> = bufs.tok_bufs.iter().map(|t| t.0).collect();
         assert_eq!(names, vec!["ref", "alt"]);
@@ -613,6 +1014,7 @@ mod tests {
             reference.view(),
             ref_offsets.view(),
             b'N',
+            false,
         );
         // byte_bufs: only "alt". v_idxs [1,0] → "CG" then "A" → [67,71,65], off [0,2,3].
         assert_eq!(bufs.byte_bufs.len(), 1);
@@ -629,5 +1031,99 @@ mod tests {
         assert_eq!(*tname, "flank_tokens");
         assert_eq!(tdata.to_vec(), vec![7u8, 9, 4, 6]);
         assert_eq!(toff.to_vec(), vec![0i64, 2]);
+    }
+
+    /// Run `haplotype_flanks` on ref = 0..20 (one contig), pad = 255.
+    /// `vars` = (start, ilen, alt bytes); `rows` = row offsets.
+    fn hap_flanks(vars: &[(i32, i32, &[u8])], rows: &[i64], l: usize) -> (Vec<u8>, Vec<u8>) {
+        let reference: Array1<u8> = Array1::from_vec((0u8..20).collect());
+        let ref_offsets = arr1(&[0i64, 20]);
+        let starts = Array1::from_vec(vars.iter().map(|v| v.0).collect());
+        let ilens = Array1::from_vec(vars.iter().map(|v| v.1).collect());
+        let mut alt = Vec::new();
+        let mut off = vec![0i64];
+        for v in vars {
+            alt.extend_from_slice(v.2);
+            off.push(alt.len() as i64);
+        }
+        let contigs = Array1::<i32>::zeros(vars.len());
+        let fl = haplotype_flanks(
+            arr1(rows).view(),
+            contigs.view(),
+            starts.view(),
+            ilens.view(),
+            Array1::from_vec(alt).view(),
+            Array1::from_vec(off).view(),
+            reference.view(),
+            ref_offsets.view(),
+            255,
+            l,
+        );
+        // Split the interleaved [f5 | f3] per-variant layout.
+        let (mut f5, mut f3) = (Vec::new(), Vec::new());
+        for c in fl.as_slice().unwrap().chunks(2 * l) {
+            f5.extend_from_slice(&c[..l]);
+            f3.extend_from_slice(&c[l..]);
+        }
+        (f5, f3)
+    }
+
+    #[test]
+    fn test_haplotype_flanks_snps() {
+        // SNPs at 5 (->88) and 7 (->99), one row, L=3.
+        let (f5, f3) = hap_flanks(&[(5, 0, &[88]), (7, 0, &[99])], &[0, 2], 3);
+        assert_eq!(f5, vec![2, 3, 4, /* v@7 */ 4, 88, 6]);
+        assert_eq!(f3, vec![6, 99, 8, /* v@7 */ 8, 9, 10]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_rows_isolated() {
+        // Same two SNPs but in separate rows: flanks are pure reference.
+        let (f5, f3) = hap_flanks(&[(5, 0, &[88]), (7, 0, &[99])], &[0, 1, 2], 3);
+        assert_eq!(f5, vec![2, 3, 4, 4, 5, 6]);
+        assert_eq!(f3, vec![6, 7, 8, 8, 9, 10]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_deletion_and_edge_pad() {
+        // DEL at 3 (ilen -2, alt = anchor 100) spans [3,6); SNP at 7 (->200). L=4.
+        let (f5, f3) = hap_flanks(&[(3, -2, &[100]), (7, 0, &[200])], &[0, 2], 4);
+        // del f5: [-1,3) -> pad,0,1,2 ; SNP f5: ref6, DEL alt 100, ref 2, ref 1.
+        assert_eq!(f5, vec![255, 0, 1, 2, 1, 2, 100, 6]);
+        // del f3: from 6: ref6, SNP 200, ref8, ref9 ; SNP f3: 8..12.
+        assert_eq!(f3, vec![6, 200, 8, 9, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_empty_alt_deletion_reanchored() {
+        // SVAR2 bare-ALT deletion: empty alt -> anchor ref[3] = 3 is restored.
+        let (f5, _) = hap_flanks(&[(3, -2, &[]), (7, 0, &[200])], &[0, 2], 4);
+        assert_eq!(&f5[4..], &[1, 2, 3, 6]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_insertion() {
+        // INS at 2 (alt = anchor 2 + 50,51), SNP at 4. L=3.
+        let (f5, f3) = hap_flanks(&[(2, 2, &[2, 50, 51]), (4, 0, &[99])], &[0, 2], 3);
+        assert_eq!(&f5[3..], &[50, 51, 3]);
+        assert_eq!(&f3[..3], &[3, 99, 5]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_shadowed_overlap() {
+        // DEL at 3 (ilen -3) spans [3,7); SNP at 5 is shadowed (first ALT wins).
+        let (f5, f3) = hap_flanks(&[(3, -3, &[100]), (5, 0, &[99])], &[0, 2], 2);
+        // DEL ignores the shadowed SNP: f3 = ref[7,8].
+        assert_eq!(&f3[..2], &[7, 8]);
+        // Shadowed SNP as focal: the conflicting DEL is dropped -> ref flanks.
+        assert_eq!(&f5[2..], &[3, 4]);
+        assert_eq!(&f3[2..], &[6, 7]);
+    }
+
+    #[test]
+    fn test_haplotype_flanks_long_neighbour_allele_truncated() {
+        // INS right before focal longer than L: only its last L bases are used.
+        let (f5, _) = hap_flanks(&[(4, 4, &[4, 60, 61, 62, 63]), (5, 0, &[99])], &[0, 2], 3);
+        assert_eq!(&f5[3..], &[61, 62, 63]);
     }
 }
