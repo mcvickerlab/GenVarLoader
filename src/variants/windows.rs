@@ -2,7 +2,7 @@
 //! PyO3 lives in `crate::ffi`. Mirrors the Python helpers in
 //! `_dataset/_flat_flanks.py` (`tokenize_alleles`, `_slice_flanks`,
 //! `_assemble_alt_windows`, `compute_*`) — byte-identical by construction.
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, ArrayView1};
 
 /// Apply a 256-entry byte->token lookup table. `out[i] = lut[bytes[i]]`.
 /// Mirrors numpy `lut[bytes]`. `Tok` is the token dtype (u8 or i32).
@@ -24,6 +24,7 @@ pub fn tokenize<Tok: Copy>(bytes: ArrayView1<u8>, lut: ArrayView1<Tok>) -> Array
 /// row, `f3` = last `L`. Both returned flat `(n*L,)`, variant-major. Mirrors
 /// `_slice_flanks` (`f5 = data[rw_off[:-1,None]+cols]`,
 /// `f3 = data[rw_off[1:,None]-L+cols]`).
+#[cfg(test)] // unfused oracle for the fused kernels
 pub fn slice_flanks(
     data: ArrayView1<u8>,
     rw_off: ArrayView1<i64>,
@@ -214,7 +215,7 @@ impl RowCtx<'_> {
 /// `alt_data`/`alt_off`/`starts_v`/`ilens_v`/`v_contigs` are per *selected*
 /// variant (already gathered).
 #[allow(clippy::too_many_arguments)]
-pub fn haplotype_flanks(
+pub fn haplotype_flanks<Tok: Copy>(
     row_offsets: ArrayView1<i64>,
     v_contigs: ArrayView1<i32>,
     starts_v: ArrayView1<i32>,
@@ -225,10 +226,12 @@ pub fn haplotype_flanks(
     ref_offsets: ArrayView1<i64>,
     pad_char: u8,
     flank_len: usize,
-) -> Array1<u8> {
+    lut: &[Tok],
+) -> Array1<Tok> {
+    assert!(lut.len() >= 256, "haplotype_flanks: lut must have >= 256 entries");
     let n = starts_v.len();
     let l = flank_len;
-    let mut out = vec![0u8; n * 2 * l];
+    let mut out: Vec<Tok> = vec![lut[pad_char as usize]; n * 2 * l];
     if n == 0 || l == 0 {
         return Array1::from_vec(out);
     }
@@ -245,6 +248,9 @@ pub fn haplotype_flanks(
     // hap-buffer position of each applied variant's allele start (reused per row)
     let mut hpos: Vec<usize> = Vec::new();
     let mut buf: Vec<u8> = Vec::new();
+    // `buf` LUT-mapped once per row; flanks are copied out of it as tokens.
+    let mut tbuf: Vec<Tok> = Vec::new();
+    let mut walk_buf = vec![0u8; 2 * l];
     let mut anchor = [0u8; 1];
     for r in 0..rows.len().saturating_sub(1) {
         let (rs, re) = (rows[r] as usize, rows[r + 1] as usize);
@@ -298,6 +304,8 @@ pub fn haplotype_flanks(
             cur = var_ref_end(starts[j], ilens[j]);
         }
         push_ref_padded(&mut buf, contig, cur, l, pad_char);
+        tbuf.clear();
+        tbuf.extend(buf.iter().map(|&b| lut[b as usize]));
 
         // Slice every applied variant's flanks; walk only for shadowed ones.
         for j in rs..re {
@@ -305,10 +313,17 @@ pub fn haplotype_flanks(
             if applied[j] {
                 let p = hpos[j - rs];
                 let q = p + ctx.allele(j, &mut anchor).len();
-                f5.copy_from_slice(&buf[p - l..p]);
-                f3.copy_from_slice(&buf[q..q + l]);
+                f5.copy_from_slice(&tbuf[p - l..p]);
+                f3.copy_from_slice(&tbuf[q..q + l]);
             } else {
-                ctx.walk(j, rs, re, f5, f3);
+                let (w5, w3) = walk_buf.split_at_mut(l);
+                ctx.walk(j, rs, re, w5, w3);
+                for (d, &b) in f5.iter_mut().zip(w5.iter()) {
+                    *d = lut[b as usize];
+                }
+                for (d, &b) in f3.iter_mut().zip(w3.iter()) {
+                    *d = lut[b as usize];
+                }
             }
         }
     }
@@ -325,7 +340,7 @@ type TokBuf<Tok> = (Array1<Tok>, Array1<i64>);
 /// window fetch). Returns `(ref_window, alt_window)` as `(tokens, offsets)`.
 #[allow(clippy::too_many_arguments)]
 fn hap_windows<Tok: Copy>(
-    flanks: &[u8],
+    flanks: &[Tok],
     want_ref: bool,
     want_alt: bool,
     v_contigs: &[i32],
@@ -363,9 +378,9 @@ fn hap_windows<Tok: Copy>(
             let len = (var_ref_end(starts[i], ilens[i]) - s) as usize;
             scratch.clear();
             push_ref_padded(&mut scratch, contig_of(i), s, len, pad_char);
-            tok(&mut data, &fl[..l]);
+            data.extend_from_slice(&fl[..l]);
             tok(&mut data, &scratch);
-            tok(&mut data, &fl[l..]);
+            data.extend_from_slice(&fl[l..]);
         }
         (Array1::from_vec(data), Array1::from_vec(off))
     });
@@ -384,7 +399,7 @@ fn hap_windows<Tok: Copy>(
         for i in 0..n {
             let fl = &flanks[i * 2 * l..(i + 1) * 2 * l];
             let (a0, a1) = (alt_off[i] as usize, alt_off[i + 1] as usize);
-            tok(&mut data, &fl[..l]);
+            data.extend_from_slice(&fl[..l]);
             if a0 == a1 && ilens[i] < 0 {
                 scratch.clear();
                 push_ref_padded(&mut scratch, contig_of(i), starts[i] as i64, 1, pad_char);
@@ -392,16 +407,117 @@ fn hap_windows<Tok: Copy>(
             } else {
                 tok(&mut data, &alt[a0..a1]);
             }
-            tok(&mut data, &fl[l..]);
+            data.extend_from_slice(&fl[l..]);
         }
         (Array1::from_vec(data), Array1::from_vec(off))
     });
     (ref_w, alt_w)
 }
 
+/// Append `n` LUT-mapped reference bases starting at contig coordinate `from`.
+/// Positions outside `[0, contig.len())` get `pad_tok` (= `lut[pad_char]`), so
+/// the result equals `tokenize(copy_ref_padded(..))` without the byte buffer.
+#[inline]
+fn push_ref_tok<Tok: Copy>(
+    out: &mut Vec<Tok>,
+    contig: &[u8],
+    from: i64,
+    n: usize,
+    pad_tok: Tok,
+    lut: &[Tok],
+) {
+    let clen = contig.len() as i64;
+    let to = from + n as i64;
+    let lo = from.clamp(0, clen);
+    let hi = to.clamp(0, clen);
+    if hi <= lo {
+        out.extend(std::iter::repeat_n(pad_tok, n));
+        return;
+    }
+    out.extend(std::iter::repeat_n(pad_tok, (lo - from) as usize));
+    out.extend(contig[lo as usize..hi as usize].iter().map(|&b| lut[b as usize]));
+    out.extend(std::iter::repeat_n(pad_tok, (to - hi) as usize));
+}
+
+/// Reference flanks in the interleaved `[f5 | f3]` layout (2L per variant,
+/// variant-major), LUT-mapped while copying: `f5 = ref[start-L, start)`,
+/// `f3 = ref[end, end+L)`. One pass, no intermediate window read; the REF span
+/// between the flanks (long for big deletions) is never touched. Pass an
+/// identity LUT to get raw bytes. Equal to `fetch_windows` + `slice_flanks` +
+/// interleave + `tokenize`.
+#[allow(clippy::too_many_arguments)]
+pub fn ref_flanks<Tok: Copy>(
+    v_contigs: &[i32],
+    starts: &[i32],
+    ilens: &[i32],
+    reference: &[u8],
+    ref_offsets: &[i64],
+    pad_char: u8,
+    l: usize,
+    lut: &[Tok],
+) -> Array1<Tok> {
+    assert!(lut.len() >= 256, "ref_flanks: lut must have >= 256 entries");
+    let pad_tok = lut[pad_char as usize];
+    let n = starts.len();
+    let mut out: Vec<Tok> = Vec::with_capacity(n * 2 * l);
+    for i in 0..n {
+        let c = v_contigs[i] as usize;
+        let contig = &reference[ref_offsets[c] as usize..ref_offsets[c + 1] as usize];
+        let s = starts[i] as i64;
+        push_ref_tok(&mut out, contig, s - l as i64, l, pad_tok, lut);
+        push_ref_tok(&mut out, contig, var_ref_end(starts[i], ilens[i]), l, pad_tok, lut);
+    }
+    Array1::from_vec(out)
+}
+
+/// Tokenized reference windows `ref[start-L, end+L)` per variant, LUT-mapped
+/// while copying. Equal to `tokenize(fetch_windows(..).0)` with the same offsets.
+#[allow(clippy::too_many_arguments)]
+fn ref_window_tokens<Tok: Copy>(
+    v_contigs: &[i32],
+    starts: &[i32],
+    ilens: &[i32],
+    reference: &[u8],
+    ref_offsets: &[i64],
+    pad_char: u8,
+    l: usize,
+    lut: &[Tok],
+) -> TokBuf<Tok> {
+    assert!(lut.len() >= 256, "ref_window_tokens: lut must have >= 256 entries");
+    let pad_tok = lut[pad_char as usize];
+    let n = starts.len();
+    let mut off: Vec<i64> = Vec::with_capacity(n + 1);
+    off.push(0);
+    let mut total = 0i64;
+    for i in 0..n {
+        total += 2 * l as i64 + (var_ref_end(starts[i], ilens[i]) - starts[i] as i64);
+        off.push(total);
+    }
+    let mut out: Vec<Tok> = Vec::with_capacity(total as usize);
+    for i in 0..n {
+        let c = v_contigs[i] as usize;
+        let contig = &reference[ref_offsets[c] as usize..ref_offsets[c + 1] as usize];
+        let from = starts[i] as i64 - l as i64;
+        let len = (off[i + 1] - off[i]) as usize;
+        push_ref_tok(&mut out, contig, from, len, pad_tok, lut);
+    }
+    (Array1::from_vec(out), Array1::from_vec(off))
+}
+
+/// Identity byte LUT, for kernel calls that want raw bytes.
+#[cfg(test)]
+fn identity_lut() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    for (i, v) in t.iter_mut().enumerate() {
+        *v = i as u8;
+    }
+    t
+}
+
 /// Concatenate `flank5 . alt . flank3` per variant into a flat byte buffer.
 /// `f5`/`f3` are `(n*flank_len,)` variant-major. Mirrors numba
 /// `_assemble_alt_windows`. Returns `(out_bytes, out_offsets)`.
+#[cfg(test)] // unfused oracle for the fused kernels
 pub fn assemble_alt_window(
     f5: ArrayView1<u8>,
     f3: ArrayView1<u8>,
@@ -452,6 +568,7 @@ pub fn assemble_alt_window(
 /// Returns `None` when no variant needs re-anchoring (the common SVAR1 case), so
 /// callers keep the gathered buffers without a copy. Mirrors
 /// `_anchor_empty_del_alts` in `_dataset/_flat_flanks.py`.
+#[cfg(test)] // unfused oracle for the fused kernels
 pub fn anchor_empty_del_alts(
     alt_data: ArrayView1<u8>,
     alt_seq_off: ArrayView1<i64>,
@@ -486,6 +603,7 @@ pub fn anchor_empty_del_alts(
 /// where `rw_off` are per-variant byte boundaries (len `n+1`). Reuses
 /// `reference::get_reference`'s padded core (absolute-coordinate OOB padding).
 /// Mirrors `reference.fetch(v_contigs, starts-L, ends+L)`.
+#[cfg(test)] // unfused oracle for the fused kernels
 pub fn fetch_windows(
     v_contigs: ArrayView1<i32>,
     starts_v: ArrayView1<i32>,
@@ -496,7 +614,7 @@ pub fn fetch_windows(
     pad_char: u8,
 ) -> (Array1<u8>, Array1<i64>) {
     let n = starts_v.len();
-    let mut regions = Array2::<i32>::zeros((n, 3));
+    let mut regions = ndarray::Array2::<i32>::zeros((n, 3));
     let mut rw_off = Array1::<i64>::zeros(n + 1);
     for i in 0..n {
         let start = starts_v[i] as i64;
@@ -584,31 +702,30 @@ pub fn assemble_variants_mode<Tok: Copy>(
         let lut = lut.expect("flank tokens requested but no token LUT supplied");
         let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
         let l = flank_len as usize;
-        // [f5 | f3] per variant (2L bytes, variant-major).
-        let fb = if hap_flanks {
+        // [f5 | f3] tokens per variant (2L, variant-major).
+        let tok = if hap_flanks {
             // alt bytes are already gathered per selected variant (byte_bufs[0]);
             // no reference window fetch is needed.
             let (_, a_data, a_off) = &byte_bufs[0];
             haplotype_flanks(
                 row_offsets, v_contigs, starts_v.view(), ilens_v.view(), a_data.view(),
                 a_off.view(), reference, ref_offsets, pad_char, l,
+                lut.as_slice().expect("lut must be contiguous"),
             )
         } else {
-            let (rw_data, rw_off) = fetch_windows(
-                v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
+            // Read straight from the reference into the interleaved layout,
+            // tokenizing while copying.
+            ref_flanks(
+                v_contigs.as_slice().expect("v_contigs must be contiguous"),
+                starts_v.as_slice().unwrap(),
+                ilens_v.as_slice().unwrap(),
+                reference.as_slice().expect("reference must be contiguous"),
+                ref_offsets.as_slice().expect("ref_offsets must be contiguous"),
                 pad_char,
-            );
-            let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
-            let n = f5.len() / l;
-            let mut flank_bytes: Vec<u8> = Vec::with_capacity(n * 2 * l);
-            let (f5s, f3s) = (f5.as_slice().unwrap(), f3.as_slice().unwrap());
-            for i in 0..n {
-                flank_bytes.extend_from_slice(&f5s[i * l..(i + 1) * l]);
-                flank_bytes.extend_from_slice(&f3s[i * l..(i + 1) * l]);
-            }
-            Array1::from_vec(flank_bytes)
+                l,
+                lut.as_slice().expect("lut must be contiguous"),
+            )
         };
-        let tok = tokenize(fb.view(), lut);
         // flank_tokens offsets are the variant-level row_offsets (fixed 2L inner
         // axis carried separately Python-side as a trailing regular dim).
         tok_bufs.push(("flank_tokens", tok, row_offsets.to_owned()));
@@ -649,95 +766,70 @@ pub fn assemble_windows_mode<Tok: Copy>(
     let (alt_data, alt_seq_off) =
         crate::variants::gather_alleles(v_idxs, alt_global, alt_off_global);
 
-    // Haplotype flanks: windows are assembled straight from the per-row
-    // gap-compressed haplotype + reference REF span, tokenized while copying.
-    if hap_flanks && (ref_mode == 1 || alt_mode == 1) {
+    let (ref_w, alt_w) = if ref_mode == 1 || alt_mode == 1 {
         let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
-        let flanks = haplotype_flanks(
-            row_offsets, v_contigs, starts_v.view(), ilens_v.view(), alt_data.view(),
-            alt_seq_off.view(), reference, ref_offsets, pad_char, l,
-        );
-        let (ref_w, alt_w) = hap_windows(
-            flanks.as_slice().unwrap(),
-            ref_mode == 1,
-            alt_mode == 1,
+        let (contigs_s, starts_s, ilens_s) = (
             v_contigs.as_slice().expect("v_contigs must be contiguous"),
             starts_v.as_slice().unwrap(),
             ilens_v.as_slice().unwrap(),
-            alt_data.as_slice().unwrap(),
-            alt_seq_off.as_slice().unwrap(),
-            reference.as_slice().expect("reference must be contiguous"),
-            ref_offsets.as_slice().expect("ref_offsets must be contiguous"),
-            pad_char,
-            l,
-            lut.as_slice().expect("lut must be contiguous"),
         );
-        // ref side first (Python field insertion order), then alt side.
-        if let Some((d, o)) = ref_w {
-            tok_bufs.push(("ref_window", d, o));
-        } else if ref_mode == 2 {
-            let rg = ref_global.expect("bare ref allele needs ref byte buffer");
-            let ro = ref_off_global.expect("bare ref allele needs ref offsets");
-            let (ref_data, ref_seq_off) = crate::variants::gather_alleles(v_idxs, rg, ro);
-            tok_bufs.push(("ref", tokenize(ref_data.view(), lut), ref_seq_off));
-        }
-        if let Some((d, o)) = alt_w {
-            tok_bufs.push(("alt_window", d, o));
-        } else if alt_mode == 2 {
-            tok_bufs.push(("alt", tokenize(alt_data.view(), lut), alt_seq_off));
-        }
-        return VariantBufs { byte_bufs: Vec::new(), tok_bufs };
-    }
-
-    // One fused fetch if either side needs a window read.
-    let need_fetch = ref_mode == 1 || alt_mode == 1;
-    let (fetched, ilens_sel) = if need_fetch {
-        let (starts_v, ilens_v) = gather_starts_ilens(v_idxs, v_starts, ilens);
-        let f = fetch_windows(
-            v_contigs, starts_v.view(), ilens_v.view(), flank_len, reference, ref_offsets,
-            pad_char,
-        );
-        (Some(f), Some(ilens_v))
+        let ref_s = reference.as_slice().expect("reference must be contiguous");
+        let roff_s = ref_offsets.as_slice().expect("ref_offsets must be contiguous");
+        let lut_s = lut.as_slice().expect("lut must be contiguous");
+        // [f5 | f3] flank tokens: from the per-row haplotype, or straight from
+        // the reference. Skipped for a reference ref_window alone.
+        let flanks = if hap_flanks {
+            Some(haplotype_flanks(
+                row_offsets, v_contigs, starts_v.view(), ilens_v.view(), alt_data.view(),
+                alt_seq_off.view(), reference, ref_offsets, pad_char, l, lut_s,
+            ))
+        } else if alt_mode == 1 {
+            Some(ref_flanks(contigs_s, starts_s, ilens_s, ref_s, roff_s, pad_char, l, lut_s))
+        } else {
+            None
+        };
+        // A reference ref_window is one contiguous read of [start-L, end+L).
+        let ref_direct = (!hap_flanks && ref_mode == 1).then(|| {
+            ref_window_tokens(contigs_s, starts_s, ilens_s, ref_s, roff_s, pad_char, l, lut_s)
+        });
+        // Remaining windows: f5 . REF . f3 and/or f5 . ALT . f3, tokenized while
+        // copying (empty-ALT deletions re-anchored to ref[start]).
+        let (ref_hw, alt_hw) = match &flanks {
+            Some(fl) => hap_windows(
+                fl.as_slice().unwrap(),
+                hap_flanks && ref_mode == 1,
+                alt_mode == 1,
+                contigs_s,
+                starts_s,
+                ilens_s,
+                alt_data.as_slice().unwrap(),
+                alt_seq_off.as_slice().unwrap(),
+                ref_s,
+                roff_s,
+                pad_char,
+                l,
+                lut_s,
+            ),
+            None => (None, None),
+        };
+        (ref_direct.or(ref_hw), alt_hw)
     } else {
         (None, None)
     };
 
-    // ref side (ordered first to match Python field insertion order).
-    if ref_mode == 1 {
-        let (rw_data, rw_off) = fetched.as_ref().expect("ref window needs a fetch");
-        let tok = tokenize(rw_data.view(), lut);
-        tok_bufs.push(("ref_window", tok, rw_off.clone()));
+    // ref side first (Python field insertion order), then alt side.
+    if let Some((d, o)) = ref_w {
+        tok_bufs.push(("ref_window", d, o));
     } else if ref_mode == 2 {
         let rg = ref_global.expect("bare ref allele needs ref byte buffer");
         let ro = ref_off_global.expect("bare ref allele needs ref offsets");
         let (ref_data, ref_seq_off) = crate::variants::gather_alleles(v_idxs, rg, ro);
-        let tok = tokenize(ref_data.view(), lut);
-        tok_bufs.push(("ref", tok, ref_seq_off));
+        tok_bufs.push(("ref", tokenize(ref_data.view(), lut), ref_seq_off));
     }
-
-    // alt side.
-    if alt_mode == 1 {
-        let (rw_data, rw_off) = fetched.as_ref().expect("alt window needs a fetch");
-        let (f5, f3) = slice_flanks(rw_data.view(), rw_off.view(), l);
-        let ilens_v = ilens_sel.as_ref().expect("alt window needs gathered ilens");
-        let anchored = anchor_empty_del_alts(
-            alt_data.view(),
-            alt_seq_off.view(),
-            ilens_v.view(),
-            rw_data.view(),
-            rw_off.view(),
-            l,
-        );
-        let (a_data, a_off) = match &anchored {
-            Some((d, o)) => (d.view(), o.view()),
-            None => (alt_data.view(), alt_seq_off.view()),
-        };
-        let (alt_bytes, alt_off) = assemble_alt_window(f5.view(), f3.view(), a_data, a_off, l);
-        let tok = tokenize(alt_bytes.view(), lut);
-        tok_bufs.push(("alt_window", tok, alt_off));
+    if let Some((d, o)) = alt_w {
+        tok_bufs.push(("alt_window", d, o));
     } else if alt_mode == 2 {
-        let tok = tokenize(alt_data.view(), lut);
-        tok_bufs.push(("alt", tok, alt_seq_off));
+        tok_bufs.push(("alt", tokenize(alt_data.view(), lut), alt_seq_off));
     }
 
     VariantBufs { byte_bufs: Vec::new(), tok_bufs }
@@ -747,6 +839,156 @@ pub fn assemble_windows_mode<Tok: Copy>(
 mod tests {
     use super::*;
     use ndarray::arr1;
+
+    /// Tiny deterministic LCG (no rand dev-dependency).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    /// Random variants over two contigs (lengths 50, 30), including starts at
+    /// both contig edges, deletions running past the contig end, and empty-ALT
+    /// (SVAR2-style) pure deletions.
+    #[allow(clippy::type_complexity)]
+    fn random_case(
+        seed: u64,
+        n: usize,
+    ) -> (Array1<u8>, Array1<i64>, Vec<i32>, Vec<i32>, Vec<i32>, Vec<u8>, Vec<i64>, Vec<u8>, Vec<i64>)
+    {
+        let mut r = Lcg(seed);
+        let lens = [50usize, 30];
+        let reference: Vec<u8> = (0..80).map(|_| b"ACGTN"[r.next(5) as usize]).collect();
+        let ref_offsets = arr1(&[0i64, 50, 80]);
+        let (mut contigs, mut starts, mut ilens) = (vec![], vec![], vec![]);
+        let (mut alt, mut aoff, mut refa, mut roff) = (vec![], vec![0i64], vec![], vec![0i64]);
+        for _ in 0..n {
+            let c = r.next(2) as usize;
+            let s = match r.next(6) {
+                0 => 0,
+                1 => lens[c] as i64 - 1,
+                _ => r.next(lens[c] as u64) as i64,
+            };
+            let il = r.next(9) as i32 - 5; // -5..=3
+            contigs.push(c as i32);
+            starts.push(s as i32);
+            ilens.push(il);
+            let alen = if il < 0 && r.next(2) == 0 { 0 } else { 1 + il.max(0) as usize };
+            for _ in 0..alen {
+                alt.push(b"ACGT"[r.next(4) as usize]);
+            }
+            aoff.push(alt.len() as i64);
+            refa.push(b'A');
+            roff.push(refa.len() as i64);
+        }
+        (Array1::from_vec(reference), ref_offsets, contigs, starts, ilens, alt, aoff, refa, roff)
+    }
+
+    fn check_fused_matches_unfused<Tok: Copy + PartialEq + std::fmt::Debug>(lut: Array1<Tok>) {
+        for seed in 0..40u64 {
+            for &l in &[1usize, 4, 9] {
+                let n = 25;
+                let (reference, ref_offsets, contigs, starts, ilens, alt, aoff, refa, roff) =
+                    random_case(seed, n);
+                let (contigs, starts, ilens) =
+                    (Array1::from_vec(contigs), Array1::from_vec(starts), Array1::from_vec(ilens));
+                let (alt, aoff) = (Array1::from_vec(alt), Array1::from_vec(aoff));
+                let (refa, roff) = (Array1::from_vec(refa), Array1::from_vec(roff));
+                let v_idxs = Array1::from_vec((0..n as i32).collect());
+                let rows = arr1(&[0i64, 10, n as i64]);
+                let pad = b'N';
+
+                // Unfused oracle: fetch -> slice -> (interleave | anchor + assemble) -> tokenize.
+                let (rw, rw_off) = fetch_windows(
+                    contigs.view(), starts.view(), ilens.view(), l as i64, reference.view(),
+                    ref_offsets.view(), pad,
+                );
+                let (f5, f3) = slice_flanks(rw.view(), rw_off.view(), l);
+                let mut fb = Vec::new();
+                for i in 0..n {
+                    fb.extend_from_slice(&f5.as_slice().unwrap()[i * l..(i + 1) * l]);
+                    fb.extend_from_slice(&f3.as_slice().unwrap()[i * l..(i + 1) * l]);
+                }
+                let exp_flank = tokenize(Array1::from_vec(fb).view(), lut.view());
+                let exp_rw = tokenize(rw.view(), lut.view());
+                let anchored = anchor_empty_del_alts(
+                    alt.view(), aoff.view(), ilens.view(), rw.view(), rw_off.view(), l,
+                );
+                let (a_d, a_o) = anchored.unwrap_or_else(|| (alt.clone(), aoff.clone()));
+                let (ab, ao) = assemble_alt_window(f5.view(), f3.view(), a_d.view(), a_o.view(), l);
+                let exp_aw = tokenize(ab.view(), lut.view());
+
+                let got = assemble_variants_mode(
+                    v_idxs.view(), rows.view(), alt.view(), aoff.view(), None, None, true,
+                    l as i64, Some(lut.view()), contigs.view(), starts.view(), ilens.view(),
+                    reference.view(), ref_offsets.view(), pad, false,
+                );
+                assert_eq!(got.tok_bufs[0].1, exp_flank, "flank_tokens seed={seed} l={l}");
+
+                // Haplotype flanks: LUT applied while copying == tokenize(bytes).
+                let hap_bytes = haplotype_flanks(
+                    rows.view(), contigs.view(), starts.view(), ilens.view(), alt.view(),
+                    aoff.view(), reference.view(), ref_offsets.view(), pad, l, &identity_lut(),
+                );
+                let got = assemble_variants_mode(
+                    v_idxs.view(), rows.view(), alt.view(), aoff.view(), None, None, true,
+                    l as i64, Some(lut.view()), contigs.view(), starts.view(), ilens.view(),
+                    reference.view(), ref_offsets.view(), pad, true,
+                );
+                assert_eq!(
+                    got.tok_bufs[0].1,
+                    tokenize(hap_bytes.view(), lut.view()),
+                    "hap flank_tokens seed={seed} l={l}"
+                );
+
+                for (rm, am) in [(1i64, 1i64), (1, 2), (2, 1), (2, 2)] {
+                    let got = assemble_windows_mode(
+                        v_idxs.view(), rows.view(), rm, am, alt.view(), aoff.view(),
+                        Some(refa.view()), Some(roff.view()), l as i64, lut.view(),
+                        contigs.view(), starts.view(), ilens.view(), reference.view(),
+                        ref_offsets.view(), pad, false,
+                    );
+                    let names: Vec<_> = got.tok_bufs.iter().map(|b| b.0).collect();
+                    let want_names = [
+                        if rm == 1 { "ref_window" } else { "ref" },
+                        if am == 1 { "alt_window" } else { "alt" },
+                    ];
+                    assert_eq!(names, want_names, "seed={seed} l={l} modes=({rm},{am})");
+                    if rm == 1 {
+                        assert_eq!(got.tok_bufs[0].1, exp_rw, "ref_window seed={seed} l={l}");
+                        assert_eq!(got.tok_bufs[0].2, rw_off, "ref_window off seed={seed} l={l}");
+                    }
+                    if am == 1 {
+                        assert_eq!(got.tok_bufs[1].1, exp_aw, "alt_window seed={seed} l={l}");
+                        assert_eq!(got.tok_bufs[1].2, ao, "alt_window off seed={seed} l={l}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fused_ref_path_matches_unfused_u8() {
+        // A=0 C=1 G=2 T=3, everything else (N, pad) = 7.
+        let mut lut = vec![7u8; 256];
+        for (i, &b) in b"ACGT".iter().enumerate() {
+            lut[b as usize] = i as u8;
+        }
+        check_fused_matches_unfused(Array1::from_vec(lut));
+    }
+
+    #[test]
+    fn test_fused_ref_path_matches_unfused_i32() {
+        // Distinct token for N vs other unknown bytes, so padding mistakes show.
+        let mut lut = vec![300i32; 256];
+        for (i, &b) in b"ACGT".iter().enumerate() {
+            lut[b as usize] = i as i32;
+        }
+        lut[b'N' as usize] = 299;
+        check_fused_matches_unfused(Array1::from_vec(lut));
+    }
 
     #[test]
     fn test_tokenize_u8() {
@@ -1058,6 +1300,7 @@ mod tests {
             ref_offsets.view(),
             255,
             l,
+            &identity_lut(),
         );
         // Split the interleaved [f5 | f3] per-variant layout.
         let (mut f5, mut f3) = (Vec::new(), Vec::new());
