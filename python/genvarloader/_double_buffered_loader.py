@@ -130,6 +130,7 @@ def _build_producer_schema(ds: "Dataset") -> dict:
                 "unknown_token": window_opt.unknown_token,
                 "ref": window_opt.ref,
                 "alt": window_opt.alt,
+                "flank_source": window_opt.flank_source,
             }
         elif getattr(seqs, "flank_length", None) and seqs.token_lut is not None:
             # Plain-variants ride-along flank tokens (Config B). ``Haps``
@@ -139,6 +140,7 @@ def _build_producer_schema(ds: "Dataset") -> dict:
             schema["flank_length"] = seqs.flank_length
             schema["token_alphabet"] = seqs.token_alphabet
             schema["unknown_token"] = seqs.unknown_token
+            schema["flank_source"] = seqs.flank_source
 
         dummy_variant = getattr(seqs, "dummy_variant", None)
         if dummy_variant is not None:

@@ -305,6 +305,8 @@ class Haps(Reconstructor[_H], ABC):
     dummy_variant: "DummyVariant | None" = None
     flank_length: int | None = None
     """Number of reference flank bases on each side for flank/window tokenization. ``0``/``None`` disables."""
+    flank_source: Literal["reference", "haplotype"] = "reference"
+    """Source of ride-along ``flank_tokens`` bases: the reference, or the sample's haplotype (other ALTs in the row applied)."""
     token_lut: NDArray | None = None
     """256-entry byte->token lookup table (see ``build_token_lut``). Set together with ``token_dtype``."""
     token_dtype: np.dtype | None = None

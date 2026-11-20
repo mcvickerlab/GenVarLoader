@@ -49,6 +49,26 @@ if TORCH_AVAILABLE:
 _py_open = open
 
 
+def _check_hap_flanks(seqs: object, kind: str | None) -> None:
+    """Reject haplotype flanks under ``unphased_union`` (rows mix haplotypes, so there is no single haplotype context)."""
+    if not isinstance(seqs, Haps) or not seqs.unphased_union:
+        return
+    if kind == "variant-windows":
+        hap = (
+            seqs.window_opt is not None and seqs.window_opt.flank_source == "haplotype"
+        )
+    elif kind == "variants":
+        hap = bool(seqs.flank_length) and seqs.flank_source == "haplotype"
+    else:
+        hap = False
+    if hap:
+        raise ValueError(
+            "flank_source='haplotype' is incompatible with unphased_union: the union"
+            " row mixes haplotypes, so there is no single haplotype context. Use"
+            " flank_source='reference' or with_settings(unphased_union=False)."
+        )
+
+
 @dataclass(slots=True, frozen=True)
 class Dataset:
     """A dataset of genotypes, reference sequences, and intervals.
@@ -213,6 +233,7 @@ class Dataset:
         flank_length: int | None = None,
         token_alphabet: "str | bytes | sp.NucleotideAlphabet | None" = None,
         unknown_token: int | None = None,
+        flank_source: Literal["reference", "haplotype"] | None = None,
         dummy_variant: "DummyVariant | Literal[False] | None" = None,
         unphased_union: bool | None = None,
         realign_tracks: bool | None = None,
@@ -247,6 +268,13 @@ class Dataset:
                 in the alphabet maps to integer token ``i``. Must be supplied together with *unknown_token*.
             unknown_token: Integer token to assign to any byte not present in *token_alphabet*. Must be supplied
                 together with *token_alphabet*.
+            flank_source: Where the ride-along ``flank_tokens`` bases come from. ``"reference"`` (default)
+                uses the reference genome. ``"haplotype"`` uses the individual's haplotype: the other ALT
+                calls in the same ``(region, sample, ploid)`` row are applied, so ``flank5 . ALT . flank3``
+                is exactly the haplotype around the variant. Only variants within the queried region are
+                applied (flank bases past the region edge stay reference). Incompatible with
+                ``unphased_union``. For ``"variant-windows"`` set
+                :class:`VarWindowOpt(flank_source=...) <genvarloader.VarWindowOpt>` instead.
             dummy_variant: A :class:`DummyVariant` to insert into empty (region, sample, ploid) variant
                 groups so every group has at least one variant. Valid for the ``"variants"``
                 and ``"variant-windows"`` outputs (see
@@ -423,6 +451,18 @@ class Dataset:
                 haps = to_evolve.get("_seqs", self._seqs)
                 to_evolve["_seqs"] = replace(haps, dummy_variant=dummy_variant)
 
+        if flank_source is not None:
+            if not isinstance(self._seqs, Haps):
+                raise ValueError(
+                    "flank_source requires a dataset with genotypes (variants)."
+                )
+            if flank_source not in ("reference", "haplotype"):
+                raise ValueError(
+                    f"flank_source must be 'reference' or 'haplotype', got {flank_source!r}"
+                )
+            haps = to_evolve.get("_seqs", self._seqs)
+            to_evolve["_seqs"] = replace(haps, flank_source=flank_source)
+
         if unphased_union is not None:
             if not isinstance(self._seqs, Haps):
                 raise ValueError(
@@ -512,6 +552,8 @@ class Dataset:
                 " or 'variants', or clear the flag with"
                 " with_settings(unphased_union=False)."
             )
+
+        _check_hap_flanks(self._seqs, self.sequence_type)
 
         if self.sequence_type == "variant-windows":
             haps = self._seqs
@@ -731,6 +773,7 @@ class Dataset:
                 " or 'variants', or clear the flag with"
                 " with_settings(unphased_union=False)."
             )
+        _check_hap_flanks(new_seqs, kind)
         new_recon = _build_reconstructor(
             new_seqs, self._tracks, kind, self.realign_tracks
         )

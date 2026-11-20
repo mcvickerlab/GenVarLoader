@@ -1424,6 +1424,7 @@ class Svar2Haps(Haps[_H]):
             ref_arr,
             ref_off,
             pad_char,
+            self.flank_source == "haplotype",  # hap_flanks
         )
 
         alt_data, alt_seq_off = bufs["alt"]
@@ -1533,6 +1534,7 @@ class Svar2Haps(Haps[_H]):
                 ref_,
                 ref_offsets,
                 self.reference.pad_char,
+                opt.flank_source == "haplotype",  # hap_flanks
             )
 
             cat_row_off.append(row_off)

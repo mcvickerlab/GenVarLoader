@@ -44,6 +44,8 @@ def _apply_schema(ds, schema: dict):
         settings_kwargs["flank_length"] = schema["flank_length"]
         settings_kwargs["token_alphabet"] = schema["token_alphabet"]
         settings_kwargs["unknown_token"] = schema["unknown_token"]
+        if schema.get("flank_source") is not None:
+            settings_kwargs["flank_source"] = schema["flank_source"]
     if schema.get("dummy_variant") is not None:
         from ._dataset._flat_variants import DummyVariant
 
